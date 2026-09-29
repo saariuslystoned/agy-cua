@@ -45,8 +45,12 @@ doctor() {
   if [[ -x "$AGY" ]]; then
     if [[ -e "$HOME/.gemini/config/plugins/agy-cua" ]]; then ok "agy-cua plugin installed"
     else warn "agy-cua plugin not installed (run: agy-cua install)"; fi
-    if "$AGY" mcp list 2>/dev/null | awk 'NR>1 && $3=="enabled" {print $1}' | grep -qx 'cua-driver'; then
+    ENABLED="$("$AGY" mcp list 2>/dev/null | awk 'NR>1 && $3=="enabled" {print $1}')"
+    if grep -qx 'cua-driver' <<<"$ENABLED"; then
       warn "a separate global 'cua-driver' MCP server is enabled; the agent will see Cua's tools twice"
+    fi
+    if grep -qx 'computer-use' <<<"$ENABLED"; then
+      warn "another 'computer-use' MCP server is enabled (e.g. agy-computer-use); it competes with agy-cua"
     fi
   fi
   return "$FAILED"

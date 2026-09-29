@@ -29,7 +29,9 @@ or bringing that app to the front, so the user can keep working while you act.
 
 ## How Antigravity hands you results
 
-- Call these tools through `call_mcp_tool` with `ServerName: "agy-cua"`.
+- Call these tools through `call_mcp_tool`. The server is `agy-cua` in a
+  workspace config and `agy-cua_agy-cua` when installed as a plugin; use
+  whichever one your tool list shows.
 - Large results, such as window trees and screenshots, are saved to a file in
   Antigravity's conversation `brain` directory (the CLI uses
   `~/.gemini/antigravity-cli/brain/…/.system_generated/steps/<n>/`), and you

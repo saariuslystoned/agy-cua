@@ -3,14 +3,20 @@
 # drive Calculator in the background, then a separate MCP connection reads the
 # display back. Writes runs/qualify-<UTC>/ (gitignored). Exit 0 only on PASS.
 #
-#   scripts/qualify-calculator.sh [--model MODEL] [--timeout 6m]
+#   scripts/qualify-calculator.sh [--installed] [--model MODEL] [--timeout 6m]
+#
+# By default the skill and MCP config come from this checkout via a workspace
+# .agents/ dir. --installed uses an empty workspace, so only the installed
+# plugin (~/.gemini/config/plugins/agy-cua) can provide them.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODEL="gemini-3.8-flash-high"
 TIMEOUT="6m"
+INSTALLED=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --installed) INSTALLED=1; shift ;;
     --model) MODEL="$2"; shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -21,10 +27,15 @@ AGY="$(command -v agy || echo "$HOME/.local/bin/agy")"
 
 OUT="$ROOT/runs/qualify-$(date -u +%Y%m%dT%H%M%SZ)"
 WS="$OUT/workspace"
-mkdir -p "$WS/.agents/skills"
-jq --arg home "$ROOT" '.mcpServers["agy-cua"].env = {AGY_CUA_HOME: $home}' \
-  "$ROOT/mcp_config.json" > "$WS/.agents/mcp_config.json"   # use this checkout's shim
-cp -R "$ROOT/skills/cua-computer-use" "$WS/.agents/skills/"
+mkdir -p "$WS"
+if [[ "$INSTALLED" == 1 ]]; then
+  [[ -d "$HOME/.gemini/config/plugins/agy-cua" ]] || { echo "agy-cua plugin not installed" >&2; exit 2; }
+else
+  mkdir -p "$WS/.agents/skills"
+  jq --arg home "$ROOT" '.mcpServers["agy-cua"].env = {AGY_CUA_HOME: $home}' \
+    "$ROOT/mcp_config.json" > "$WS/.agents/mcp_config.json"   # use this checkout's shim
+  cp -R "$ROOT/skills/cua-computer-use" "$WS/.agents/skills/"
+fi
 
 A=$((RANDOM % 87 + 12)); B=$((RANDOM % 87 + 12)); EXPECTED=$((A * B))
 cat > "$OUT/prompt.txt" <<EOF
@@ -63,6 +74,7 @@ calc_front = sum(1 for line in open(f"{out}/focus-trace.jsonl")
                  if json.loads(line).get("front_bundle") == "com.apple.calculator")
 skill_read = any("SKILL.md" in r[4] for r in rows)
 result = {
+    "source": "installed-plugin" if "/plugins/agy-cua/" in open(f"{out}/tool-calls.tsv").read() else "workspace",
     "model": model, "agy_exit": int(agy_exit), "duration_s": int(duration),
     "expected": expected, "display": display, "display_matches": display.replace(",", "") == expected,
     "tool_calls": len(rows), "errors": sum(1 for r in rows if r[1] == "ERROR"),
@@ -70,7 +82,8 @@ result = {
     "calculator_frontmost_samples": calc_front,
 }
 result["verdict"] = "PASS" if (result["display_matches"] and result["agy_exit"] == 0
-                                and servers == ["agy-cua"]) else "FAIL"
+                                and len(servers) == 1
+                                and (servers[0] == "agy-cua" or servers[0].endswith("_agy-cua"))) else "FAIL"
 json.dump(result, open(f"{out}/result.json", "w"), indent=2)
 print(json.dumps(result, indent=2))
 sys.exit(0 if result["verdict"] == "PASS" else 1)
