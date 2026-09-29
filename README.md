@@ -30,6 +30,9 @@ a separate connection:
 Not qualified yet: the Antigravity app (IDE) surface, `type_text` /
 `press_key` / `hotkey`, apps other than Calculator, Windows and Linux.
 
+The [latency pilot](docs/latency-pilot.md) compares fresh and resumed CLI
+conversations and documents the skill's filtered-observation path and its limits.
+
 ## How it works
 
 ```text
@@ -98,13 +101,19 @@ python3 -m unittest discover tests
 
 `qualify` runs `agy -p --dangerously-skip-permissions --sandbox` inside a
 throwaway workspace. It passes only if the display matches the expected
-product and the agent used only the `agy-cua` server.
+product, the agent used only the `agy-cua` server, the stream completed without
+tool/parse errors, and focus samples show Calculator stayed in the background.
+Missing foreground identities or an empty focus trace fail qualification.
 
 ## Privacy
 
 Proof runs record the frontmost app name and cursor position every 0.5 s, and
 Antigravity keeps the tool outputs it was shown in its own conversation
-directory. `runs/` is gitignored; review it before sharing.
+directory. The qualification harness saves tool names, states, server identity,
+and usage counters in `metadata.json`; it does not copy raw AGY turns, tool
+arguments/results, or the agent's final prose. AGY stderr is discarded; its exit
+code and terminal stream status are retained, so a failed run may require a
+separate bounded diagnosis. `runs/` is gitignored; review it before sharing.
 
 ## Related
 
