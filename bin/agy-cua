@@ -55,7 +55,13 @@ doctor() {
 case "${1:-}" in
   doctor) doctor ;;
   install)
-    "$AGY" plugin validate "$ROOT" && "$AGY" plugin install "$ROOT" \
+    # Install committed files only, so local runs/ proof and .git stay out of the plugin.
+    SRC="$ROOT"
+    if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+      SRC="$(mktemp -d)/agy-cua"; mkdir -p "$SRC"
+      git -C "$ROOT" archive HEAD | tar -x -C "$SRC"
+    fi
+    "$AGY" plugin validate "$SRC" && "$AGY" plugin install "$SRC" \
       && echo "Installed. Restart Antigravity (app and any running agy sessions) to load it."
     ;;
   qualify) shift; exec "$ROOT/scripts/qualify-calculator.sh" "$@" ;;
