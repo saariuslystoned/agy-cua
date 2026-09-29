@@ -25,6 +25,7 @@ a separate connection:
 | 81 × 63 | PASS, 5,103 | 87 s | 15 | never |
 | 17 × 17 | PASS, 289 | 117 s | 18 | never |
 | 86 × 37 | PASS, 3,182 | 110 s | 18 | never |
+| 42 × 35, installed plugin (`qualify --installed`) | PASS, 1,470 | 80 s | 16 | never |
 
 Not qualified yet: the Antigravity app (IDE) surface, `type_text` /
 `press_key` / `hotkey`, apps other than Calculator, Windows and Linux.
@@ -72,9 +73,12 @@ Antigravity (app or agy) --stdio MCP--> bin/agy-cua-mcp --> cua-driver mcp --> C
    bin/agy-cua install
    ```
 
-   The plugin passes `agy plugin validate` (1 skill, 1 MCP server). So far the
-   qualification loads the same skill and MCP config from a workspace; it
-   doesn't install the plugin.
+   `install` copies only committed files into
+   `~/.gemini/config/plugins/agy-cua`. Antigravity exposes the plugin's MCP
+   server as `agy-cua_agy-cua`. If you used
+   [agy-computer-use](https://github.com/saariuslystoned/agy-computer-use),
+   remove its `computer-use` server (`agy mcp remove computer-use`) and its
+   skill so they don't compete; `doctor` warns about it.
 
 4. Ask Antigravity something like: *"Use the cua-computer-use skill to open
    Calculator and compute 12 × 34."*
@@ -87,7 +91,8 @@ Antigravity (app or agy) --stdio MCP--> bin/agy-cua-mcp --> cua-driver mcp --> C
 ## Verify on your machine
 
 ```bash
-bin/agy-cua qualify            # headless agy run; proof lands in runs/qualify-<UTC>/
+bin/agy-cua qualify            # headless agy run from this checkout; proof in runs/qualify-<UTC>/
+bin/agy-cua qualify --installed   # same check against the installed plugin
 python3 -m unittest discover tests
 ```
 
