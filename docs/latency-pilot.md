@@ -116,3 +116,20 @@ qualification: observed 4,320 matched the expected product in 70 seconds,
 16 tool calls, zero tool/stream errors, only the assigned server, and 112
 identified focus samples with no Calculator-foreground samples. This is a
 qualification result, not another controlled before/after pair.
+
+## Refusal and recovery control
+
+On the same owned TextEdit document, a raw public-MCP probe obtained two
+successive snapshots, then submitted a write using the superseded snapshot.
+Driver 0.30.4 refused it in approximately 1 ms with
+`element_token is stale; call get_window_state again to refresh`. A fresh
+independent connection confirmed that the document had not changed. The probe
+then obtained a fresh snapshot and changed only Status from reviewed to
+validated; the driver reported confirmed accessibility/background delivery,
+and an independent read plus window image verified the result. All twelve
+focus samples identified a foreground app other than TextEdit.
+
+This tests explicit snapshot supersession and recovery on a native text field.
+It does not test model recovery, same-label target replacement without a new
+snapshot, operator intervention between sampling intervals, or `batch_actions`.
+The expected refusal is a passing negative control, not an ignored task failure.
