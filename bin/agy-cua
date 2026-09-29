@@ -1,0 +1,63 @@
+#!/bin/bash
+# agy-cua: set up and check Cua Driver computer use for Google Antigravity.
+#
+#   agy-cua doctor              read-only readiness report
+#   agy-cua install             validate, then install this repo as an Antigravity plugin
+#   agy-cua qualify [args...]   run the headless Calculator end-to-end check
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+AGY="$(command -v agy || echo "$HOME/.local/bin/agy")"
+
+find_driver() {
+  for c in "${AGY_CUA_DRIVER:-}" "$HOME/.local/bin/cua-driver" /Applications/CuaDriver.app/Contents/MacOS/cua-driver; do
+    if [[ -n "$c" && -x "$c" ]]; then echo "$c"; return 0; fi
+  done
+  return 1
+}
+
+ok()   { printf '  ok    %s\n' "$*"; }
+warn() { printf '  warn  %s\n' "$*"; }
+fail() { printf '  FAIL  %s\n' "$*"; FAILED=1; }
+
+doctor() {
+  FAILED=0
+  echo "agy-cua doctor"
+  if [[ "$(uname -s)" == "Darwin" ]]; then ok "macOS $(sw_vers -productVersion)"
+  else warn "only macOS is qualified so far; Cua Driver also supports Windows and Linux"; fi
+
+  if [[ -x "$AGY" ]]; then ok "Antigravity CLI $("$AGY" --version 2>/dev/null | head -1)"
+  else fail "Antigravity CLI (agy) not found"; fi
+
+  if DRIVER="$(find_driver)"; then
+    ok "cua-driver $("$DRIVER" --version 2>/dev/null | awk '{print $2}') at $DRIVER"
+    PERMS="$("$DRIVER" permissions status --json 2>/dev/null)"
+    if [[ "$(jq -r '.accessibility' <<<"$PERMS" 2>/dev/null)" == "true" \
+       && "$(jq -r '.screen_recording' <<<"$PERMS" 2>/dev/null)" == "true" ]]; then
+      ok "Accessibility and Screen Recording granted to com.trycua.driver"
+    else
+      fail "permissions not confirmed; start the daemon and grant: open -n -g -a CuaDriver --args serve && cua-driver permissions grant"
+    fi
+  else
+    fail "cua-driver not found; install Cua Driver: curl -fsSL https://cua.ai/driver/install.sh | bash"
+  fi
+
+  if [[ -x "$AGY" ]]; then
+    if [[ -e "$HOME/.gemini/config/plugins/agy-cua" ]]; then ok "agy-cua plugin installed"
+    else warn "agy-cua plugin not installed (run: agy-cua install)"; fi
+    if "$AGY" mcp list 2>/dev/null | awk 'NR>1 && $3=="enabled" {print $1}' | grep -qx 'cua-driver'; then
+      warn "a separate global 'cua-driver' MCP server is enabled; the agent will see Cua's tools twice"
+    fi
+  fi
+  return "$FAILED"
+}
+
+case "${1:-}" in
+  doctor) doctor ;;
+  install)
+    "$AGY" plugin validate "$ROOT" && "$AGY" plugin install "$ROOT" \
+      && echo "Installed. Restart Antigravity (app and any running agy sessions) to load it."
+    ;;
+  qualify) shift; exec "$ROOT/scripts/qualify-calculator.sh" "$@" ;;
+  *) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

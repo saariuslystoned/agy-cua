@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Stdio MCP shim between Antigravity and `cua-driver mcp`.
+
+Antigravity shows the model only the text part of a tool result, but
+cua-driver returns `snapshot_id` only in `structuredContent`
+(https://github.com/trycua/cua/issues/4346). Without it, element-addressed
+clicks are refused with `snapshot_id_required`. This shim copies
+`snapshot_id` into the first text block of `get_window_state` results and
+passes every other message through unchanged. Remove it once #4346 ships.
+"""
+import json
+import os
+import signal
+import subprocess
+import sys
+import threading
+
+SNAPSHOT_TOOLS = {"get_window_state"}
+DRIVER_CANDIDATES = [
+    os.environ.get("AGY_CUA_DRIVER", ""),
+    os.path.expanduser("~/.local/bin/cua-driver"),
+    "/Applications/CuaDriver.app/Contents/MacOS/cua-driver",
+]
+
+
+def driver_path():
+    for candidate in DRIVER_CANDIDATES:
+        if candidate and os.access(candidate, os.X_OK):
+            return candidate
+    sys.stderr.write("agy-cua: cua-driver not found; run `agy-cua doctor`\n")
+    sys.exit(127)
+
+
+def annotate(message, pending):
+    """Add the snapshot_id line to a get_window_state result, if this is one."""
+    request_id = message.get("id")
+    if request_id is None or pending.pop(request_id, None) is None:
+        return message
+    result = message.get("result")
+    if not isinstance(result, dict):
+        return message
+    snapshot_id = (result.get("structuredContent") or {}).get("snapshot_id")
+    if not snapshot_id:
+        return message
+    note = (f"snapshot_id={snapshot_id} (agy-cua: pass snapshot_id with element_index "
+            f"to click, type_text, set_value, press_key)\n")
+    for content in result.get("content") or []:
+        if content.get("type") == "text":
+            content["text"] = note + content.get("text", "")
+            break
+    else:
+        result.setdefault("content", []).insert(0, {"type": "text", "text": note})
+    return message
+
+
+def main():
+    child = subprocess.Popen([driver_path(), "mcp", *sys.argv[1:]],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
+    pending = {}
+    lock = threading.Lock()
+
+    def client_to_driver():
+        for line in sys.stdin.buffer:
+            try:
+                message = json.loads(line)
+                if (isinstance(message, dict) and message.get("method") == "tools/call"
+                        and (message.get("params") or {}).get("name") in SNAPSHOT_TOOLS):
+                    with lock:
+                        pending[message.get("id")] = True
+            except ValueError:
+                pass
+            child.stdin.write(line)
+            child.stdin.flush()
+        child.stdin.close()
+
+    threading.Thread(target=client_to_driver, daemon=True).start()
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, lambda *_: child.terminate())
+
+    for line in child.stdout:
+        out = line
+        try:
+            message = json.loads(line)
+            if isinstance(message, dict) and "method" not in message:
+                with lock:
+                    is_snapshot = message.get("id") in pending
+                    if is_snapshot:
+                        message = annotate(message, pending)
+                if is_snapshot:
+                    out = (json.dumps(message, ensure_ascii=False) + "\n").encode()
+        except ValueError:
+            pass
+        sys.stdout.buffer.write(out)
+        sys.stdout.buffer.flush()
+    sys.exit(child.wait())
+
+
+if __name__ == "__main__":
+    main()

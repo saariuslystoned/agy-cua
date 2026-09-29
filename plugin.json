@@ -1,0 +1,13 @@
+{
+  "name": "agy-cua",
+  "displayName": "agy-cua: computer use for Antigravity",
+  "version": "0.1.0",
+  "description": "Background computer use for Google Antigravity (app and agy CLI) through the open-source Cua Driver MCP server. Uses ordinary tool calls, not a paid computer-use API.",
+  "author": {
+    "name": "Bobby Bones",
+    "url": "https://github.com/saariuslystoned"
+  },
+  "repository": "https://github.com/saariuslystoned/agy-cua",
+  "license": "MIT",
+  "keywords": ["antigravity", "computer-use", "cua", "cua-driver", "mcp", "macos"]
+}
