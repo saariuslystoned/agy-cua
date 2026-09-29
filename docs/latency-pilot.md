@@ -108,8 +108,9 @@ The strongest demonstrated direction is smaller observations and fewer model
 round trips while retaining independent verification. Lower reasoning effort
 is unqualified here. Caller-side sequential orchestration evidence is posted
 on [upstream #2794](https://github.com/trycua/cua/issues/2794#issuecomment-5895190857).
-The separately built #4308 cursor candidate is not live-qualified; no cursor
-speedup is claimed. Driver waits and freshness checks remain unchanged.
+The later #4308 cursor comparison is recorded below; its driver-level results
+are separate from these AGY measurements. Driver waits and freshness checks
+remain unchanged.
 
 The discovery clarification also passed the repository's randomized
 qualification: observed 4,320 matched the expected product in 70 seconds,
@@ -133,3 +134,55 @@ This tests explicit snapshot supersession and recovery on a native text field.
 It does not test model recovery, same-label target replacement without a new
 snapshot, operator intervention between sampling intervals, or `batch_actions`.
 The expected refusal is a passing negative control, not an ignored task failure.
+
+## Upstream cursor candidate: native Mac evidence
+
+Released Driver 0.30.4 was compared with upstream #4308 at exact source
+`e923309280ee4961e79baa195c2c910ed8dfb453`, built as a separate local app.
+The source build reports 0.30.3; the SHA identifies the tested candidate.
+These are release-versus-PR binaries, not identically packaged builds.
+
+| Window / cursor setting | Release median click | Candidate median click | Clicks per binary |
+| --- | ---: | ---: | ---: |
+| Primary / default | 2.264 s | 2.282 s | 6 |
+| Primary / runtime disabled | 2.285 s | 1.137 s | 6 |
+| Negative-coordinate display / default | 3.815 s | 2.279 s | 3 |
+| Negative-coordinate display / runtime disabled | 3.784 s | 1.150 s | 3 |
+
+Each trial used a named MCP session and three already-observed Calculator
+buttons, 7, 8, 9. Timing covers individual MCP clicks and excludes configuration,
+reset, observations, and independent verification. Runtime disable used the
+public session cursor setting; automatic motion remained the default. Primary
+conditions were repeated in reversed mode order and binary order was
+release/candidate/candidate/release. Negative-coordinate cases ran only once
+per condition, release first. Load was uncontrolled.
+
+All twelve trials and 36 actions passed independent display verification and
+background accessibility receipt checks. All six window restorations were
+verified. Window-only images were checked, and none of 195 identified focus
+samples showed Calculator foreground. Sampling can miss brief transitions.
+No driver wait, target freshness, or permission protection was weakened.
+Earlier incomplete release probes remain recorded: one fixture-label stop and
+one missing capture/failed automatic restoration, followed by a separately
+verified restoration. Their causes were not isolated.
+
+This demonstrates a driver-level latency improvement when the candidate honors
+runtime cursor disable, plus an improvement on this negative-coordinate display.
+It does not prove the visual cursor trajectory or combined AGY whole-task gain.
+The installed driver was not replaced and no upstream patch was copied downstream.
+
+## Consolidation recommendation
+
+Use CUA as the maintained driver and keep AGY integration thin. Retain Gemini
+3.8 Flash High as the verified default, carry forward the scoped-discovery and
+observation guidance, and use resumed context when appropriate while refreshing
+all UI handles. Low reasoning remains unqualified in this pilot. Within-25%
+Astra parity has not been demonstrated.
+
+The strongest contribution niche is macOS background execution performance
+with discriminating correctness evidence: bounded sequential actions, target
+freshness/refusal, operator intervention, and multi-display cursor behavior.
+The existing [#2794 batching proposal](https://github.com/trycua/cua/issues/2794#issuecomment-5895190857) and [#4308 cursor fix](https://github.com/trycua/cua/pull/4308#issuecomment-5895841986) are concrete places
+to contribute, rather than a second driver or permanent downstream fork.
+A future upstream release containing #4308 may reduce action time; combining
+that with fewer model round trips still needs an end-to-end AGY measurement.
