@@ -13,6 +13,11 @@ or bringing that app to the front, so the user can keep working while you act.
 ## Ground rules
 
 - Act only on apps the user named. Leave every other window alone.
+  For a named app with a known bundle ID, discover its process and windows with
+  `launch_app` first, even when it is already running; it does not activate the
+  app. Do not use `list_apps` or an unfiltered `list_windows` as a shortcut.
+  If you do not know the bundle ID, ask for the target or use an explicitly
+  authorized scoped lookup; do not inventory unrelated apps or windows.
 - Keep the user's frontmost app in front. Start apps with `launch_app`, which
   launches in the background. Do not call `bring_to_front` unless the user asks.
 - Do not capture the whole desktop (`get_desktop_state`) unless the user asks.
@@ -41,6 +46,10 @@ or bringing that app to the front, so the user can keep working while you act.
   you ([trycua/cua#4346](https://github.com/trycua/cua/issues/4346)), so
   agy-cua adds a first line to every `get_window_state` result:
   `snapshot_id=<id>`. Use it as described below.
+- Within one conversation, reuse tool schemas and skill instructions you have
+  already read. Open a saved result only when its contents are needed; do not
+  repeatedly read the same unchanged schema. A resumed conversation still needs
+  a fresh window snapshot: old element handles are not durable locators.
 
 ## The loop
 
@@ -52,6 +61,17 @@ or bringing that app to the front, so the user can keep working while you act.
    `include_screenshot: false` for the element tree. Open the saved result with
    `view_file` if it was saved to a file. Include a screenshot only when you
    need to see the window or click by pixel.
+   - When the task's relevant role or a previously observed label is known,
+     add `query` to return matching lines and their ancestors. It is a
+     case-insensitive substring filter, not a selector language; indices keep
+     their original values. This reduces returned content, not the AX walk.
+     For Calculator's button workflow, `query: "AXButton"` selects its controls;
+     verify the display afterward with `query: "AXStaticText"`.
+   - If the query omits needed context, broaden it or omit it. A missing match
+     does not prove the control or value is absent. Never query for the expected
+     answer as a substitute for reading the actual value. Treat truncated or
+     incomplete trees as partial; do not add arbitrary depth/node caps that
+     could hide the target.
 3. **Act.** Prefer elements over pixels: element actions are exact
    accessibility presses and need no screenshot.
    - Click an element with `click` and `{pid, window_id, snapshot_id,
@@ -61,6 +81,12 @@ or bringing that app to the front, so the user can keep working while you act.
      valid until your next `get_window_state` for that window. After a click
      that changes the window's layout (a dialog, sheet, new list, or tab),
      take a new snapshot before the next element action.
+     For a stable, already-observed control sequence, execute the known actions
+     in order without unnecessary full-tree reads between them, then verify the
+     result. Do not issue dependent actions concurrently. Use a batch only if
+     the available tool explicitly supports ordered, fail-fast execution;
+     otherwise keep sequential calls. Stop on an uncertain action outcome and
+     inspect fresh state before deciding what remains to do; do not replay it.
    - Never pass `element_index` without `snapshot_id` (refused with
      `snapshot_id_required`), and never invent `snapshot_id` or
      `element_token` values.
@@ -79,5 +105,5 @@ or bringing that app to the front, so the user can keep working while you act.
 
 ## Final answer
 
-State the result, the tools you called in order, and every refusal with its
-exact error text.
+State the observed result concisely and report every refusal with its exact
+error text. Include a full tool sequence only when the user requests an audit.

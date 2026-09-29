@@ -48,40 +48,44 @@ SAMPLER=$!
 START=$(date +%s)
 ( cd "$WS" && "$AGY" -p "$(cat "$OUT/prompt.txt")" --model "$MODEL" \
     --dangerously-skip-permissions --sandbox --output-format stream-json \
-    --print-timeout "$TIMEOUT" > "$OUT/agy.jsonl" 2> "$OUT/agy.stderr" )
-AGY_EXIT=$?
+    --print-timeout "$TIMEOUT" 2>/dev/null ) \
+  | python3 "$ROOT/scripts/stream-metadata.py" > "$OUT/metadata.json"
+PIPE_EXITS=("${PIPESTATUS[@]}")
+AGY_EXIT=${PIPE_EXITS[0]}
+METADATA_EXIT=${PIPE_EXITS[1]}
 DURATION=$(( $(date +%s) - START ))
 kill "$SAMPLER" 2>/dev/null; wait "$SAMPLER" 2>/dev/null
 "$ROOT/scripts/probe-focus.sh" > "$OUT/focus-after.json"
-
-jq -r 'select(.event=="step_update" and .step_update.step_type=="tool" and (.step_update.state=="DONE" or .step_update.state=="ERROR"))
-  | .step_update | [.step_index, .state, (.tool_info.parameters.ServerName // "-"),
-    (.tool_info.parameters.ToolName // .tool_name), (.tool_info.parameters.Arguments // .tool_info.parameters // {} | tojson | .[0:160]),
-    ((.tool_info.error.message // .tool_info.output // "") | tostring | gsub("\n"; " ") | .[0:200])] | @tsv' \
-  "$OUT/agy.jsonl" > "$OUT/tool-calls.tsv"
-jq -r 'select(.event=="result") | .result.response // ""' "$OUT/agy.jsonl" > "$OUT/agent-answer.md"
 
 python3 "$ROOT/scripts/raw_mcp.py" window-state Calculator --png "$OUT/calculator-window.png" \
   > "$OUT/readback.json" 2> "$OUT/readback.stderr"
 DISPLAY_VALUE="$(jq -r '.static_texts[-1] // ""' "$OUT/readback.json" 2>/dev/null)"
 
-python3 - "$OUT" "$EXPECTED" "$DISPLAY_VALUE" "$AGY_EXIT" "$DURATION" "$MODEL" <<'PY'
-import csv, json, sys
-out, expected, display, agy_exit, duration, model = sys.argv[1:]
-rows = list(csv.reader(open(f"{out}/tool-calls.tsv"), delimiter="\t", quoting=csv.QUOTE_NONE))
-servers = sorted({r[2] for r in rows if r[2] != "-"})
-calc_front = sum(1 for line in open(f"{out}/focus-trace.jsonl")
-                 if json.loads(line).get("front_bundle") == "com.apple.calculator")
-skill_read = any("SKILL.md" in r[4] for r in rows)
+python3 - "$OUT" "$EXPECTED" "$DISPLAY_VALUE" "$AGY_EXIT" "$DURATION" "$MODEL" "$METADATA_EXIT" "$INSTALLED" <<'PY'
+import json, sys
+out, expected, display, agy_exit, duration, model, metadata_exit, installed = sys.argv[1:]
+metadata = json.load(open(f"{out}/metadata.json"))
+rows = metadata['tools']
+servers = sorted({r['server'] for r in rows if r.get('server')})
+focus = [json.loads(line) for line in open(f"{out}/focus-trace.jsonl")]
+calc_front = sum(r.get('front_bundle') == 'com.apple.calculator' for r in focus)
+unknown_focus = sum(not r.get('front_bundle') for r in focus)
 result = {
-    "source": "installed-plugin" if "/plugins/agy-cua/" in open(f"{out}/tool-calls.tsv").read() else "workspace",
+    "source": "installed-plugin" if installed == '1' else "workspace",
     "model": model, "agy_exit": int(agy_exit), "duration_s": int(duration),
     "expected": expected, "display": display, "display_matches": display.replace(",", "") == expected,
-    "tool_calls": len(rows), "errors": sum(1 for r in rows if r[1] == "ERROR"),
-    "mcp_servers_used": servers, "skill_file_read": skill_read,
+    "tool_calls": len(rows), "errors": sum(r['state'] == 'ERROR' for r in rows),
+    "mcp_servers_used": servers, "skill_file_read": metadata['skill_file_read'],
+    "result_seen": metadata['result_seen'], "stream_parse_errors": metadata['parse_errors'],
+    "token_usage": metadata['token_usage'], "final_status": metadata['final_status'],
+    "focus_samples": len(focus), "unidentified_focus_samples": unknown_focus,
     "calculator_frontmost_samples": calc_front,
 }
 result["verdict"] = "PASS" if (result["display_matches"] and result["agy_exit"] == 0
+                                and int(metadata_exit) == 0 and result['result_seen']
+                                and result['final_status'] == 'SUCCESS'
+                                and not result['stream_parse_errors'] and not result['errors']
+                                and focus and not calc_front and not unknown_focus
                                 and len(servers) == 1
                                 and (servers[0] == "agy-cua" or servers[0].endswith("_agy-cua"))) else "FAIL"
 json.dump(result, open(f"{out}/result.json", "w"), indent=2)
