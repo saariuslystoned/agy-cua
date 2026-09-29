@@ -13,6 +13,11 @@ or bringing that app to the front, so the user can keep working while you act.
 ## Ground rules
 
 - Act only on apps the user named. Leave every other window alone.
+  For a named app with a known bundle ID, discover its process and windows with
+  `launch_app` first, even when it is already running; it does not activate the
+  app. Do not use `list_apps` or an unfiltered `list_windows` as a shortcut.
+  If you do not know the bundle ID, ask for the target or use an explicitly
+  authorized scoped lookup; do not inventory unrelated apps or windows.
 - Keep the user's frontmost app in front. Start apps with `launch_app`, which
   launches in the background. Do not call `bring_to_front` unless the user asks.
 - Do not capture the whole desktop (`get_desktop_state`) unless the user asks.

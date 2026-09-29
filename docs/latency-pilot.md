@@ -60,3 +60,59 @@ revised skill: independently observed 1,769, matching the randomized expected
 product; 79 seconds, 16 tool calls, zero tool/stream errors, only the assigned
 agy-cua server, and 123 identified focus samples with zero Calculator-foreground
 samples. The separate metadata collector retained no raw AGY turns.
+
+## Overhead and held-out checks
+
+Summing measured MCP calls in the two revised fresh Calculator runs accounts
+for 17.7 and 16.4 seconds of their 75.8 and 86.5 second totals. The residual
+58.1 and 70.1 seconds includes model work, harness work, startup, and context
+reads; it is not a measurement of inference alone. Baseline driver time was
+similar. Two held-out High-profile problems, 39 × 26 and 57 × 18, also passed
+at 86.2 and 84.0 seconds, with independently verified window images.
+
+The CLI rejects `--model gemini-3.8-flash-high --effort low` as conflicting
+settings. Two such attempts failed before model/tool execution; they are not
+latency successes. Testing the separately advertised `gemini-3.8-flash-low`
+profile produced correct arithmetic in 73.4 and 50.0 seconds, but the first
+used broad app discovery and the second's initial window-discovery scope was
+not retained by the original metadata collector. Neither is accepted as a
+qualified optimization. The default remains High. High/Low condition order
+was reversed across the two problems; the skill and driver were unchanged.
+
+A TextEdit pilot changed a scratch document's Status field and increased its
+Quantity, preserving the other visible text. The first High-profile attempt
+performed the edit correctly in 78.0 seconds through confirmed background AX
+`set_value`, but used broad app discovery and failed the named-app scope audit.
+The follow-up skill clarification requires `launch_app` for a known bundle ID
+and explicitly forbids broad discovery as a shortcut.
+
+A fresh document variant passed with that clarification in 43.7 seconds:
+five MCP calls, twelve model tool steps, zero tool/stream errors, and 69
+identified foreground samples with no TextEdit-foreground sample. An independent
+AX read and a window-only image verified both changed fields and the preserved
+visible text. The receipt confirmed accessibility/background delivery; all
+window observations and the write matched the owned process and window.
+Different document contents, uncontrolled load, and one pair prevent attributing
+the entire time difference to the instruction change. This is evidence for a
+bounded text-editing workflow, not general TextEdit or desktop coverage. AX
+omits the fixture's final newline, so the oracle compares the observed AX value,
+not byte-for-byte file serialization. Documents were not saved or closed.
+
+Two fixture-only stops were retained: Calculator's Clear/All Clear label and
+TextEdit's AX newline representation. Both were corrected before model actions;
+no mutations were replayed to obtain a passing screenshot. The later TextEdit
+collector retains target-match booleans and delivery enums, without arguments,
+document text, or raw model turns in its timing log.
+
+The strongest demonstrated direction is smaller observations and fewer model
+round trips while retaining independent verification. Lower reasoning effort
+is unqualified here. Caller-side sequential orchestration evidence is posted
+on [upstream #2794](https://github.com/trycua/cua/issues/2794#issuecomment-5895190857).
+The separately built #4308 cursor candidate is not live-qualified; no cursor
+speedup is claimed. Driver waits and freshness checks remain unchanged.
+
+The discovery clarification also passed the repository's randomized
+qualification: observed 4,320 matched the expected product in 70 seconds,
+16 tool calls, zero tool/stream errors, only the assigned server, and 112
+identified focus samples with no Calculator-foreground samples. This is a
+qualification result, not another controlled before/after pair.
