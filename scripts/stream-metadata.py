@@ -55,6 +55,11 @@ def _extract_sanitized_jev_entry(raw_output):
     entry = {
         "schema": parsed_obj.get("schema"),
         "status": parsed_obj.get("status") if isinstance(parsed_obj.get("status"), str) else None,
+        "verification_outcome": (
+            parsed_obj.get("verification_outcome")
+            if isinstance(parsed_obj.get("verification_outcome"), str)
+            else None
+        ),
         "verified": parsed_obj.get("verified") if isinstance(parsed_obj.get("verified"), bool) else None,
         "returned_model": (
             parsed_obj.get("returned_model")

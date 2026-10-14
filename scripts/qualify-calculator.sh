@@ -48,7 +48,7 @@ fi
 A=$((RANDOM % 87 + 12)); B=$((RANDOM % 87 + 12)); EXPECTED=$((A * B))
 if [[ "$REQUIRE_JEV" == 1 ]]; then
   cat > "$OUT/prompt.txt" <<EOF
-Use the cua-computer-use skill, the agy-cua MCP server, and the agy-cua-jev MCP server (jev_step). In Calculator (bundle id com.apple.calculator), compute $A × $B in the background using jev_step with expected_postcondition for each button press (All Clear with static_text_contains "0", digits of $A, Multiply, digits of $B, Equals), leaving my current frontmost app in front, then report the verified value on Calculator's display, the Jev model used, and the step timings. Do not use the terminal, the browser, or subagents, and do not write files.
+Use the cua-computer-use skill, the agy-cua MCP server, and the agy-cua-jev MCP server (jev_step). In Calculator (bundle id com.apple.calculator), compute $A × $B in the background using jev_step with expected_postcondition for each button press (All Clear with static_text_equals "0", digits of $A with static_text_equals, Multiply with static_text_contains "×", digits of $B with static_text_equals, Equals with static_text_equals "$EXPECTED"), leaving my current frontmost app in front, then report the verified value on Calculator's display, the Jev model used, and the step timings. Do not use the terminal, the browser, or subagents, and do not write files.
 EOF
 else
   cat > "$OUT/prompt.txt" <<EOF
@@ -174,6 +174,7 @@ min_jev_steps = len(str(a_val)) + len(str(b_val)) + 3
 all_jev_verified = bool(jev_entries) and all(
     e.get("schema") == "agy_cua.jev_step_v1"
     and e.get("status") == "verified"
+    and e.get("verification_outcome") == "goal_verified"
     and e.get("verified") is True
     and e.get("returned_model") == "jev-1.13.0"
     and not (e.get("accounting") or {}).get("halted", False)

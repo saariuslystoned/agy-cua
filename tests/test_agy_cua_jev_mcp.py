@@ -591,8 +591,414 @@ class StdioEndToEndTest(unittest.TestCase):
         self.assertTrue(met2)
         self.assertEqual(reason2, "expected_postcondition_verified")
 
+    def test_false_positive_1_unrelated_change_without_predicate_never_verifies_goal(self):
+        pre_obs = {
+            "snapshot_id": "s00000011",
+            "static_texts": ["0"],
+            "elements": [{"element_index": 5, "role": "AXButton", "label": "7", "value": "", "state": "enabled"}],
+        }
+        post_obs = {
+            "snapshot_id": "s00000012",
+            "static_texts": ["0", "Unrelated notification banner"],
+            "elements": [{"element_index": 5, "role": "AXButton", "label": "7", "value": "", "state": "enabled"}],
+        }
+        changed, met, reason = jev.check_postcondition(None, pre_obs, post_obs)
+        self.assertTrue(changed)
+        self.assertFalse(met)
+        self.assertEqual(reason, "observable_state_changed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_driver = os.path.join(tmp, "fake-driver-unrelated")
+            with open(fake_driver, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent("""\
+                    #!/usr/bin/env python3
+                    import json, sys
+                    step = 0
+                    for line in sys.stdin:
+                        msg = json.loads(line)
+                        if "id" not in msg:
+                            continue
+                        method = msg.get("method")
+                        if method == "initialize":
+                            res = {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "fake"}}
+                        elif method == "tools/call":
+                            name = msg.get("params", {}).get("name")
+                            if name == "get_window_state":
+                                step += 1
+                                md = '- [0] AXWindow "Calculator"\\n  - AXStaticText = "0"\\n'
+                                if step >= 2:
+                                    md += '  - AXStaticText = "Unrelated banner"\\n'
+                                res = {
+                                    "content": [{"type": "text", "text": md}],
+                                    "structuredContent": {
+                                        "pid": 42,
+                                        "window_id": 100,
+                                        "snapshot_id": f"s0000001{step}",
+                                        "tree_markdown": md,
+                                        "elements": [
+                                            {"element_index": 0, "role": "AXWindow", "label": "Calculator"},
+                                            {"element_index": 5, "role": "AXButton", "label": "7", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                        ],
+                                    },
+                                }
+                            else:
+                                res = {"content": [{"type": "text", "text": "clicked"}], "structuredContent": {"ok": True}}
+                        else:
+                            res = {}
+                        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": res}), flush=True)
+                """))
+            os.chmod(fake_driver, os.stat(fake_driver).st_mode | stat.S_IEXEC)
+
+            server = jev.JevMcpServer(
+                env={"AGY_CUA_DRIVER": fake_driver, "TYPESAFE_API_KEY": "test-key"},
+                keychain_reader=lambda _: None,
+                http_post=lambda _req, _t: (200, json.dumps({
+                    "model": "jev-1.13.0",
+                    "answers": {
+                        "candidate": {
+                            "type": "choice",
+                            "choice": "ax.5.7",
+                            "confidence": 0.99,
+                            "probabilities": {"ax.5.7": 0.99, "reobserve": 0.005, "abstain": 0.005},
+                        }
+                    },
+                    "usage": {"input_tokens": 50, "output_tokens": 5},
+                })),
+            )
+            try:
+                resp = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {"goal": "Click button 7", "pid": 42, "window_id": 100},
+                    },
+                })
+            finally:
+                server.close()
+
+            sc = resp["result"]["structuredContent"]
+            self.assertFalse(sc["verified"])
+            self.assertTrue(sc["state_changed"])
+            self.assertEqual(sc["status"], "state_changed")
+            self.assertEqual(sc["verification_outcome"], "state_changed")
+
+    def test_false_positive_2_exact_static_text_equals_rejects_substring_match(self):
+        pre_obs = {"snapshot_id": "s00000011", "static_texts": ["10"], "elements": []}
+        post_obs = {"snapshot_id": "s00000012", "static_texts": ["10"], "elements": []}
+        changed, met, reason = jev.check_postcondition({"static_text_equals": "0"}, pre_obs, post_obs)
+        self.assertFalse(changed)
+        self.assertFalse(met)
+        self.assertIn("static_text_equals", reason)
+
+        post_decimal = {"snapshot_id": "s00000013", "static_texts": ["0.5"], "elements": []}
+        _, met_dec, _ = jev.check_postcondition({"static_text_equals": "0"}, pre_obs, post_decimal)
+        self.assertFalse(met_dec)
+
+        post_zero = {"snapshot_id": "s00000014", "static_texts": ["0"], "elements": []}
+        _, met_zero, reason_zero = jev.check_postcondition({"static_text_equals": "0"}, pre_obs, post_zero)
+        self.assertTrue(met_zero)
+        self.assertEqual(reason_zero, "expected_postcondition_verified")
+
+        post_grouped = {"snapshot_id": "s00000015", "static_texts": ["72×60", "4,320"], "elements": []}
+        _, met_grouped, _ = jev.check_postcondition(
+            {"static_text_equals": "4320", "static_text_index": -1},
+            pre_obs,
+            post_grouped,
+        )
+        self.assertTrue(met_grouped)
+
+        _, met_wrong_idx, _ = jev.check_postcondition(
+            {"static_text_equals": "4320", "static_text_index": 0},
+            pre_obs,
+            post_grouped,
+        )
+        self.assertFalse(met_wrong_idx)
+
+        # Malformed comma-separated string '1,,0' must not match '10'
+        post_malformed = {"snapshot_id": "s00000016", "static_texts": ["1,,0"], "elements": []}
+        _, met_malformed, _ = jev.check_postcondition({"static_text_equals": "10"}, pre_obs, post_malformed)
+        self.assertFalse(met_malformed)
+
+    def test_false_positive_3_element_predicates_must_bind_to_target_element(self):
+        pre_obs = {
+            "snapshot_id": "s00000011",
+            "static_texts": [],
+            "elements": [
+                {"element_index": 3, "role": "AXTextField", "label": "Subject", "value": "draft", "state": "enabled (has_value)"},
+                {"element_index": 8, "role": "AXTextField", "label": "Status", "value": "validated", "state": "enabled (has_value)"},
+            ],
+        }
+        post_obs = {
+            "snapshot_id": "s00000012",
+            "static_texts": [],
+            "elements": [
+                {"element_index": 3, "role": "AXTextField", "label": "Subject", "value": "draft", "state": "enabled (has_value)"},
+                {"element_index": 8, "role": "AXTextField", "label": "Status", "value": "validated", "state": "enabled (has_value)"},
+            ],
+        }
+        # Unbound element predicate without element_index or target_element_index must be refused
+        _, met_unbound, reason_unbound = jev.check_postcondition(
+            {"element_value_equals": "validated"},
+            pre_obs,
+            post_obs,
+        )
+        self.assertFalse(met_unbound)
+        self.assertIn("unbound_element_postcondition", reason_unbound)
+
+        # Bound via target_element_index=3 (or explicit element_index=3) must reject when element 3 still has 'draft'
+        _, met_wrong_field, reason_wrong_field = jev.check_postcondition(
+            {"element_value_equals": "validated"},
+            pre_obs,
+            post_obs,
+            target_element_index=3,
+        )
+        self.assertFalse(met_wrong_field)
+        self.assertIn("element_value_equals", reason_wrong_field)
+
+        # Element index not present in pre_obs must fail
+        _, met_missing_pre, reason_missing_pre = jev.check_postcondition(
+            {"element_value_equals": "validated", "element_index": 99},
+            pre_obs,
+            post_obs,
+        )
+        self.assertFalse(met_missing_pre)
+        self.assertIn("target_element_missing_in_pre_obs", reason_missing_pre)
+
+        # Role drift between pre_obs and post_obs on bound element_index must fail
+        post_role_drift = {
+            "snapshot_id": "s00000013",
+            "static_texts": [],
+            "elements": [
+                {"element_index": 3, "role": "AXButton", "label": "Subject", "value": "validated", "state": "enabled"},
+            ],
+        }
+        _, met_drift, reason_drift = jev.check_postcondition(
+            {"element_value_equals": "validated", "element_index": 3},
+            pre_obs,
+            post_role_drift,
+        )
+        self.assertFalse(met_drift)
+        self.assertIn("role_mismatch", reason_drift)
+
+        # Positive match when targeted element 3 updates to 'validated' with same role
+        post_target_updated = {
+            "snapshot_id": "s00000014",
+            "static_texts": [],
+            "elements": [
+                {"element_index": 3, "role": "AXTextField", "label": "Subject", "value": "validated", "state": "enabled (has_value)"},
+                {"element_index": 8, "role": "AXTextField", "label": "Status", "value": "other", "state": "enabled (has_value)"},
+            ],
+        }
+        _, met_ok, reason_ok = jev.check_postcondition(
+            {"element_value_equals": "validated", "element_label_equals": "Subject"},
+            pre_obs,
+            post_target_updated,
+            target_element_index=3,
+        )
+        self.assertTrue(met_ok)
+        self.assertEqual(reason_ok, "expected_postcondition_verified")
+
+    def test_driver_client_deadline_on_partial_line_and_hang_after_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # 1. Partial line without newline stalls; DriverClient must time out and reset proc
+            stalling_driver = os.path.join(tmp, "stalling-driver")
+            with open(stalling_driver, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent("""\
+                    #!/usr/bin/env python3
+                    import json, sys, time
+                    for line in sys.stdin:
+                        msg = json.loads(line)
+                        if "id" not in msg:
+                            continue
+                        if msg.get("method") == "initialize":
+                            print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": "2025-06-18"}}), flush=True)
+                        else:
+                            sys.stdout.write('{"jsonrpc": "2.0", "id": 2')
+                            sys.stdout.flush()
+                            time.sleep(30)
+                """))
+            os.chmod(stalling_driver, os.stat(stalling_driver).st_mode | stat.S_IEXEC)
+
+            client = jev.DriverClient(stalling_driver, timeout_ms=150)
+            try:
+                with self.assertRaisesRegex((TimeoutError, RuntimeError), "timed out"):
+                    client.call_tool("get_window_state", {"pid": 42, "window_id": 100})
+                self.assertIsNone(client._proc)
+            finally:
+                client.close()
+
+            # 2. Hang or pipe drop during Stage 4 dispatch latches outcome_unknown and halts session
+            hang_dispatch_driver = os.path.join(tmp, "hang-dispatch-driver")
+            with open(hang_dispatch_driver, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent("""\
+                    #!/usr/bin/env python3
+                    import json, sys, time
+                    for line in sys.stdin:
+                        msg = json.loads(line)
+                        if "id" not in msg:
+                            continue
+                        method = msg.get("method")
+                        if method == "initialize":
+                            print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": "2025-06-18"}}), flush=True)
+                        elif method == "tools/call":
+                            name = msg.get("params", {}).get("name")
+                            if name == "get_window_state":
+                                md = '- [0] AXWindow "Calculator"\\n  - AXStaticText = "0"\\n  - [5] AXButton (7)'
+                                res = {
+                                    "content": [{"type": "text", "text": md}],
+                                    "structuredContent": {
+                                        "pid": 42,
+                                        "window_id": 100,
+                                        "snapshot_id": "s00000011",
+                                        "tree_markdown": md,
+                                        "elements": [
+                                            {"element_index": 0, "role": "AXWindow", "label": "Calculator"},
+                                            {"element_index": 5, "role": "AXButton", "label": "7", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                        ],
+                                    },
+                                }
+                                print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": res}), flush=True)
+                            elif name == "click":
+                                sys.stdout.write('{"partial": ')
+                                sys.stdout.flush()
+                                time.sleep(30)
+                """))
+            os.chmod(hang_dispatch_driver, os.stat(hang_dispatch_driver).st_mode | stat.S_IEXEC)
+
+            server = jev.JevMcpServer(
+                env={
+                    "AGY_CUA_DRIVER": hang_dispatch_driver,
+                    "AGY_CUA_DRIVER_TIMEOUT_MS": "400",
+                    "TYPESAFE_API_KEY": "test-key",
+                },
+                keychain_reader=lambda _: None,
+                http_post=lambda _req, _t: (200, json.dumps({
+                    "model": "jev-1.13.0",
+                    "answers": {
+                        "candidate": {
+                            "type": "choice",
+                            "choice": "ax.5.7",
+                            "confidence": 0.99,
+                            "probabilities": {"ax.5.7": 0.99, "reobserve": 0.005, "abstain": 0.005},
+                        }
+                    },
+                    "usage": {"input_tokens": 50, "output_tokens": 5},
+                })),
+            )
+            try:
+                resp = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {
+                            "goal": "Click button 7",
+                            "pid": 42,
+                            "window_id": 100,
+                            "expected_postcondition": {"static_text_equals": "7"},
+                        },
+                    },
+                })
+            finally:
+                server.close()
+
+            sc = resp["result"]["structuredContent"]
+            self.assertFalse(sc["verified"])
+            self.assertTrue(sc["uncertain_side_effect"])
+            self.assertEqual(sc["verification_outcome"], "outcome_unknown")
+            self.assertTrue(sc["accounting"]["halted"])
+            self.assertEqual(sc["accounting"]["uncertain_side_effects"], 1)
+
+            # 3. Pipe drop (EOF) during Stage 5 post-dispatch verify also latches outcome_unknown and halts
+            eof_verify_driver = os.path.join(tmp, "eof-verify-driver")
+            with open(eof_verify_driver, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent("""\
+                    #!/usr/bin/env python3
+                    import json, sys
+                    obs_count = 0
+                    for line in sys.stdin:
+                        msg = json.loads(line)
+                        if "id" not in msg:
+                            continue
+                        method = msg.get("method")
+                        if method == "initialize":
+                            print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": "2025-06-18"}}), flush=True)
+                        elif method == "tools/call":
+                            name = msg.get("params", {}).get("name")
+                            if name == "get_window_state":
+                                obs_count += 1
+                                if obs_count >= 2:
+                                    sys.exit(1)
+                                md = '- [0] AXWindow "Calculator"\\n  - AXStaticText = "0"\\n  - [5] AXButton (7)'
+                                res = {
+                                    "content": [{"type": "text", "text": md}],
+                                    "structuredContent": {
+                                        "pid": 42,
+                                        "window_id": 100,
+                                        "snapshot_id": "s00000011",
+                                        "tree_markdown": md,
+                                        "elements": [
+                                            {"element_index": 0, "role": "AXWindow", "label": "Calculator"},
+                                            {"element_index": 5, "role": "AXButton", "label": "7", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                        ],
+                                    },
+                                }
+                                print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": res}), flush=True)
+                            elif name == "click":
+                                res = {"content": [{"type": "text", "text": "clicked"}], "structuredContent": {"ok": True}}
+                                print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": res}), flush=True)
+                """))
+            os.chmod(eof_verify_driver, os.stat(eof_verify_driver).st_mode | stat.S_IEXEC)
+
+            server_eof = jev.JevMcpServer(
+                env={"AGY_CUA_DRIVER": eof_verify_driver, "TYPESAFE_API_KEY": "test-key"},
+                keychain_reader=lambda _: None,
+                http_post=lambda _req, _t: (200, json.dumps({
+                    "model": "jev-1.13.0",
+                    "answers": {
+                        "candidate": {
+                            "type": "choice",
+                            "choice": "ax.5.7",
+                            "confidence": 0.99,
+                            "probabilities": {"ax.5.7": 0.99, "reobserve": 0.005, "abstain": 0.005},
+                        }
+                    },
+                    "usage": {"input_tokens": 50, "output_tokens": 5},
+                })),
+            )
+            try:
+                resp_eof = server_eof.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {
+                            "goal": "Click button 7",
+                            "pid": 42,
+                            "window_id": 100,
+                            "expected_postcondition": {"static_text_equals": "7"},
+                        },
+                    },
+                })
+            finally:
+                server_eof.close()
+
+            sc_eof = resp_eof["result"]["structuredContent"]
+            self.assertEqual(sc_eof["status"], "verification_failed")
+            self.assertEqual(sc_eof["verification_outcome"], "outcome_unknown")
+            self.assertFalse(sc_eof["verified"])
+            self.assertTrue(sc_eof["uncertain_side_effect"])
+            self.assertTrue(sc_eof["accounting"]["halted"])
+            self.assertEqual(sc_eof["accounting"]["uncertain_side_effects"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
 
 
