@@ -1171,6 +1171,10 @@ class StdioEndToEndTest(unittest.TestCase):
                         {"element_index": 16, "role": "AXSearchField", "label": "Disabled Search", "value": "", "enabled": False, "parent_index": 0, "actions": ["AXPress"]},
                         # Enabled AXSearchField with explicit non-clickable action only (AXCancel) skips auto-click but allows set_value / type_text
                         {"element_index": 17, "role": "AXSearchField", "label": "Filter", "value": "", "enabled": True, "parent_index": 0, "actions": ["AXCancel"]},
+                        # Enabled AXScrollArea and AXWebArea support explicit scroll / type_text without polluting auto-click candidates
+                        {"element_index": 18, "role": "AXScrollArea", "label": "Message list scroll", "enabled": True, "parent_index": 0, "actions": []},
+                        {"element_index": 19, "role": "AXWebArea", "label": "Message body", "enabled": True, "parent_index": 0, "actions": []},
+                        {"element_index": 20, "role": "AXSlider", "label": "Zoom level", "value": "100", "enabled": True, "parent_index": 0, "actions": ["AXIncrement", "AXDecrement"]},
                     ],
                 },
                 "content": [{"type": "text", "text": '- [0] AXWindow "Mail"'}],
@@ -1183,19 +1187,30 @@ class StdioEndToEndTest(unittest.TestCase):
         auto_indices = [c["arguments"]["element_index"] for c in auto_cands]
         self.assertEqual(auto_indices, [11, 12, 15])
 
-        # Enabled AXSearchField [15] and [17] support explicit set_value and type_text candidates
+        # Enabled AXSearchField [15] and [17] support explicit set_value and type_text candidates,
+        # and enabled AXCell [10], AXScrollArea [18], AXWebArea [19], and AXSlider [20] support valid explicit actions
         search_cands = jev.build_bound_candidates(
             [
                 {"id": "search.set", "description": "Set Search to invoice", "tool": "set_value", "element_index": 15, "value": "invoice"},
                 {"id": "search.type", "description": "Type invoice into Search", "tool": "type_text", "element_index": 15, "text": "invoice"},
                 {"id": "filter.set", "description": "Set Filter to unread", "tool": "set_value", "element_index": 17, "value": "unread"},
+                {"id": "cell.dbl", "description": "Double-click sender cell to open message", "tool": "double_click", "element_index": 10},
+                {"id": "cell.ctx", "description": "Right-click sender cell for menu", "tool": "right_click", "element_index": 10},
+                {"id": "list.scroll", "description": "Scroll message list down", "tool": "scroll", "element_index": 18, "direction": "down"},
+                {"id": "body.type", "description": "Type draft body into AXWebArea", "tool": "type_text", "element_index": 19, "text": "Hello"},
+                {"id": "slider.click", "description": "Click zoom slider", "tool": "click", "element_index": 20},
             ],
             obs,
         )
-        self.assertEqual(len(search_cands), 3)
+        self.assertEqual(len(search_cands), 8)
         self.assertEqual(search_cands[0]["arguments"]["element_token"], "s0000cafe:15")
         self.assertEqual(search_cands[1]["arguments"]["element_token"], "s0000cafe:15")
         self.assertEqual(search_cands[2]["arguments"]["element_token"], "s0000cafe:17")
+        self.assertEqual(search_cands[3]["arguments"]["element_token"], "s0000cafe:10")
+        self.assertEqual(search_cands[4]["arguments"]["element_token"], "s0000cafe:10")
+        self.assertEqual(search_cands[5]["arguments"]["element_token"], "s0000cafe:18")
+        self.assertEqual(search_cands[6]["arguments"]["element_token"], "s0000cafe:19")
+        self.assertEqual(search_cands[7]["arguments"]["element_token"], "s0000cafe:20")
 
         # Clicking AXSearchField [17] (which only supports AXCancel) is rejected
         with self.assertRaisesRegex(ValueError, "unsupported_element_action"):
@@ -1204,8 +1219,9 @@ class StdioEndToEndTest(unittest.TestCase):
                 obs,
             )
 
-        # Non-pressable AXCell [10] and disabled AXSearchField [16] must be rejected
-        with self.assertRaisesRegex(ValueError, "unknown_element_index|unsupported_element_action"):
+        # Non-pressable AXCell [10] must be rejected specifically with unsupported_element_action on click,
+        # and disabled AXSearchField [16] must be rejected with unknown_element_index
+        with self.assertRaisesRegex(ValueError, "unsupported_element_action"):
             jev.build_bound_candidates(
                 [{"id": "bad.cell", "description": "Click non-pressable cell", "tool": "click", "element_index": 10}],
                 obs,
@@ -1232,6 +1248,31 @@ class StdioEndToEndTest(unittest.TestCase):
                 [{"id": "bad.cell.set", "description": "Set value on cell", "tool": "set_value", "element_index": 11, "value": "x"}],
                 obs,
             )
+
+        # validate_select_request preserves value, enabled, depth, and in_toolbar metadata
+        validated = jev.validate_select_request({
+            "goal": "Set Search",
+            "pid": 501,
+            "window_id": 2001,
+            "snapshot_id": "s0000cafe",
+            "elements": [
+                {
+                    "element_index": 15,
+                    "role": "AXSearchField",
+                    "label": "Search",
+                    "value": "invoice",
+                    "state": "enabled (has_value)",
+                    "enabled": True,
+                    "depth": 2,
+                    "in_toolbar": True,
+                }
+            ],
+            "candidates": [{"id": "search.set", "description": "Set Search"}],
+        })
+        self.assertEqual(validated["elements"][0]["value"], "invoice")
+        self.assertTrue(validated["elements"][0]["enabled"])
+        self.assertEqual(validated["elements"][0]["depth"], 2)
+        self.assertTrue(validated["elements"][0]["in_toolbar"])
 
     def test_jev_step_forwards_query_and_max_depth_to_stage1_and_stage5_for_mail_continuity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1313,10 +1354,11 @@ class StdioEndToEndTest(unittest.TestCase):
                 """))
             os.chmod(fake_mail_driver, os.stat(fake_mail_driver).st_mode | stat.S_IEXEC)
 
-            server = jev.JevMcpServer(
-                env={"AGY_CUA_DRIVER": fake_mail_driver, "TYPESAFE_API_KEY": "test-key"},
-                keychain_reader=lambda _: None,
-                http_post=lambda _req, _t: (200, json.dumps({
+            captured_wire_payloads = []
+
+            def fake_http_post(req, _t):
+                captured_wire_payloads.append(json.loads(req.data.decode("utf-8")))
+                return 200, json.dumps({
                     "model": "jev-1.13.0",
                     "answers": {
                         "candidate": {
@@ -1327,7 +1369,12 @@ class StdioEndToEndTest(unittest.TestCase):
                         }
                     },
                     "usage": {"input_tokens": 80, "output_tokens": 10},
-                })),
+                })
+
+            server = jev.JevMcpServer(
+                env={"AGY_CUA_DRIVER": fake_mail_driver, "TYPESAFE_API_KEY": "test-key"},
+                keychain_reader=lambda _: None,
+                http_post=fake_http_post,
             )
             try:
                 # Invalid query / max_depth are refused before touching driver
@@ -1389,7 +1436,20 @@ class StdioEndToEndTest(unittest.TestCase):
             self.assertEqual(sc["total_actionable_elements"], 1)
             self.assertEqual(sc["omitted_elements_count"], 0)
             self.assertEqual(sc["omitted_candidates_count"], 0)
+            self.assertFalse(sc["pre_observation_truncated"])
+            self.assertEqual(sc["post_total_actionable_elements"], 1)
+            self.assertEqual(sc["post_omitted_elements_count"], 0)
+            self.assertEqual(sc["post_omitted_candidates_count"], 0)
+            self.assertFalse(sc["post_observation_truncated"])
             self.assertFalse(sc["observation_truncated"])
+
+            # Verify Jev wire payload preserved depth, in_toolbar, and value metadata
+            self.assertEqual(len(captured_wire_payloads), 1)
+            sent_el = captured_wire_payloads[0]["state"]["elements"][0]
+            self.assertEqual(sent_el["element_index"], 92)
+            self.assertEqual(sent_el["depth"], 2)
+            self.assertTrue(sent_el["in_toolbar"])
+            self.assertEqual(sent_el["value"], "")
 
             with open(calls_log, "r", encoding="utf-8") as lf:
                 logged = [json.loads(line) for line in lf if line.strip()]
