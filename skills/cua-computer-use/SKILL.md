@@ -21,7 +21,7 @@ Cua Driver sends input to one target process without moving the user's cursor or
 
 ## Ground rules
 
-- Act only on apps the user named. Leave every other window alone.
+- Act only on apps the user named. Leave every other window alone. For a named app with a known bundle ID, discover its process and windows with `launch_app` first, even when it is already running; it does not activate the app. Do not use `list_apps` or an unfiltered `list_windows` as a shortcut. If you do not know the bundle ID, ask for the target or use an explicitly authorized scoped lookup; do not inventory unrelated apps or windows.
 - Keep the user's frontmost app in front. Start apps with `launch_app`, which launches in the background. Do not call `bring_to_front` or `delivery_mode: "foreground"` unless the user explicitly asks.
 - Do not capture the whole desktop (`get_desktop_state`) unless the user asks. Use the window-scoped `get_window_state` instead.
 - Do not read or write the clipboard, kill apps, change Cua Driver config, or use the `browser_*` tools unless the user asks.
@@ -33,6 +33,7 @@ Cua Driver sends input to one target process without moving the user's cursor or
 - Call these tools through `call_mcp_tool`. In a workspace config the servers are `agy-cua` and `agy-cua-jev`; when installed as a plugin they are `agy-cua_agy-cua` and `agy-cua_agy-cua-jev`.
 - Large results, such as window trees and screenshots, are saved to a file in Antigravity's conversation `brain` directory (`.system_generated/steps/<n>/output.txt`), and you get a pointer to it. Open that file with `view_file`.
 - You see only the text part of each result (`structuredContent` is omitted by Antigravity, [trycua/cua#4346](https://github.com/trycua/cua/issues/4346)). `bin/agy-cua-mcp` prepends `snapshot_id=<id>` to every `get_window_state` text result, and `jev_step` / `jev_select_action` format all decision fields, `post_static_texts`, and `timings_ms` directly into their text result.
+- Within one conversation, reuse tool schemas and skill instructions you have already read. Open a saved result only when its contents are needed; do not repeatedly read the same unchanged schema. A resumed conversation still needs a fresh window snapshot: old element handles are not durable locators.
 
 ## The loop
 
@@ -49,6 +50,7 @@ Cua Driver sends input to one target process without moving the user's cursor or
      - `{"id": "scroll-down", "description": "Scroll [5] AXScrollArea down", "tool": "scroll", "element_index": 5, "direction": "down", "amount": 3}`
 3. **Direct `agy-cua` element actions (when inspecting or acting directly).**
    - Call `get_window_state` with `pid`, `window_id`, `tree_format: "both"`, and `include_screenshot: false` (or `true` when you need visual inspection).
+   - When the task's relevant role or a previously observed label is known, add `query` to return matching lines and their ancestors. It is a case-insensitive substring filter, not a selector language; element indices keep their original values. If the query omits needed context, broaden it or omit it. Never query for the expected answer as a substitute for reading the actual value.
    - Optionally call `jev_select_action` with `{goal, pid, window_id, snapshot_id, elements, candidates}` to get Jev's validated choice before calling `click`, `type_text`, `set_value`, `press_key`, `hotkey`, or `scroll`.
    - Always pass `element_token: "<snapshot_id>:<element_index>"` on direct `agy-cua` element actions, and take a fresh `get_window_state` after the action to verify the new value from the tree.
 
