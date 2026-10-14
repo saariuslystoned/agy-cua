@@ -96,14 +96,34 @@ ACTIONABLE_AX_ROLES = frozenset({
     "AXPopUpButton",
     "AXTextField",
     "AXTextArea",
+    "AXSearchField",
     "AXComboBox",
     "AXSlider",
     "AXIncrementor",
     "AXRow",
+    "AXCell",
+    "AXLink",
     "AXMenuButton",
     "AXDisclosureTriangle",
     "AXTabGroup",
 })
+
+TEXT_INPUT_AX_ROLES = frozenset({
+    "AXTextField",
+    "AXTextArea",
+    "AXSearchField",
+    "AXComboBox",
+})
+
+VALUE_SETTABLE_AX_ROLES = TEXT_INPUT_AX_ROLES | frozenset({
+    "AXSlider",
+    "AXIncrementor",
+    "AXCheckBox",
+    "AXPopUpButton",
+})
+
+MIN_OBSERVE_MAX_DEPTH = 1
+MAX_OBSERVE_MAX_DEPTH = 12
 
 WINDOW_ROOT_ROLES = frozenset({"AXWindow", "AXApplication", "AXSheet", "AXDialog"})
 MENU_BAR_ROLES = frozenset({"AXMenuBar", "AXMenuBarItem", "AXMenu", "AXMenuItem"})
@@ -342,7 +362,7 @@ def validate_select_request(args: Mapping[str, Any]) -> dict[str, Any]:
     for item in raw_elements:
         if not isinstance(item, Mapping):
             raise ValueError("each element must be an object")
-        el_allowed = {"element_index", "role", "label", "state", "enabled"}
+        el_allowed = {"element_index", "role", "label", "value", "state", "enabled", "depth", "in_toolbar"}
         if not set(item.keys()).issubset(el_allowed):
             raise ValueError(f"element contains unsupported fields: {sorted(set(item.keys()) - el_allowed)}")
         role = item.get("role")
@@ -716,6 +736,113 @@ def _is_unlabeled_window_button(element: Mapping[str, Any], by_index: Mapping[in
     return bool(parent and str(parent.get("role") or "") in WINDOW_ROOT_ROLES)
 
 
+_TREE_MD_LINE_RE = re.compile(r"^(\s*)-\s*\[(?:e)?(\d+)\]\s*([A-Za-z0-9_]+)")
+
+
+def _parse_markdown_hierarchy(tree_md: str) -> tuple[dict[int, int], set[int]]:
+    """Extract element depth and AXToolbar ancestry from tree_markdown indentation."""
+    md_depth: dict[int, int] = {}
+    md_toolbar_ids: set[int] = set()
+    role_by_level: dict[int, str] = {}
+    for line in tree_md.splitlines():
+        m = _TREE_MD_LINE_RE.match(line)
+        if not m:
+            continue
+        indent, idx_str, role = m.group(1), m.group(2), m.group(3)
+        idx = int(idx_str)
+        level = len(indent) // 2
+        for deeper in [k for k in role_by_level if k > level]:
+            del role_by_level[deeper]
+        role_by_level[level] = role
+        md_depth[idx] = level
+        if any(r == "AXToolbar" for k, r in role_by_level.items() if k <= level):
+            md_toolbar_ids.add(idx)
+    return md_depth, md_toolbar_ids
+
+
+def _element_depth_and_toolbar(
+    idx: int,
+    element: Mapping[str, Any],
+    by_index: Mapping[int, Mapping[str, Any]],
+    md_depth: Mapping[int, int],
+    md_toolbar_ids: set[int],
+) -> tuple[int, bool]:
+    """Compute element tree depth and whether it resides inside an AXToolbar."""
+    seen: set[int] = {idx}
+    curr: Mapping[str, Any] | None = element
+    hops = 0
+    in_toolbar = str(element.get("role") or "") == "AXToolbar" or (idx in md_toolbar_ids)
+    has_parent_chain = False
+    chain_complete = False
+    while curr is not None:
+        role = str(curr.get("role") or "")
+        if role == "AXToolbar":
+            in_toolbar = True
+        parent_idx = curr.get("parent_index")
+        if not isinstance(parent_idx, int) or isinstance(parent_idx, bool):
+            chain_complete = True
+            break
+        if parent_idx in seen:
+            break
+        seen.add(parent_idx)
+        parent = by_index.get(parent_idx)
+        hops += 1
+        has_parent_chain = True
+        curr = parent
+
+    explicit_depth = element.get("depth")
+    if isinstance(explicit_depth, int) and not isinstance(explicit_depth, bool) and explicit_depth >= 0:
+        depth = max(hops, explicit_depth) if has_parent_chain else explicit_depth
+    elif has_parent_chain:
+        depth = hops if chain_complete or idx not in md_depth else max(hops, md_depth[idx])
+    elif idx in md_depth:
+        depth = md_depth[idx]
+    else:
+        depth = 0 if str(element.get("role") or "") in WINDOW_ROOT_ROLES else 1
+    return depth, in_toolbar
+
+
+def _normalized_actions(element: Mapping[str, Any]) -> tuple[set[str], bool]:
+    raw = element.get("actions")
+    if not isinstance(raw, list):
+        return set(), False
+    return {str(a).strip() for a in raw if isinstance(a, str) and str(a).strip()}, True
+
+
+def _supports_press_action(actions: set[str]) -> bool:
+    lowered = {a.lower() for a in actions}
+    return bool({"axpress", "press"} & lowered)
+
+
+def _element_can_auto_click(role: str, actions: set[str], has_explicit_actions: bool) -> bool:
+    """Return True only when an actionable element supports a click/focus-click candidate."""
+    if _supports_press_action(actions):
+        return True
+    if role == "AXCell":
+        return False
+    if role == "AXLink":
+        return not has_explicit_actions
+    if role in TEXT_INPUT_AX_ROLES:
+        if not has_explicit_actions or not actions:
+            return True
+        lowered = {a.lower() for a in actions}
+        return bool({"axpress", "press", "axconfirm", "confirm", "axshowmenu"} & lowered)
+    if role in {
+        "AXButton",
+        "AXRadioButton",
+        "AXCheckBox",
+        "AXPopUpButton",
+        "AXMenuButton",
+        "AXDisclosureTriangle",
+        "AXTabGroup",
+        "AXRow",
+    }:
+        if has_explicit_actions and actions and not _supports_press_action(actions):
+            return False
+        return True
+    return False
+
+
 def extract_window_observation(
     driver_result: Mapping[str, Any],
     *,
@@ -748,6 +875,7 @@ def extract_window_observation(
     )
     tree_md = str(sc.get("tree_markdown") or text_blocks or "")
     static_texts = [t.replace("\u200e", "").strip() for t in re.findall(r'AXStaticText = "([^"]*)"', tree_md)]
+    md_depth, md_toolbar_ids = _parse_markdown_hierarchy(tree_md)
 
     by_index: dict[int, Mapping[str, Any]] = {}
     for item in raw_elements:
@@ -755,8 +883,6 @@ def extract_window_observation(
             by_index[item["element_index"]] = item
 
     compact_elements: list[dict[str, Any]] = []
-    auto_candidates: list[dict[str, Any]] = []
-    used_ids: set[str] = set()
 
     for idx in sorted(by_index.keys()):
         el = by_index[idx]
@@ -774,71 +900,109 @@ def extract_window_observation(
             if is_secure or el.get("value") is None
             else str(el.get("value") or "").replace("\u200e", "").strip()
         )
-        actions = el.get("actions") if isinstance(el.get("actions"), list) else []
+        actions, has_explicit_actions = _normalized_actions(el)
+        supports_press = _supports_press_action(actions)
 
-        if role not in ACTIONABLE_AX_ROLES and "AXPress" not in actions:
+        if role not in ACTIONABLE_AX_ROLES and not supports_press:
             continue
-        if not label and not value and role not in {
-            "AXTextField",
-            "AXTextArea",
-            "AXSearchField",
-            "AXComboBox",
-            "AXScrollArea",
-        }:
+        can_click = _element_can_auto_click(role, actions, has_explicit_actions)
+        can_set_value = role in VALUE_SETTABLE_AX_ROLES
+        if not can_click and not can_set_value and role != "AXScrollArea":
+            continue
+        if not label and not value and role not in TEXT_INPUT_AX_ROLES and role != "AXScrollArea":
             continue
 
-        is_text_input = role in {"AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"}
+        is_text_input = role in TEXT_INPUT_AX_ROLES
         state_str = "enabled (has_value)" if value else "enabled"
         display_label = label or (value if not is_text_input else "") or role
+        depth, in_toolbar = _element_depth_and_toolbar(idx, el, by_index, md_depth, md_toolbar_ids)
 
         compact_el: dict[str, Any] = {
             "element_index": idx,
             "role": role,
             "label": display_label,
             "state": state_str,
+            "depth": depth,
+            "in_toolbar": in_toolbar,
+            "can_click": can_click,
         }
         if value is not None:
             compact_el["value"] = value[:120]
         compact_elements.append(compact_el)
 
-        if len(auto_candidates) < MAX_AUTO_CANDIDATES:
-            base_id = f"ax.{idx}.{_slug(display_label)}"
-            cid = base_id
-            suffix = 2
-            while cid in used_ids:
-                cid = f"{base_id}-{suffix}"
-                suffix += 1
-            used_ids.add(cid)
-            desc = f"Click [{idx}] {role} {json.dumps(display_label, ensure_ascii=False)}"
-            auto_candidates.append({
-                "id": cid,
-                "description": desc,
+    # Prioritize toolbar controls first, then shallow controls by depth, breaking ties by element_index
+    prioritized_elements = sorted(
+        compact_elements,
+        key=lambda e: (0 if e.get("in_toolbar") else 1, e.get("depth", 1), e["element_index"]),
+    )
+
+    auto_candidates: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+    total_click_candidates = 0
+
+    for compact_el in prioritized_elements:
+        if not compact_el.get("can_click", True):
+            continue
+        total_click_candidates += 1
+        if len(auto_candidates) >= MAX_AUTO_CANDIDATES:
+            continue
+        idx = compact_el["element_index"]
+        role = compact_el["role"]
+        display_label = compact_el["label"]
+        base_id = f"ax.{idx}.{_slug(display_label)}"
+        cid = base_id
+        suffix = 2
+        while cid in used_ids:
+            cid = f"{base_id}-{suffix}"
+            suffix += 1
+        used_ids.add(cid)
+        desc = f"Click [{idx}] {role} {json.dumps(display_label, ensure_ascii=False)}"
+        auto_candidates.append({
+            "id": cid,
+            "description": desc,
+            "pid": expected_pid,
+            "window_id": expected_window_id,
+            "snapshot_id": snapshot_id,
+            "tool": "click",
+            "arguments": {
                 "pid": expected_pid,
                 "window_id": expected_window_id,
                 "snapshot_id": snapshot_id,
-                "tool": "click",
-                "arguments": {
-                    "pid": expected_pid,
-                    "window_id": expected_window_id,
-                    "snapshot_id": snapshot_id,
-                    "element_index": idx,
-                    "element_token": f"{snapshot_id}:{idx}",
-                    "delivery_mode": "background",
-                },
-            })
+                "element_index": idx,
+                "element_token": f"{snapshot_id}:{idx}",
+                "delivery_mode": "background",
+            },
+        })
 
-    bounded_elements = compact_elements[:MAX_ELEMENTS]
+    bounded_elements = prioritized_elements[:MAX_ELEMENTS]
+    total_actionable_elements = len(prioritized_elements)
+    omitted_elements_count = max(0, total_actionable_elements - len(bounded_elements))
+    omitted_candidates_count = max(0, total_click_candidates - len(auto_candidates))
+    elements_complete = bool(sc.get("elements_complete", True))
+    driver_truncated = bool(sc.get("truncated", False))
+    observation_truncated = bool(
+        driver_truncated
+        or not elements_complete
+        or omitted_elements_count > 0
+        or omitted_candidates_count > 0
+    )
+
     return {
         "pid": expected_pid,
         "window_id": expected_window_id,
         "snapshot_id": snapshot_id,
         "app_name": sc.get("app_name"),
         "window_title": sc.get("window_title"),
-        "elements_complete": bool(sc.get("elements_complete", True)),
-        "truncated": bool(sc.get("truncated", False)),
+        "elements_complete": elements_complete,
+        "truncated": driver_truncated,
+        "total_actionable_elements": total_actionable_elements,
+        "omitted_elements_count": omitted_elements_count,
+        "omitted_candidates_count": omitted_candidates_count,
+        "observation_truncated": observation_truncated,
         "static_texts": static_texts,
-        "indexed_element_ids": {e["element_index"] for e in bounded_elements},
+        "indexed_element_ids": {e["element_index"] for e in prioritized_elements},
         "elements": bounded_elements,
+        "all_elements": prioritized_elements,
         "auto_candidates": auto_candidates,
     }
 
@@ -852,6 +1016,16 @@ def build_bound_candidates(
     window_id = observation["window_id"]
     snapshot_id = observation["snapshot_id"]
     valid_indices: set[int] = observation["indexed_element_ids"]
+    source_elements = (
+        observation.get("all_elements")
+        if "all_elements" in observation
+        else (observation.get("elements") or [])
+    )
+    el_by_idx: dict[int, Mapping[str, Any]] = {
+        e["element_index"]: e
+        for e in source_elements
+        if isinstance(e, Mapping) and isinstance(e.get("element_index"), int)
+    }
 
     if not raw_candidates:
         auto = list(observation["auto_candidates"])
@@ -971,6 +1145,21 @@ def build_bound_candidates(
             el_idx = args_dict["element_index"]
             if not isinstance(el_idx, int) or isinstance(el_idx, bool) or el_idx not in valid_indices:
                 raise ValueError(f"unknown_element_index: candidate {cid!r} references element_index={el_idx!r} not in snapshot {snapshot_id}")
+            target_el = el_by_idx.get(el_idx)
+            if target_el is not None:
+                target_role = str(target_el.get("role") or "").strip()
+                if tool == "set_value" and target_role and target_role not in VALUE_SETTABLE_AX_ROLES:
+                    raise ValueError(
+                        f"incompatible_tool_for_role: candidate {cid!r} cannot use set_value on role {target_role!r}"
+                    )
+                if tool == "type_text" and target_role and target_role not in TEXT_INPUT_AX_ROLES:
+                    raise ValueError(
+                        f"incompatible_tool_for_role: candidate {cid!r} cannot use type_text on role {target_role!r}"
+                    )
+                if tool == "click" and target_el.get("can_click") is False:
+                    raise ValueError(
+                        f"unsupported_element_action: candidate {cid!r} cannot click role {target_role!r} without AXPress support"
+                    )
             args_dict["snapshot_id"] = snapshot_id
             args_dict["element_token"] = f"{snapshot_id}:{el_idx}"
         elif tool == "set_value":
@@ -1093,14 +1282,28 @@ def check_postcondition(
     """Return (state_changed, postcondition_met, verification_reason) from fresh post-dispatch observation."""
     pre_texts = list(pre_obs.get("static_texts") or [])
     post_texts = list(post_obs.get("static_texts") or [])
-    pre_els = [
-        (e.get("element_index"), e.get("role"), e.get("label"), e.get("value"), e.get("state"))
-        for e in (pre_obs.get("elements") or [])
-    ]
-    post_els = [
-        (e.get("element_index"), e.get("role"), e.get("label"), e.get("value"), e.get("state"))
-        for e in (post_obs.get("elements") or [])
-    ]
+    pre_source_els = (
+        pre_obs.get("all_elements") if "all_elements" in pre_obs else (pre_obs.get("elements") or [])
+    )
+    post_source_els = (
+        post_obs.get("all_elements") if "all_elements" in post_obs else (post_obs.get("elements") or [])
+    )
+    pre_els = sorted(
+        (
+            (e.get("element_index"), e.get("role"), e.get("label"), e.get("value"), e.get("state"))
+            for e in pre_source_els
+            if isinstance(e, Mapping)
+        ),
+        key=lambda item: (item[0] if isinstance(item[0], int) else -1),
+    )
+    post_els = sorted(
+        (
+            (e.get("element_index"), e.get("role"), e.get("label"), e.get("value"), e.get("state"))
+            for e in post_source_els
+            if isinstance(e, Mapping)
+        ),
+        key=lambda item: (item[0] if isinstance(item[0], int) else -1),
+    )
     state_changed = (pre_texts != post_texts) or (pre_els != post_els)
 
     if post_obs.get("snapshot_id") == pre_obs.get("snapshot_id"):
@@ -1181,12 +1384,12 @@ def check_postcondition(
 
         pre_by_idx = {
             e.get("element_index"): e
-            for e in (pre_obs.get("elements") or [])
+            for e in pre_source_els
             if isinstance(e, Mapping) and isinstance(e.get("element_index"), int)
         }
         post_by_idx = {
             e.get("element_index"): e
-            for e in (post_obs.get("elements") or [])
+            for e in post_source_els
             if isinstance(e, Mapping) and isinstance(e.get("element_index"), int)
         }
         if bound_idx not in pre_by_idx:
@@ -1499,6 +1702,23 @@ TOOLS = [
                 },
                 "pid": {"type": "integer", "minimum": 1, "description": "Target application pid."},
                 "window_id": {"type": "integer", "minimum": 1, "description": "Target application window_id."},
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Optional non-empty case-insensitive substring filter forwarded to both Stage 1 (pre-action) "
+                        "and Stage 5 (post-action) get_window_state calls."
+                    ),
+                },
+                "max_depth": {
+                    "type": "integer",
+                    "minimum": MIN_OBSERVE_MAX_DEPTH,
+                    "maximum": MAX_OBSERVE_MAX_DEPTH,
+                    "description": (
+                        "Optional AX tree walk depth cap (1..12) forwarded to both Stage 1 (pre-action) and Stage 5 "
+                        "(post-action) get_window_state calls (e.g. max_depth=2 for macOS Mail toolbar discovery)."
+                    ),
+                },
                 "candidates": {
                     "type": "array",
                     "description": (
@@ -1572,6 +1792,13 @@ def _format_tool_result(payload: Mapping[str, Any], is_error: bool = False) -> d
         summary_lines.append(
             f"pre_snapshot_id={payload.get('pre_snapshot_id')} post_snapshot_id={payload.get('post_snapshot_id')} "
             f"verified={payload.get('verified')} post_static_texts={json.dumps(payload.get('post_static_texts', []), ensure_ascii=False)}"
+        )
+    if "total_actionable_elements" in payload:
+        summary_lines.append(
+            f"total_actionable_elements={payload.get('total_actionable_elements')} "
+            f"omitted_elements_count={payload.get('omitted_elements_count')} "
+            f"omitted_candidates_count={payload.get('omitted_candidates_count')} "
+            f"observation_truncated={payload.get('observation_truncated')}"
         )
     if "timings_ms" in payload:
         summary_lines.append(f"timings_ms={json.dumps(payload['timings_ms'], sort_keys=True)}")
@@ -1655,6 +1882,31 @@ class JevMcpServer:
                 is_error=True,
             )
 
+        query_val: str | None = None
+        if "query" in args and args["query"] is not None:
+            raw_query = args["query"]
+            if not isinstance(raw_query, str) or not raw_query.strip():
+                return _format_tool_result(
+                    {"schema": "agy_cua.jev_step_v1", "status": "refused", "reason": "invalid_query"},
+                    is_error=True,
+                )
+            query_val = raw_query.strip()
+
+        max_depth_val: int | None = None
+        if "max_depth" in args and args["max_depth"] is not None:
+            raw_depth = args["max_depth"]
+            if (
+                not isinstance(raw_depth, int)
+                or isinstance(raw_depth, bool)
+                or raw_depth < MIN_OBSERVE_MAX_DEPTH
+                or raw_depth > MAX_OBSERVE_MAX_DEPTH
+            ):
+                return _format_tool_result(
+                    {"schema": "agy_cua.jev_step_v1", "status": "refused", "reason": "invalid_max_depth"},
+                    is_error=True,
+                )
+            max_depth_val = raw_depth
+
         # Stage 1: Observe target window via cua-driver (text-only to Jev; anchor window screenshot in driver session only if a candidate uses window-local pixels)
         raw_cands = args.get("candidates")
         needs_pixel_anchor = False
@@ -1668,10 +1920,17 @@ class JevMcpServer:
         obs_started = time.perf_counter()
         try:
             driver = self._get_driver()
-            raw_pre = driver.call_tool(
-                "get_window_state",
-                {"pid": pid, "window_id": window_id, "include_screenshot": needs_pixel_anchor, "tree_format": "both"},
-            )
+            pre_obs_args: dict[str, Any] = {
+                "pid": pid,
+                "window_id": window_id,
+                "include_screenshot": needs_pixel_anchor,
+                "tree_format": "both",
+            }
+            if query_val is not None:
+                pre_obs_args["query"] = query_val
+            if max_depth_val is not None:
+                pre_obs_args["max_depth"] = max_depth_val
+            raw_pre = driver.call_tool("get_window_state", pre_obs_args)
             if raw_pre.get("isError"):
                 err_txt = "".join(c.get("text", "") for c in (raw_pre.get("content") or []) if isinstance(c, Mapping))
                 raise RuntimeError(err_txt or "get_window_state returned isError=true")
@@ -1697,6 +1956,12 @@ class JevMcpServer:
             self._record_trace(payload)
             return _format_tool_result(payload, is_error=True)
         obs_ms = round((time.perf_counter() - obs_started) * 1000, 2)
+        obs_disclosure = {
+            "total_actionable_elements": pre_obs["total_actionable_elements"],
+            "omitted_elements_count": pre_obs["omitted_elements_count"],
+            "omitted_candidates_count": pre_obs["omitted_candidates_count"],
+            "observation_truncated": pre_obs["observation_truncated"],
+        }
 
         # Stage 2: Build / validate closed candidate table bound to fresh observation
         try:
@@ -1708,6 +1973,22 @@ class JevMcpServer:
                     for h in self.accounting.history_log[-MAX_HISTORY:]
                     if isinstance(h.get("selected_id"), str) and isinstance(h.get("status"), str)
                 ]
+            referenced_el_ids = {
+                c["arguments"]["element_index"]
+                for c in bound_candidates
+                if isinstance(c.get("arguments"), Mapping) and isinstance(c["arguments"].get("element_index"), int)
+            }
+            all_els = pre_obs.get("all_elements") or pre_obs["elements"]
+            prompt_els: list[Mapping[str, Any]] = [
+                e for e in all_els if e.get("element_index") in referenced_el_ids
+            ][:MAX_ELEMENTS]
+            seen_prompt_ids = {e["element_index"] for e in prompt_els}
+            for e in pre_obs["elements"]:
+                if len(prompt_els) >= MAX_ELEMENTS:
+                    break
+                if e["element_index"] not in seen_prompt_ids:
+                    prompt_els.append(e)
+                    seen_prompt_ids.add(e["element_index"])
             select_req = validate_select_request({
                 "goal": goal,
                 "pid": pid,
@@ -1720,7 +2001,7 @@ class JevMcpServer:
                         "label": e["label"],
                         "state": e["state"],
                     }
-                    for e in pre_obs["elements"]
+                    for e in prompt_els
                 ],
                 "history": history_in,
                 "candidates": [{"id": c["id"], "description": c["description"]} for c in bound_candidates],
@@ -1734,6 +2015,7 @@ class JevMcpServer:
                 "window_id": window_id,
                 "pre_snapshot_id": pre_obs["snapshot_id"],
                 "pre_static_texts": pre_obs["static_texts"],
+                **obs_disclosure,
                 "verified": False,
                 "timings_ms": {
                     "observe_ms": obs_ms,
@@ -1762,6 +2044,7 @@ class JevMcpServer:
                 "window_id": window_id,
                 "pre_snapshot_id": pre_obs["snapshot_id"],
                 "pre_static_texts": pre_obs["static_texts"],
+                **obs_disclosure,
                 "selected_id": decision.get("selected_id"),
                 "requested_model": decision.get("requested_model"),
                 "returned_model": decision.get("returned_model"),
@@ -1799,6 +2082,7 @@ class JevMcpServer:
                 "pid": pid,
                 "window_id": window_id,
                 "pre_snapshot_id": pre_obs["snapshot_id"],
+                **obs_disclosure,
                 "selected_id": decision.get("selected_id"),
                 "returned_model": decision.get("returned_model"),
                 "confidence": decision.get("confidence"),
@@ -1852,6 +2136,7 @@ class JevMcpServer:
                 "pid": pid,
                 "window_id": window_id,
                 "pre_snapshot_id": pre_obs["snapshot_id"],
+                **obs_disclosure,
                 "selected_id": authorized["id"],
                 "dispatched_tool": authorized["tool"],
                 "dispatched_arguments": sanitized_args,
@@ -1878,10 +2163,17 @@ class JevMcpServer:
         expected_post = args.get("expected_postcondition")
         verify_started = time.perf_counter()
         try:
-            raw_post = driver.call_tool(
-                "get_window_state",
-                {"pid": pid, "window_id": window_id, "include_screenshot": False, "tree_format": "both"},
-            )
+            post_obs_args: dict[str, Any] = {
+                "pid": pid,
+                "window_id": window_id,
+                "include_screenshot": False,
+                "tree_format": "both",
+            }
+            if query_val is not None:
+                post_obs_args["query"] = query_val
+            if max_depth_val is not None:
+                post_obs_args["max_depth"] = max_depth_val
+            raw_post = driver.call_tool("get_window_state", post_obs_args)
             if raw_post.get("isError"):
                 err_txt = "".join(c.get("text", "") for c in (raw_post.get("content") or []) if isinstance(c, Mapping))
                 raise RuntimeError(err_txt or "post-dispatch get_window_state returned isError=true")
@@ -1905,6 +2197,7 @@ class JevMcpServer:
                 "pid": pid,
                 "window_id": window_id,
                 "pre_snapshot_id": pre_obs["snapshot_id"],
+                **obs_disclosure,
                 "selected_id": authorized["id"],
                 "dispatched_tool": authorized["tool"],
                 "dispatch_receipt": safe_receipt,
@@ -1952,6 +2245,7 @@ class JevMcpServer:
             "post_snapshot_id": post_obs["snapshot_id"],
             "pre_static_texts": pre_obs["static_texts"],
             "post_static_texts": post_obs["static_texts"],
+            **obs_disclosure,
             "selected_id": authorized["id"],
             "selected_description": authorized["description"],
             "dispatched_tool": authorized["tool"],
