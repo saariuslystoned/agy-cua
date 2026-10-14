@@ -562,7 +562,13 @@ class StdioEndToEndTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "stale_snapshot_id"):
             jev.build_bound_candidates(
-                [{"id": "click-7", "description": "Click 7", "tool": "click", "element_token": "s00000001:5"}],
+                [{"id": "click-7", "description": "Click 7", "tool": "click", "element_index": 5, "element_token": "s00000001:5"}],
+                observation,
+            )
+
+        with self.assertRaisesRegex(ValueError, "invalid_element_token"):
+            jev.build_bound_candidates(
+                [{"id": "click-7", "description": "Click 7", "tool": "click", "element_index": 5, "element_token": "s00000011:9"}],
                 observation,
             )
 

@@ -9,7 +9,7 @@ This skill is scoped strictly to the `saariuslystoned/agy-cua` workspace (`.agen
 
 ## Review Policy for `saariuslystoned/agy-cua`
 
-- **Exclusive review mechanism:** Pull requests in `saariuslystoned/agy-cua` use **GitHub Copilot Code Review** (`copilot-pull-request-reviewer`, GraphQL bot node ID `BOT_kgDOCnlnWA`), guided by [`.github/skills/code-review/SKILL.md`](file:///Users/bobbybones/Developer/repos/saariuslystoned/agy-cua/.github/skills/code-review/SKILL.md).
+- **Exclusive review mechanism:** Pull requests in `saariuslystoned/agy-cua` use **GitHub Copilot Code Review** (`copilot-pull-request-reviewer`, GraphQL bot node ID `BOT_kgDOCnlnWA`), guided by [`.github/skills/code-review/SKILL.md`](../../../.github/skills/code-review/SKILL.md).
 - **Do not use external swarm reviewers here:** Do **not** invoke `smoky-openclaw-autoreview`, Spark-2, OpenClaw, ClawSweeper, or EmDashBot on `saariuslystoned/agy-cua`.
 
 ## Workflow
@@ -63,7 +63,7 @@ query($prNumber: Int!) {
 
 ### 4. Repair, Resolve Threads, Re-Review, and Merge
 1. If any review thread is unresolved (`isResolved: false`) or the latest Copilot review body flags a concrete defect:
-   - Fix the defect and add/update unit tests in [`tests/test_agy_cua_jev_mcp.py`](file:///Users/bobbybones/Developer/repos/saariuslystoned/agy-cua/tests/test_agy_cua_jev_mcp.py).
+   - Fix the defect and add/update unit tests in [`tests/test_agy_cua_jev_mcp.py`](../../../tests/test_agy_cua_jev_mcp.py).
    - Commit and push to the PR branch.
    - Resolve addressed review threads via GraphQL:
      ```bash
