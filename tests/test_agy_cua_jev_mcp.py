@@ -350,6 +350,7 @@ class ControllerBoundaryTest(unittest.TestCase):
         self.assertEqual(len(obs["elements"]), 1)
         self.assertEqual(obs["elements"][0]["role"], "AXTextField")
         self.assertEqual(obs["elements"][0]["element_index"], 1)
+        self.assertEqual(obs["indexed_element_ids"], {1})
 
     def test_refuses_invented_selection_at_authorization(self):
         bound = jev.build_bound_candidates(None, self.observation)
@@ -399,10 +400,14 @@ class ControllerBoundaryTest(unittest.TestCase):
 
     def test_check_postcondition_rejects_unchanged_snapshot_and_empty_predicates(self):
         pre = {"snapshot_id": "s00000011", "static_texts": ["0"], "elements": []}
+        post_noop = {"snapshot_id": "s00000012", "static_texts": ["0"], "elements": []}
         post = {"snapshot_id": "s00000012", "static_texts": ["7"], "elements": []}
         _, ok_same, reason_same = jev.check_postcondition(None, pre, pre)
         self.assertFalse(ok_same)
         self.assertEqual(reason_same, "post_snapshot_id_unchanged")
+        _, ok_noop, reason_noop = jev.check_postcondition(None, pre, post_noop)
+        self.assertFalse(ok_noop)
+        self.assertEqual(reason_noop, "no_observable_state_change")
         _, ok_empty_obj, reason_empty_obj = jev.check_postcondition({}, pre, post)
         self.assertFalse(ok_empty_obj)
         self.assertEqual(reason_empty_obj, "empty_expected_postcondition")
