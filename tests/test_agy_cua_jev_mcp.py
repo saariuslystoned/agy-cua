@@ -321,6 +321,32 @@ class ControllerBoundaryTest(unittest.TestCase):
                 [{"id": "c1", "description": "front", "tool": "bring_to_front", "element_index": 5}],
                 self.observation,
             )
+        with self.assertRaisesRegex(ValueError, "background_drag_unavailable_on_macos"):
+            jev.build_bound_candidates(
+                [{"id": "c1", "description": "drag", "tool": "drag", "from_x": 10, "from_y": 10, "to_x": 40, "to_y": 40}],
+                self.observation,
+            )
+
+    def test_extract_window_observation_preserves_empty_text_field(self):
+        obs = jev.extract_window_observation(
+            {
+                "structuredContent": {
+                    "pid": 42,
+                    "window_id": 100,
+                    "snapshot_id": "s00000011",
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "Win", "enabled": True},
+                        {"element_index": 1, "role": "AXTextField", "label": "", "value": "", "enabled": True, "parent_index": 0},
+                    ],
+                },
+                "content": [{"type": "text", "text": '[1] AXTextField ""'}],
+            },
+            expected_pid=42,
+            expected_window_id=100,
+        )
+        self.assertEqual(len(obs["elements"]), 1)
+        self.assertEqual(obs["elements"][0]["role"], "AXTextField")
+        self.assertEqual(obs["elements"][0]["element_index"], 1)
 
     def test_refuses_invented_selection_at_authorization(self):
         bound = jev.build_bound_candidates(None, self.observation)

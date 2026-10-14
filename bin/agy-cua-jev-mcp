@@ -465,6 +465,7 @@ def evaluate_jev_choice(
     wire_payload = {
         "model": route.model,
         "state": {
+            "goal": validated["goal"],
             "target": {"pid": validated["pid"], "window_id": validated["window_id"]},
             "snapshot_id": validated["snapshot_id"],
             "elements": validated["elements"],
@@ -474,8 +475,9 @@ def evaluate_jev_choice(
             "candidate": {
                 "type": "choice",
                 "instructions": (
-                    f"{validated['goal']}\n"
-                    "Select the single best candidate ID for the next action on this window, "
+                    f"Immediate step goal: {validated['goal']}\n"
+                    "Select the single candidate ID whose action directly satisfies the immediate step goal "
+                    "(matching the exact target button/element label or index requested in the goal), "
                     "or select 'reobserve' / 'abstain' if none should be executed."
                 ),
                 "criteria": criteria,
@@ -762,7 +764,13 @@ def extract_window_observation(
 
         if role not in ACTIONABLE_AX_ROLES and "AXPress" not in actions:
             continue
-        if not label and not value:
+        if not label and not value and role not in {
+            "AXTextField",
+            "AXTextArea",
+            "AXSearchField",
+            "AXComboBox",
+            "AXScrollArea",
+        }:
             continue
 
         state_str = "enabled"
@@ -870,6 +878,11 @@ def build_bound_candidates(
             )
 
         tool = item.get("tool", "click")
+        if tool == "drag":
+            raise ValueError(
+                "background_drag_unavailable_on_macos: cua-driver on macOS requires foreground delivery for drag, "
+                "which violates background-only execution"
+            )
         if not isinstance(tool, str) or tool in FORBIDDEN_TOOLS or tool not in ALLOWED_BACKGROUND_TOOLS:
             raise ValueError(f"forbidden_or_unsupported_tool: {tool!r}")
 
@@ -1312,13 +1325,22 @@ class JevMcpServer:
                 is_error=True,
             )
 
-        # Stage 1: Observe target window via cua-driver (background, no screenshot needed for Jev)
+        # Stage 1: Observe target window via cua-driver (text-only to Jev; anchor window screenshot in driver session only if a candidate uses window-local pixels)
+        raw_cands = args.get("candidates")
+        needs_pixel_anchor = False
+        if isinstance(raw_cands, list):
+            for item in raw_cands:
+                if isinstance(item, Mapping):
+                    sub = item.get("arguments") if isinstance(item.get("arguments"), Mapping) else item
+                    if any(k in sub for k in ("x", "y", "from_x", "from_y", "to_x", "to_y")):
+                        needs_pixel_anchor = True
+                        break
         obs_started = time.perf_counter()
         try:
             driver = self._get_driver()
             raw_pre = driver.call_tool(
                 "get_window_state",
-                {"pid": pid, "window_id": window_id, "include_screenshot": False},
+                {"pid": pid, "window_id": window_id, "include_screenshot": needs_pixel_anchor},
             )
             if raw_pre.get("isError"):
                 err_txt = "".join(c.get("text", "") for c in (raw_pre.get("content") or []) if isinstance(c, Mapping))
@@ -1602,6 +1624,12 @@ class JevMcpServer:
             return reply({})
         if method == "tools/list":
             return reply({"tools": TOOLS})
+        if method == "resources/list":
+            return reply({"resources": []})
+        if method == "resources/templates/list":
+            return reply({"resourceTemplates": []})
+        if method == "prompts/list":
+            return reply({"prompts": []})
         if method == "tools/call":
             name = params.get("name")
             arguments = params.get("arguments") if isinstance(params.get("arguments"), Mapping) else {}
@@ -1665,8 +1693,8 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(signum, lambda *_: (server.close(), sys.exit(0)))
 
     try:
-        for raw_line in sys.stdin:
-            line = raw_line.strip()
+        while raw_bytes := sys.stdin.buffer.readline():
+            line = raw_bytes.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
             try:

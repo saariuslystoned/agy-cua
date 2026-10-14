@@ -41,23 +41,24 @@ Cua Driver sends input to one target process without moving the user's cursor or
 2. **Act & verify with `jev_step` (preferred when `agy-cua-jev` is available).**
    - Call `jev_step` on `agy-cua-jev` (`agy-cua_agy-cua-jev`) with `{pid, window_id, goal, expected_postcondition?}`.
    - By default, `jev_step` observes the window's AX tree (`include_screenshot: false`), builds background `click` candidates for all actionable window controls, asks `jev-1.13.0` to pick the single best candidate (or `reobserve` / `abstain`), validates scope and `snapshot_id`, dispatches the click in the background, and takes a fresh `get_window_state` to verify the result (`post_static_texts`, `timings_ms`).
-   - For text entry, keys, shortcuts, `set_value`, `scroll`, or `drag`, pass an explicit `candidates` array to `jev_step`, for example:
+   - For text entry, keys, shortcuts, `set_value`, or `scroll`, pass an explicit `candidates` array to `jev_step`, for example:
      - `{"id": "type-note", "description": "Type hello into [3] AXTextArea", "tool": "type_text", "element_index": 3, "text": "hello"}`
      - `{"id": "set-field", "description": "Set [4] AXTextField value to 42", "tool": "set_value", "element_index": 4, "value": "42"}`
      - `{"id": "press-return", "description": "Press return key in window", "tool": "press_key", "key": "return"}`
      - `{"id": "scroll-down", "description": "Scroll [5] AXScrollArea down", "tool": "scroll", "element_index": 5, "direction": "down", "amount": 3}`
 3. **Direct `agy-cua` element actions (when inspecting or acting directly).**
    - Call `get_window_state` with `pid`, `window_id`, and `include_screenshot: false` (or `true` when you need visual inspection).
-   - Optionally call `jev_select_action` with `{goal, pid, window_id, snapshot_id, elements, candidates}` to get Jev's validated choice before calling `click`, `type_text`, `set_value`, `press_key`, `hotkey`, `scroll`, or `drag`.
+   - Optionally call `jev_select_action` with `{goal, pid, window_id, snapshot_id, elements, candidates}` to get Jev's validated choice before calling `click`, `type_text`, `set_value`, `press_key`, `hotkey`, or `scroll`.
    - Always pass `snapshot_id` with `element_index`, and take a fresh `get_window_state` after the action to verify the new value from the tree.
 
 ## Supported capabilities and exact refusals
 
-- **Supported in background (`delivery_mode: "background"`):** `launch_app`, `get_window_state`, element-addressed `click` / `double_click` / `right_click`, `set_value`, `type_text` (native Cocoa fields), `press_key`, `hotkey` (window-posted), `scroll` (element or window-pixel wheel), and `drag` (window-pixel path).
+- **Supported in background (`delivery_mode: "background"`):** `launch_app`, `get_window_state`, element-addressed `click` / `double_click` / `right_click`, `set_value`, `type_text` (native Cocoa fields), `press_key`, `hotkey` (window-posted), and `scroll` (element or window-pixel wheel).
 - **Refused by `agy-cua-jev` controller:**
   - `stale_snapshot_id`: candidate or decision `snapshot_id` does not match the current window snapshot. Re-observe first.
   - `out_of_scope_target`: candidate `pid` or `window_id` differs from the explicitly targeted window.
   - `unknown_element_index`: `element_index` is not present in the current snapshot.
+  - `background_drag_unavailable_on_macos`: `cua-driver` on macOS requires `delivery_mode: "foreground"` for `drag`, which violates background-only execution.
   - `foreground_or_global_input_forbidden`: `delivery_mode: "foreground"`, `scope: "desktop"`, `bring_to_front`, `get_desktop_state`, `clipboard_*`, `kill_app`, `set_config`, or `browser_*`.
   - `window_id_not_found` / `window_owner_pid_mismatch`: target window closed or belongs to an out-of-process panel; recover by re-identifying the target window with `launch_app` or stopping cleanly.
 

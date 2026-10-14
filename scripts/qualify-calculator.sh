@@ -59,13 +59,39 @@ fi
 "$ROOT/scripts/probe-focus.sh" > "$OUT/focus-before.json"
 ( while :; do "$ROOT/scripts/probe-focus.sh"; sleep 0.5; done ) > "$OUT/focus-trace.jsonl" 2>/dev/null &
 SAMPLER=$!
+# Workaround for agy CLI 1.3.5 ignoring "disabled": true on GitKraken in
+# ~/.gemini/antigravity/mcp_config.json and blocking for 300s x 2 on gk mcp.
+python3 - <<'PY' >/dev/null 2>&1 &
+import json, os, pathlib, subprocess, time
+cfg = pathlib.Path.home() / ".gemini/antigravity/mcp_config.json"
+try:
+    disabled = json.loads(cfg.read_text()).get("mcpServers", {}).get("GitKraken", {}).get("disabled") is True
+except Exception:
+    disabled = False
+if not disabled:
+    raise SystemExit(0)
+def gk_pids():
+    out = subprocess.check_output(["ps", "-ax", "-o", "pid,command"], text=True).splitlines()[1:]
+    res = set()
+    for line in out:
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[1].endswith("--scheme=antigravity") and "gk mcp" in parts[1]:
+            res.add(int(parts[0]))
+    return res
+keep = gk_pids() | {os.getpid()}
+while True:
+    for pid in gk_pids() - keep:
+        subprocess.run(["kill", "-9", str(pid)], stderr=subprocess.DEVNULL)
+    time.sleep(0.25)
+PY
+GK_REAPER=$!
 START=$(date +%s)
 ( cd "$WS" && AGY_CUA_JEV_TRACE_FILE="$JEV_TRACE" "$AGY" -p "$(cat "$OUT/prompt.txt")" --model "$MODEL" \
     --dangerously-skip-permissions --sandbox --output-format stream-json \
     --print-timeout "$TIMEOUT" > "$OUT/agy.jsonl" 2> "$OUT/agy.stderr" )
 AGY_EXIT=$?
 DURATION=$(( $(date +%s) - START ))
-kill "$SAMPLER" 2>/dev/null; wait "$SAMPLER" 2>/dev/null
+kill "$SAMPLER" "$GK_REAPER" 2>/dev/null; wait "$SAMPLER" "$GK_REAPER" 2>/dev/null
 "$ROOT/scripts/probe-focus.sh" > "$OUT/focus-after.json"
 
 jq -r 'select(.event=="step_update" and .step_update.step_type=="tool" and (.step_update.state=="DONE" or .step_update.state=="ERROR"))
