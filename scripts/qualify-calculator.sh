@@ -82,19 +82,34 @@ except Exception:
     disabled = False
 if not disabled:
     raise SystemExit(0)
-def gk_pids():
-    out = subprocess.check_output(["ps", "-ax", "-o", "pid,command"], text=True).splitlines()[1:]
-    res = set()
+def descendant_gk_pids(root_pid):
+    out = subprocess.check_output(["ps", "-ax", "-o", "pid,ppid,command"], text=True).splitlines()[1:]
+    ppid_of = {}
+    gk_candidates = set()
     for line in out:
-        parts = line.strip().split(None, 1)
-        if len(parts) == 2 and parts[1].endswith("--scheme=antigravity") and "gk mcp" in parts[1]:
-            res.add(int(parts[0]))
-    return res
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, ppid, cmd = int(parts[0]), int(parts[1]), parts[2]
+        ppid_of[pid] = ppid
+        if cmd.endswith("--scheme=antigravity") and "gk mcp" in cmd:
+            gk_candidates.add(pid)
+    descendants = set()
+    for pid in gk_candidates:
+        cur = pid
+        seen = set()
+        while cur and cur not in seen:
+            if cur == root_pid:
+                descendants.add(pid)
+                break
+            seen.add(cur)
+            cur = ppid_of.get(cur, 0)
+    return descendants
 parent_pid = os.getppid()
 started = time.monotonic()
-keep = gk_pids() | {os.getpid()}
+keep = {os.getpid()}
 while os.getppid() == parent_pid and time.monotonic() - started < 600:
-    for pid in gk_pids() - keep:
+    for pid in descendant_gk_pids(parent_pid) - keep:
         subprocess.run(["kill", "-9", str(pid)], stderr=subprocess.DEVNULL)
     time.sleep(0.25)
 PY
@@ -139,6 +154,7 @@ if os.path.exists(trace_file):
             jev_entries.append(json.loads(line))
 
 if not jev_entries and os.path.exists(f"{out}/agy.jsonl"):
+    decoder = json.JSONDecoder()
     for line in open(f"{out}/agy.jsonl", encoding="utf-8"):
         if not line.strip():
             continue
@@ -150,12 +166,21 @@ if not jev_entries and os.path.exists(f"{out}/agy.jsonl"):
             srv = params.get("ServerName") or ""
             if srv in {"agy-cua-jev", "agy-cua_agy-cua-jev"}:
                 raw_out = str(ti.get("output") or "")
-                idx = raw_out.find("{")
-                if idx >= 0:
+                pos = 0
+                parsed_obj = None
+                while True:
+                    idx = raw_out.find("{", pos)
+                    if idx < 0:
+                        break
                     try:
-                        jev_entries.append(json.loads(raw_out[idx:]))
+                        obj, end = decoder.raw_decode(raw_out, idx)
+                        if isinstance(obj, dict) and "schema" in obj:
+                            parsed_obj = obj
+                        pos = end
                     except Exception:
-                        pass
+                        pos = idx + 1
+                if parsed_obj is not None:
+                    jev_entries.append(parsed_obj)
 
 observe_vals = [e.get("timings_ms", {}).get("observe_ms", 0.0) for e in jev_entries if "timings_ms" in e]
 provider_vals = [e.get("timings_ms", {}).get("provider_ms", e.get("provider_ms", 0.0)) for e in jev_entries]
