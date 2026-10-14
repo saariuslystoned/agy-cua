@@ -1045,7 +1045,7 @@ def check_postcondition(
         return state_changed, False, "post_snapshot_id_unchanged"
 
     if expected is None:
-        return state_changed, True, ("observable_state_changed" if state_changed else "fresh_observation_captured")
+        return state_changed, state_changed, ("observable_state_changed" if state_changed else "no_observable_state_change")
 
     if not isinstance(expected, Mapping) or not expected:
         return state_changed, False, "empty_expected_postcondition"

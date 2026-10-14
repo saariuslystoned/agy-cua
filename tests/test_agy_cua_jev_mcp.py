@@ -41,7 +41,9 @@ FAKE_DRIVER_SCRIPT = textwrap.dedent("""\
             args = params.get("arguments", {})
             if name == "get_window_state":
                 step += 1
-                if step == 2 and args.get("window_id") == 999:
+                if args.get("tree_format") != "both":
+                    res = {"content": [{"type": "text", "text": "missing_tree_format_both"}], "isError": True}
+                elif step == 2 and args.get("window_id") == 999:
                     res = {"content": [{"type": "text", "text": "window_closed"}], "isError": True}
                 else:
                     snap = f"s0000001{step}"
@@ -66,8 +68,8 @@ FAKE_DRIVER_SCRIPT = textwrap.dedent("""\
                         },
                     }
             elif name == "click":
-                if args.get("element_index") == 999:
-                    res = {"content": [{"type": "text", "text": "element_not_found"}], "isError": True}
+                if "element_index" in args or "snapshot_id" in args or not str(args.get("element_token", "")).endswith(":5"):
+                    res = {"content": [{"type": "text", "text": f"invalid_element_token_args:{args}"}], "isError": True}
                 else:
                     display = "7"
                     res = {"content": [{"type": "text", "text": "clicked 7"}], "structuredContent": {"ok": True}}
@@ -407,8 +409,8 @@ class ControllerBoundaryTest(unittest.TestCase):
         self.assertEqual(reason_same, "post_snapshot_id_unchanged")
         changed_noop, ok_noop, reason_noop = jev.check_postcondition(None, pre, post_noop)
         self.assertFalse(changed_noop)
-        self.assertTrue(ok_noop)
-        self.assertEqual(reason_noop, "fresh_observation_captured")
+        self.assertFalse(ok_noop)
+        self.assertEqual(reason_noop, "no_observable_state_change")
         _, ok_empty_obj, reason_empty_obj = jev.check_postcondition({}, pre, post)
         self.assertFalse(ok_empty_obj)
         self.assertEqual(reason_empty_obj, "empty_expected_postcondition")
@@ -530,7 +532,61 @@ class StdioEndToEndTest(unittest.TestCase):
             self.assertTrue(sc["accounting"]["halted"])
             self.assertEqual(sc["accounting"]["halt_reason"], "uncertain_verification_after_dispatch")
 
+    def test_element_token_binding_and_stale_token_rejection(self):
+        observation = jev.extract_window_observation(
+            {
+                "structuredContent": {
+                    "pid": 42,
+                    "window_id": 100,
+                    "snapshot_id": "s00000011",
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "Calculator", "actions": ["AXRaise"]},
+                        {"element_index": 5, "role": "AXButton", "label": "7", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                    ],
+                },
+                "content": [{"type": "text", "text": '- [5] AXButton (7)'}],
+            },
+            expected_pid=42,
+            expected_window_id=100,
+        )
+        bound_default = jev.build_bound_candidates(None, observation)
+        self.assertEqual(bound_default[0]["arguments"]["element_token"], "s00000011:5")
+        self.assertEqual(bound_default[0]["arguments"]["element_index"], 5)
+
+        bound_from_tok = jev.build_bound_candidates(
+            [{"id": "click-7", "description": "Click 7", "tool": "click", "element_token": "s00000011:5"}],
+            observation,
+        )
+        self.assertEqual(bound_from_tok[0]["arguments"]["element_index"], 5)
+        self.assertEqual(bound_from_tok[0]["arguments"]["element_token"], "s00000011:5")
+
+        with self.assertRaisesRegex(ValueError, "stale_snapshot_id"):
+            jev.build_bound_candidates(
+                [{"id": "click-7", "description": "Click 7", "tool": "click", "element_token": "s00000001:5"}],
+                observation,
+            )
+
+        with self.assertRaisesRegex(ValueError, "invalid_element_token"):
+            jev.build_bound_candidates(
+                [{"id": "click-7", "description": "Click 7", "tool": "click", "element_token": "malformed"}],
+                observation,
+            )
+
+    def test_check_postcondition_rejects_noop_without_expected_postcondition(self):
+        pre_obs = {"snapshot_id": "s1", "static_texts": ["0"], "elements": [{"element_index": 2, "label": "All Clear", "value": "", "state": "enabled"}]}
+        post_obs = {"snapshot_id": "s2", "static_texts": ["0"], "elements": [{"element_index": 2, "label": "All Clear", "value": "", "state": "enabled"}]}
+        changed, met, reason = jev.check_postcondition(None, pre_obs, post_obs)
+        self.assertFalse(changed)
+        self.assertFalse(met)
+        self.assertEqual(reason, "no_observable_state_change")
+
+        changed2, met2, reason2 = jev.check_postcondition({"static_text_contains": "0"}, pre_obs, post_obs)
+        self.assertFalse(changed2)
+        self.assertTrue(met2)
+        self.assertEqual(reason2, "expected_postcondition_verified")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -48,7 +48,7 @@ fi
 A=$((RANDOM % 87 + 12)); B=$((RANDOM % 87 + 12)); EXPECTED=$((A * B))
 if [[ "$REQUIRE_JEV" == 1 ]]; then
   cat > "$OUT/prompt.txt" <<EOF
-Use the cua-computer-use skill, the agy-cua MCP server, and the agy-cua-jev MCP server (jev_step). In Calculator (bundle id com.apple.calculator), compute $A × $B in the background using jev_step for each button press (All Clear, digits of $A, Multiply, digits of $B, Equals), leaving my current frontmost app in front, then report the verified value on Calculator's display, the Jev model used, and the step timings. Do not use the terminal, the browser, or subagents, and do not write files.
+Use the cua-computer-use skill, the agy-cua MCP server, and the agy-cua-jev MCP server (jev_step). In Calculator (bundle id com.apple.calculator), compute $A × $B in the background using jev_step with expected_postcondition for each button press (All Clear with static_text_contains "0", digits of $A, Multiply, digits of $B, Equals), leaving my current frontmost app in front, then report the verified value on Calculator's display, the Jev model used, and the step timings. Do not use the terminal, the browser, or subagents, and do not write files.
 EOF
 else
   cat > "$OUT/prompt.txt" <<EOF

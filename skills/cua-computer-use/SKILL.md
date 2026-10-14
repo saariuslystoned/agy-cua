@@ -40,6 +40,7 @@ Cua Driver sends input to one target process without moving the user's cursor or
    - *Cold-start note:* If the app was not already running, the first `launch_app` call may return before the main window finishes opening (so no `Windows:` block appears in text, and `list_windows` only puts `window_id` in `structuredContent`). Simply call `launch_app` a second time with the same `bundle_id` to get the `[window_id: N]` list in text.
 2. **Act & verify with `jev_step` (preferred when `agy-cua-jev` is available).**
    - Call `jev_step` on `agy-cua-jev` (`agy-cua_agy-cua-jev`) with `{pid, window_id, goal, expected_postcondition?}`.
+   - Always pass `expected_postcondition` when the post-action state may already match the pre-action state (for example, `expected_postcondition: {"static_text_contains": "0"}` when clicking `All Clear` / `Clear` on a Calculator window that may already display `0`); without `expected_postcondition`, `jev_step` requires an observable AX state change to mark the step verified.
    - By default, `jev_step` observes the window's AX tree (`include_screenshot: false`), builds background `click` candidates for all actionable window controls, asks `jev-1.13.0` to pick the single best candidate (or `reobserve` / `abstain`), validates scope and `snapshot_id`, dispatches the click in the background, and takes a fresh `get_window_state` to verify the result (`post_static_texts`, `timings_ms`).
    - For text entry, keys, shortcuts, `set_value`, or `scroll`, pass an explicit `candidates` array to `jev_step`, for example:
      - `{"id": "type-note", "description": "Type hello into [3] AXTextArea", "tool": "type_text", "element_index": 3, "text": "hello"}`
@@ -47,9 +48,9 @@ Cua Driver sends input to one target process without moving the user's cursor or
      - `{"id": "press-return", "description": "Press return key in window", "tool": "press_key", "key": "return"}`
      - `{"id": "scroll-down", "description": "Scroll [5] AXScrollArea down", "tool": "scroll", "element_index": 5, "direction": "down", "amount": 3}`
 3. **Direct `agy-cua` element actions (when inspecting or acting directly).**
-   - Call `get_window_state` with `pid`, `window_id`, and `include_screenshot: false` (or `true` when you need visual inspection).
+   - Call `get_window_state` with `pid`, `window_id`, `tree_format: "both"`, and `include_screenshot: false` (or `true` when you need visual inspection).
    - Optionally call `jev_select_action` with `{goal, pid, window_id, snapshot_id, elements, candidates}` to get Jev's validated choice before calling `click`, `type_text`, `set_value`, `press_key`, `hotkey`, or `scroll`.
-   - Always pass `snapshot_id` with `element_index`, and take a fresh `get_window_state` after the action to verify the new value from the tree.
+   - Always pass `element_token: "<snapshot_id>:<element_index>"` on direct `agy-cua` element actions, and take a fresh `get_window_state` after the action to verify the new value from the tree.
 
 ## Supported capabilities and exact refusals
 
