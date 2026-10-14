@@ -4,7 +4,7 @@ import json
 import sys
 
 JEV_SERVERS = {"agy-cua-jev", "agy-cua_agy-cua-jev"}
-JEV_SCHEMAS = {"agy_cua.jev_step_v1", "agy_cua.jev_select_action_v1"}
+JEV_SCHEMAS = {"agy_cua.jev_step_v1", "agy_cua.jev_batch_v1", "agy_cua.jev_select_action_v1"}
 
 
 def _extract_sanitized_jev_entry(raw_output):
@@ -80,6 +80,10 @@ def _extract_sanitized_jev_entry(raw_output):
         "timings_ms": clean_timings,
         "post_static_texts": clean_post_texts,
     }
+    for int_key in ("completed_count", "total_steps"):
+        val = parsed_obj.get(int_key)
+        if isinstance(val, int) and not isinstance(val, bool):
+            entry[int_key] = val
     provider_ms = parsed_obj.get("provider_ms")
     if isinstance(provider_ms, (int, float)) and not isinstance(provider_ms, bool):
         entry["provider_ms"] = provider_ms
