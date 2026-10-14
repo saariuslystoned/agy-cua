@@ -66,7 +66,6 @@ ALLOWED_BACKGROUND_TOOLS = frozenset({
     "hotkey",
     "set_value",
     "scroll",
-    "drag",
 })
 
 FORBIDDEN_TOOLS = frozenset({
@@ -994,6 +993,11 @@ def authorize_candidate_dispatch(
         raise ValueError("out_of_scope_target: candidate target does not match expected (pid, window_id)")
 
     tool = candidate.get("tool")
+    if tool == "drag":
+        raise ValueError(
+            "background_drag_unavailable_on_macos: cua-driver on macOS requires foreground delivery for drag, "
+            "which violates background-only execution"
+        )
     if tool in FORBIDDEN_TOOLS or tool not in ALLOWED_BACKGROUND_TOOLS:
         raise ValueError(f"forbidden_or_unsupported_tool: {tool!r}")
 
@@ -1023,22 +1027,42 @@ def check_postcondition(
     post_els = [(e.get("element_index"), e.get("label"), e.get("value"), e.get("state")) for e in (post_obs.get("elements") or [])]
     state_changed = (pre_texts != post_texts) or (pre_els != post_els)
 
-    if not expected:
+    if post_obs.get("snapshot_id") == pre_obs.get("snapshot_id"):
+        return state_changed, False, "post_snapshot_id_unchanged"
+
+    if expected is None:
         return state_changed, True, "fresh_observation_captured"
 
+    if not isinstance(expected, Mapping) or not expected:
+        return state_changed, False, "empty_expected_postcondition"
+
+    allowed_keys = {"static_text_contains", "element_value_equals", "element_label_contains"}
+    unknown_keys = sorted(set(expected.keys()) - allowed_keys)
+    if unknown_keys:
+        return state_changed, False, f"unsupported_postcondition_keys={unknown_keys!r}"
+
     if "static_text_contains" in expected:
-        needle = str(expected["static_text_contains"])
+        raw_needle = expected["static_text_contains"]
+        if not isinstance(raw_needle, str) or not raw_needle:
+            return state_changed, False, "invalid_empty_static_text_contains"
+        needle = raw_needle
         if not any(needle in t or needle in t.replace(",", "") for t in post_texts):
             return state_changed, False, f"expected static_text_contains={needle!r}, got {post_texts!r}"
 
     if "element_value_equals" in expected:
-        target_val = str(expected["element_value_equals"])
+        raw_val = expected["element_value_equals"]
+        if not isinstance(raw_val, str):
+            return state_changed, False, "invalid_element_value_equals"
+        target_val = raw_val
         values = [str(e.get("value") or "") for e in (post_obs.get("elements") or [])]
         if target_val not in values:
             return state_changed, False, f"expected element_value_equals={target_val!r}, got {values!r}"
 
     if "element_label_contains" in expected:
-        needle = str(expected["element_label_contains"])
+        raw_lbl = expected["element_label_contains"]
+        if not isinstance(raw_lbl, str) or not raw_lbl:
+            return state_changed, False, "invalid_empty_element_label_contains"
+        needle = raw_lbl
         labels = [str(e.get("label") or "") for e in (post_obs.get("elements") or [])]
         if not any(needle in lbl for lbl in labels):
             return state_changed, False, f"expected element_label_contains={needle!r}"
@@ -1538,6 +1562,9 @@ class JevMcpServer:
             )
         except Exception as exc:
             verify_ms = round((time.perf_counter() - verify_started) * 1000, 2)
+            self.accounting.uncertain_side_effects += 1
+            self.accounting.halted = True
+            self.accounting.halt_reason = "uncertain_verification_after_dispatch"
             payload = {
                 "schema": "agy_cua.jev_step_v1",
                 "status": "verification_failed",
@@ -1552,6 +1579,7 @@ class JevMcpServer:
                 "confidence": decision.get("confidence"),
                 "probabilities": decision.get("probabilities"),
                 "verified": False,
+                "uncertain_side_effect": True,
                 "timings_ms": {
                     "observe_ms": obs_ms,
                     "provider_ms": provider_ms,

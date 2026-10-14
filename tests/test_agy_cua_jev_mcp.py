@@ -41,27 +41,30 @@ FAKE_DRIVER_SCRIPT = textwrap.dedent("""\
             args = params.get("arguments", {})
             if name == "get_window_state":
                 step += 1
-                snap = f"s0000001{step}"
-                md = f'- [0] AXWindow "Calculator"\\n  - AXStaticText = "{display}"\\n  - [5] AXButton (7) [actions=[press]]'
-                res = {
-                    "content": [{"type": "text", "text": md}],
-                    "structuredContent": {
-                        "pid": args.get("pid", 42),
-                        "window_id": args.get("window_id", 100),
-                        "snapshot_id": snap,
-                        "app_name": "Calculator",
-                        "window_title": "Calculator",
-                        "elements_complete": True,
-                        "truncated": False,
-                        "tree_markdown": md,
-                        "elements": [
-                            {"element_index": 0, "role": "AXWindow", "label": "Calculator", "actions": ["AXRaise"]},
-                            {"element_index": 5, "role": "AXButton", "label": "7", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
-                            {"element_index": 26, "role": "AXMenuBar", "label": None, "actions": ["AXCancel"]},
-                            {"element_index": 27, "role": "AXMenuBarItem", "label": "Apple", "parent_index": 26, "actions": ["AXPress"]},
-                        ],
-                    },
-                }
+                if step == 2 and args.get("window_id") == 999:
+                    res = {"content": [{"type": "text", "text": "window_closed"}], "isError": True}
+                else:
+                    snap = f"s0000001{step}"
+                    md = f'- [0] AXWindow "Calculator"\\n  - AXStaticText = "{display}"\\n  - [5] AXButton (7) [actions=[press]]'
+                    res = {
+                        "content": [{"type": "text", "text": md}],
+                        "structuredContent": {
+                            "pid": args.get("pid", 42),
+                            "window_id": args.get("window_id", 100),
+                            "snapshot_id": snap,
+                            "app_name": "Calculator",
+                            "window_title": "Calculator",
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": [
+                                {"element_index": 0, "role": "AXWindow", "label": "Calculator", "actions": ["AXRaise"]},
+                                {"element_index": 5, "role": "AXButton", "label": "7", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                {"element_index": 26, "role": "AXMenuBar", "label": None, "actions": ["AXCancel"]},
+                                {"element_index": 27, "role": "AXMenuBarItem", "label": "Apple", "parent_index": 26, "actions": ["AXPress"]},
+                            ],
+                        },
+                    }
             elif name == "click":
                 if args.get("element_index") == 999:
                     res = {"content": [{"type": "text", "text": "element_not_found"}], "isError": True}
@@ -367,6 +370,46 @@ class ControllerBoundaryTest(unittest.TestCase):
                 valid_element_indices={0, 5},
             )
 
+    def test_authorizes_double_click_and_right_click_in_background(self):
+        bound = jev.build_bound_candidates(
+            [
+                {"id": "dbl.5", "description": "Double-click 7", "tool": "double_click", "element_index": 5},
+                {"id": "rgt.5", "description": "Right-click 7", "tool": "right_click", "element_index": 5},
+            ],
+            self.observation,
+        )
+        for cid, expected_tool in (("dbl.5", "double_click"), ("rgt.5", "right_click")):
+            auth = jev.authorize_candidate_dispatch(
+                {
+                    "kind": "selected",
+                    "pid": 42,
+                    "window_id": 100,
+                    "snapshot_id": "s00000011",
+                    "selected_id": cid,
+                },
+                bound,
+                expected_pid=42,
+                expected_window_id=100,
+                current_snapshot_id="s00000011",
+                valid_element_indices={0, 5},
+            )
+            self.assertEqual(auth["tool"], expected_tool)
+            self.assertEqual(auth["arguments"]["delivery_mode"], "background")
+            self.assertEqual(auth["arguments"]["snapshot_id"], "s00000011")
+
+    def test_check_postcondition_rejects_unchanged_snapshot_and_empty_predicates(self):
+        pre = {"snapshot_id": "s00000011", "static_texts": ["0"], "elements": []}
+        post = {"snapshot_id": "s00000012", "static_texts": ["7"], "elements": []}
+        _, ok_same, reason_same = jev.check_postcondition(None, pre, pre)
+        self.assertFalse(ok_same)
+        self.assertEqual(reason_same, "post_snapshot_id_unchanged")
+        _, ok_empty_obj, reason_empty_obj = jev.check_postcondition({}, pre, post)
+        self.assertFalse(ok_empty_obj)
+        self.assertEqual(reason_empty_obj, "empty_expected_postcondition")
+        _, ok_empty_str, reason_empty_str = jev.check_postcondition({"static_text_contains": ""}, pre, post)
+        self.assertFalse(ok_empty_str)
+        self.assertEqual(reason_empty_str, "invalid_empty_static_text_contains")
+
 
 class StdioEndToEndTest(unittest.TestCase):
     def test_jev_step_verifies_effect_and_records_stage_timings(self):
@@ -430,6 +473,58 @@ class StdioEndToEndTest(unittest.TestCase):
                 self.assertGreaterEqual(sc["timings_ms"][k], 0.0)
             self.assertTrue(os.path.exists(trace_file))
 
+    def test_jev_step_halts_on_post_dispatch_verification_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_driver = os.path.join(tmp, "fake-driver")
+            with open(fake_driver, "w", encoding="utf-8") as handle:
+                handle.write(FAKE_DRIVER_SCRIPT)
+            os.chmod(fake_driver, os.stat(fake_driver).st_mode | stat.S_IEXEC)
+
+            def fake_http(_req, _timeout):
+                return 200, json.dumps({
+                    "model": "jev-1.13.0",
+                    "answers": {
+                        "candidate": {
+                            "type": "choice",
+                            "choice": "ax.5.7",
+                            "confidence": 0.97,
+                            "probabilities": {"ax.5.7": 0.97, "reobserve": 0.02, "abstain": 0.01},
+                        }
+                    },
+                    "usage": {"input_tokens": 200, "output_tokens": 20},
+                })
+
+            server = jev.JevMcpServer(
+                env={"AGY_CUA_DRIVER": fake_driver, "TYPESAFE_API_KEY": "test-key"},
+                keychain_reader=lambda _: None,
+                http_post=fake_http,
+            )
+            try:
+                resp = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {
+                            "goal": "Click button 7",
+                            "pid": 42,
+                            "window_id": 999,
+                            "expected_postcondition": {"static_text_contains": "7"},
+                        },
+                    },
+                })
+            finally:
+                server.close()
+
+            sc = resp["result"]["structuredContent"]
+            self.assertEqual(sc["status"], "verification_failed")
+            self.assertFalse(sc["verified"])
+            self.assertEqual(sc["accounting"]["uncertain_side_effects"], 1)
+            self.assertTrue(sc["accounting"]["halted"])
+            self.assertEqual(sc["accounting"]["halt_reason"], "uncertain_verification_after_dispatch")
+
 
 if __name__ == "__main__":
     unittest.main()
+

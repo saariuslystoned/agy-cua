@@ -57,6 +57,18 @@ EOF
 fi
 
 "$ROOT/scripts/probe-focus.sh" > "$OUT/focus-before.json"
+SAMPLER=""
+GK_REAPER=""
+cleanup() {
+  for pid in "$SAMPLER" "$GK_REAPER"; do
+    if [[ -n "$pid" ]]; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+}
+trap cleanup EXIT INT TERM
+
 ( while :; do "$ROOT/scripts/probe-focus.sh"; sleep 0.5; done ) > "$OUT/focus-trace.jsonl" 2>/dev/null &
 SAMPLER=$!
 # Workaround for agy CLI 1.3.5 ignoring "disabled": true on GitKraken in
@@ -78,8 +90,10 @@ def gk_pids():
         if len(parts) == 2 and parts[1].endswith("--scheme=antigravity") and "gk mcp" in parts[1]:
             res.add(int(parts[0]))
     return res
+parent_pid = os.getppid()
+started = time.monotonic()
 keep = gk_pids() | {os.getpid()}
-while True:
+while os.getppid() == parent_pid and time.monotonic() - started < 600:
     for pid in gk_pids() - keep:
         subprocess.run(["kill", "-9", str(pid)], stderr=subprocess.DEVNULL)
     time.sleep(0.25)
@@ -91,7 +105,9 @@ START=$(date +%s)
     --print-timeout "$TIMEOUT" > "$OUT/agy.jsonl" 2> "$OUT/agy.stderr" )
 AGY_EXIT=$?
 DURATION=$(( $(date +%s) - START ))
-kill "$SAMPLER" "$GK_REAPER" 2>/dev/null; wait "$SAMPLER" "$GK_REAPER" 2>/dev/null
+cleanup
+SAMPLER=""
+GK_REAPER=""
 "$ROOT/scripts/probe-focus.sh" > "$OUT/focus-after.json"
 
 jq -r 'select(.event=="step_update" and .step_update.step_type=="tool" and (.step_update.state=="DONE" or .step_update.state=="ERROR"))
@@ -105,9 +121,9 @@ python3 "$ROOT/scripts/raw_mcp.py" window-state Calculator --png "$OUT/calculato
   > "$OUT/readback.json" 2> "$OUT/readback.stderr"
 DISPLAY_VALUE="$(jq -r '.static_texts[-1] // ""' "$OUT/readback.json" 2>/dev/null)"
 
-python3 - "$OUT" "$EXPECTED" "$DISPLAY_VALUE" "$AGY_EXIT" "$DURATION" "$MODEL" "$REQUIRE_JEV" <<'PY'
+python3 - "$OUT" "$EXPECTED" "$DISPLAY_VALUE" "$AGY_EXIT" "$DURATION" "$MODEL" "$REQUIRE_JEV" "$A" "$B" <<'PY'
 import csv, json, os, statistics, sys
-out, expected, display, agy_exit, duration, model, require_jev = sys.argv[1:]
+out, expected, display, agy_exit, duration, model, require_jev, a_val, b_val = sys.argv[1:]
 require_jev_bool = require_jev == "1"
 rows = list(csv.reader(open(f"{out}/tool-calls.tsv"), delimiter="\t", quoting=csv.QUOTE_NONE))
 servers = sorted({r[2] for r in rows if r[2] != "-"})
@@ -150,6 +166,35 @@ jev_models = sorted({e.get("returned_model") for e in jev_entries if e.get("retu
 jev_sdks = sorted({e.get("sdk_identity") for e in jev_entries if e.get("sdk_identity")})
 jev_selected = [e.get("selected_id") for e in jev_entries if e.get("selected_id")]
 
+mutating_driver_tools = {
+    "click", "double_click", "right_click", "type_text", "press_key",
+    "hotkey", "set_value", "scroll", "drag",
+}
+direct_cua_mutations = sum(
+    1 for r in rows
+    if r[2] in {"agy-cua", "agy-cua_agy-cua"} and r[3] in mutating_driver_tools
+)
+min_jev_steps = len(str(a_val)) + len(str(b_val)) + 2
+all_jev_verified = bool(jev_entries) and all(
+    e.get("schema") == "agy_cua.jev_step_v1"
+    and e.get("status") == "verified"
+    and e.get("verified") is True
+    and e.get("returned_model") == "jev-1.13.0"
+    and not (e.get("accounting") or {}).get("halted", False)
+    and (e.get("accounting") or {}).get("uncertain_calls", 0) == 0
+    and (e.get("accounting") or {}).get("uncertain_side_effects", 0) == 0
+    for e in jev_entries
+)
+final_post_texts = (jev_entries[-1].get("post_static_texts") or []) if jev_entries else []
+jev_sequence_complete = (
+    len(jev_entries) >= min_jev_steps
+    and any("multiply" in str(s) for s in jev_selected)
+    and bool(jev_selected)
+    and "equals" in str(jev_selected[-1])
+    and bool(final_post_texts)
+    and str(final_post_texts[-1]).replace(",", "") == expected
+)
+
 allowed_servers = {"agy-cua", "agy-cua-jev", "agy-cua_agy-cua", "agy-cua_agy-cua-jev"}
 servers_ok = bool(servers) and all(s in allowed_servers for s in servers)
 jev_used = any(s in {"agy-cua-jev", "agy-cua_agy-cua-jev"} for s in servers) and len(jev_entries) > 0
@@ -171,6 +216,10 @@ result = {
         "required": require_jev_bool,
         "used": jev_used,
         "calls": len(jev_entries),
+        "min_steps_required": min_jev_steps,
+        "direct_cua_mutations": direct_cua_mutations,
+        "all_steps_verified": all_jev_verified,
+        "sequence_complete": jev_sequence_complete,
         "returned_models": jev_models,
         "sdk_identities": jev_sdks,
         "selected_ids": jev_selected,
@@ -187,9 +236,19 @@ result = {
 result["verdict"] = "PASS" if (
     result["display_matches"]
     and result["agy_exit"] == 0
+    and result["errors"] == 0
     and result["calculator_frontmost_samples"] == 0
     and servers_ok
-    and (not require_jev_bool or (jev_used and jev_models == ["jev-1.13.0"]))
+    and (
+        not require_jev_bool
+        or (
+            jev_used
+            and jev_models == ["jev-1.13.0"]
+            and direct_cua_mutations == 0
+            and all_jev_verified
+            and jev_sequence_complete
+        )
+    )
 ) else "FAIL"
 json.dump(result, open(f"{out}/result.json", "w"), indent=2)
 print(json.dumps(result, indent=2))
