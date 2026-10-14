@@ -16,6 +16,7 @@ import json
 import math
 import os
 import re
+import selectors
 import signal
 import subprocess
 import sys
@@ -39,6 +40,9 @@ CLIENT_IDENTITY = "agy-cua-jev-stdlib/0.2.0"
 DEFAULT_TIMEOUT_MS = 10_000
 MIN_TIMEOUT_MS = 1_000
 MAX_TIMEOUT_MS = 30_000
+DEFAULT_DRIVER_TIMEOUT_MS = 15_000
+MIN_DRIVER_TIMEOUT_MS = 50
+MAX_DRIVER_TIMEOUT_MS = 60_000
 DEFAULT_MAX_CALLS = 32
 MAX_ATTEMPTS_PER_CALL = 1
 MAX_JSON_BYTES = 65_536
@@ -195,6 +199,16 @@ def clamp_timeout_ms(raw: Any) -> int:
     if val < MIN_TIMEOUT_MS:
         return DEFAULT_TIMEOUT_MS
     return min(val, MAX_TIMEOUT_MS)
+
+
+def clamp_driver_timeout_ms(raw: Any) -> int:
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_DRIVER_TIMEOUT_MS
+    if val < MIN_DRIVER_TIMEOUT_MS:
+        return DEFAULT_DRIVER_TIMEOUT_MS
+    return min(val, MAX_DRIVER_TIMEOUT_MS)
 
 
 def clamp_max_calls(raw: Any) -> int:
@@ -1034,57 +1048,194 @@ def authorize_candidate_dispatch(
     return {"id": selected_id, "tool": tool, "arguments": args, "description": candidate.get("description")}
 
 
+_NUMERIC_GROUPED_RE = re.compile(r"^[+-]?\d[\d,]*(?:\.\d+)?$")
+
+
+def _normalize_numeric_grouped(text: str) -> str | None:
+    stripped = text.strip()
+    if not _NUMERIC_GROUPED_RE.match(stripped):
+        return None
+    return stripped.replace(",", "")
+
+
+def _static_text_exact_match(expected_val: str, candidate_text: str) -> bool:
+    if candidate_text == expected_val:
+        return True
+    norm_exp = _normalize_numeric_grouped(expected_val)
+    norm_cand = _normalize_numeric_grouped(candidate_text)
+    if norm_exp is not None and norm_cand is not None:
+        return norm_exp == norm_cand
+    return False
+
+
+def _select_static_texts(
+    post_texts: list[str],
+    expected: Mapping[str, Any],
+) -> tuple[list[str] | None, str | None]:
+    if "static_text_index" not in expected:
+        return post_texts, None
+    idx = expected["static_text_index"]
+    if not isinstance(idx, int) or isinstance(idx, bool):
+        return None, "invalid_static_text_index"
+    try:
+        return [post_texts[idx]], None
+    except IndexError:
+        return None, f"static_text_index_out_of_range={idx!r} (len={len(post_texts)})"
+
+
 def check_postcondition(
     expected: Mapping[str, Any] | None,
     pre_obs: Mapping[str, Any],
     post_obs: Mapping[str, Any],
+    *,
+    target_element_index: int | None = None,
 ) -> tuple[bool, bool, str]:
     """Return (state_changed, postcondition_met, verification_reason) from fresh post-dispatch observation."""
     pre_texts = list(pre_obs.get("static_texts") or [])
     post_texts = list(post_obs.get("static_texts") or [])
-    pre_els = [(e.get("element_index"), e.get("label"), e.get("value"), e.get("state")) for e in (pre_obs.get("elements") or [])]
-    post_els = [(e.get("element_index"), e.get("label"), e.get("value"), e.get("state")) for e in (post_obs.get("elements") or [])]
+    pre_els = [
+        (e.get("element_index"), e.get("role"), e.get("label"), e.get("value"), e.get("state"))
+        for e in (pre_obs.get("elements") or [])
+    ]
+    post_els = [
+        (e.get("element_index"), e.get("role"), e.get("label"), e.get("value"), e.get("state"))
+        for e in (post_obs.get("elements") or [])
+    ]
     state_changed = (pre_texts != post_texts) or (pre_els != post_els)
 
     if post_obs.get("snapshot_id") == pre_obs.get("snapshot_id"):
         return state_changed, False, "post_snapshot_id_unchanged"
 
     if expected is None:
-        return state_changed, state_changed, ("observable_state_changed" if state_changed else "no_observable_state_change")
+        return state_changed, False, ("observable_state_changed" if state_changed else "no_observable_state_change")
 
     if not isinstance(expected, Mapping) or not expected:
         return state_changed, False, "empty_expected_postcondition"
 
-    allowed_keys = {"static_text_contains", "element_value_equals", "element_label_contains"}
+    allowed_keys = {
+        "static_text_equals",
+        "static_text_contains",
+        "static_text_index",
+        "element_index",
+        "element_value_equals",
+        "element_label_equals",
+        "element_label_contains",
+    }
     unknown_keys = sorted(set(expected.keys()) - allowed_keys)
     if unknown_keys:
         return state_changed, False, f"unsupported_postcondition_keys={unknown_keys!r}"
+
+    predicate_keys = {
+        "static_text_equals",
+        "static_text_contains",
+        "element_value_equals",
+        "element_label_equals",
+        "element_label_contains",
+    }
+    if not (set(expected.keys()) & predicate_keys):
+        return state_changed, False, "empty_expected_postcondition"
+
+    if "static_text_index" in expected and "static_text_equals" not in expected and "static_text_contains" not in expected:
+        return state_changed, False, "static_text_index_without_static_text_predicate"
+
+    if "static_text_equals" in expected:
+        raw_exact = expected["static_text_equals"]
+        if not isinstance(raw_exact, str) or not raw_exact:
+            return state_changed, False, "invalid_empty_static_text_equals"
+        scoped_texts, idx_err = _select_static_texts(post_texts, expected)
+        if idx_err is not None or scoped_texts is None:
+            return state_changed, False, idx_err or "invalid_static_text_index"
+        if not any(_static_text_exact_match(raw_exact, t) for t in scoped_texts):
+            return state_changed, False, f"expected static_text_equals={raw_exact!r}, got {scoped_texts!r}"
 
     if "static_text_contains" in expected:
         raw_needle = expected["static_text_contains"]
         if not isinstance(raw_needle, str) or not raw_needle:
             return state_changed, False, "invalid_empty_static_text_contains"
+        scoped_texts, idx_err = _select_static_texts(post_texts, expected)
+        if idx_err is not None or scoped_texts is None:
+            return state_changed, False, idx_err or "invalid_static_text_index"
         needle = raw_needle
-        if not any(needle in t or needle in t.replace(",", "") for t in post_texts):
-            return state_changed, False, f"expected static_text_contains={needle!r}, got {post_texts!r}"
+        if not any(needle in t or needle in t.replace(",", "") for t in scoped_texts):
+            return state_changed, False, f"expected static_text_contains={needle!r}, got {scoped_texts!r}"
 
-    if "element_value_equals" in expected:
-        raw_val = expected["element_value_equals"]
-        if not isinstance(raw_val, str):
-            return state_changed, False, "invalid_element_value_equals"
-        target_val = raw_val
-        values = [str(e.get("value") or "") for e in (post_obs.get("elements") or [])]
-        if target_val not in values:
-            return state_changed, False, f"expected element_value_equals={target_val!r}, got {values!r}"
+    has_element_pred = any(
+        k in expected for k in ("element_value_equals", "element_label_equals", "element_label_contains")
+    )
+    if "element_index" in expected and not has_element_pred:
+        return state_changed, False, "element_index_without_element_predicate"
 
-    if "element_label_contains" in expected:
-        raw_lbl = expected["element_label_contains"]
-        if not isinstance(raw_lbl, str) or not raw_lbl:
-            return state_changed, False, "invalid_empty_element_label_contains"
-        needle = raw_lbl
-        labels = [str(e.get("label") or "") for e in (post_obs.get("elements") or [])]
-        if not any(needle in lbl for lbl in labels):
-            return state_changed, False, f"expected element_label_contains={needle!r}"
+    if has_element_pred:
+        bound_idx: Any = expected.get("element_index", target_element_index)
+        if bound_idx is None:
+            return (
+                state_changed,
+                False,
+                "unbound_element_postcondition: element predicates require element_index or an element-addressed candidate",
+            )
+        if not isinstance(bound_idx, int) or isinstance(bound_idx, bool) or bound_idx < 0:
+            return state_changed, False, f"invalid_element_index={bound_idx!r}"
+
+        pre_by_idx = {
+            e.get("element_index"): e
+            for e in (pre_obs.get("elements") or [])
+            if isinstance(e, Mapping) and isinstance(e.get("element_index"), int)
+        }
+        post_by_idx = {
+            e.get("element_index"): e
+            for e in (post_obs.get("elements") or [])
+            if isinstance(e, Mapping) and isinstance(e.get("element_index"), int)
+        }
+        if bound_idx not in post_by_idx:
+            return state_changed, False, f"target_element_missing: element_index={bound_idx} not in post_obs"
+
+        post_el = post_by_idx[bound_idx]
+        pre_el = pre_by_idx.get(bound_idx)
+        if pre_el is not None:
+            pre_role = str(pre_el.get("role") or "").strip()
+            post_role = str(post_el.get("role") or "").strip()
+            if pre_role and post_role and pre_role != post_role:
+                return (
+                    state_changed,
+                    False,
+                    f"target_element_role_mismatch: element_index={bound_idx} pre_role={pre_role!r} != post_role={post_role!r}",
+                )
+
+        if "element_value_equals" in expected:
+            raw_val = expected["element_value_equals"]
+            if not isinstance(raw_val, str):
+                return state_changed, False, "invalid_element_value_equals"
+            actual_val = str(post_el.get("value") or "")
+            if actual_val != raw_val:
+                return (
+                    state_changed,
+                    False,
+                    f"expected element_value_equals={raw_val!r} on element_index={bound_idx}, got {actual_val!r}",
+                )
+
+        if "element_label_equals" in expected:
+            raw_lbl_eq = expected["element_label_equals"]
+            if not isinstance(raw_lbl_eq, str) or not raw_lbl_eq:
+                return state_changed, False, "invalid_empty_element_label_equals"
+            actual_lbl = str(post_el.get("label") or "")
+            if actual_lbl != raw_lbl_eq:
+                return (
+                    state_changed,
+                    False,
+                    f"expected element_label_equals={raw_lbl_eq!r} on element_index={bound_idx}, got {actual_lbl!r}",
+                )
+
+        if "element_label_contains" in expected:
+            raw_lbl = expected["element_label_contains"]
+            if not isinstance(raw_lbl, str) or not raw_lbl:
+                return state_changed, False, "invalid_empty_element_label_contains"
+            actual_lbl = str(post_el.get("label") or "")
+            if raw_lbl not in actual_lbl:
+                return (
+                    state_changed,
+                    False,
+                    f"expected element_label_contains={raw_lbl!r} on element_index={bound_idx}, got {actual_lbl!r}",
+                )
 
     return state_changed, True, "expected_postcondition_verified"
 
@@ -1092,50 +1243,130 @@ def check_postcondition(
 class DriverClient:
     """Persistent stdio JSON-RPC client to `cua-driver mcp` for `jev_step`."""
 
-    def __init__(self, driver_bin: str) -> None:
+    def __init__(
+        self,
+        driver_bin: str,
+        timeout_ms: int = DEFAULT_DRIVER_TIMEOUT_MS,
+        env: Mapping[str, str] = os.environ,
+    ) -> None:
         self.driver_bin = driver_bin
+        self.timeout_ms = clamp_driver_timeout_ms(timeout_ms)
+        self._env = env
         self._lock = threading.Lock()
-        self._proc: subprocess.Popen[str] | None = None
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._rx_buf = bytearray()
         self._next_id = 0
 
-    def _ensure_started(self) -> subprocess.Popen[str]:
+    def _reset_unlocked(self) -> None:
+        proc = self._proc
+        self._proc = None
+        self._rx_buf.clear()
+        if proc is not None:
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except Exception:
+                pass
+            try:
+                proc.terminate()
+                proc.wait(timeout=0.5)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=0.5)
+                except Exception:
+                    pass
+
+    def _ensure_started(self) -> subprocess.Popen[bytes]:
         if self._proc is not None and self._proc.poll() is None:
             return self._proc
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "")}
-        if os.environ.get("AGY_CUA_DRIVER"):
-            env["AGY_CUA_DRIVER"] = os.environ["AGY_CUA_DRIVER"]
+        self._reset_unlocked()
+        env = {"PATH": self._env.get("PATH", os.environ.get("PATH", "/usr/bin:/bin")), "HOME": self._env.get("HOME", os.environ.get("HOME", ""))}
+        if self._env.get("AGY_CUA_DRIVER"):
+            env["AGY_CUA_DRIVER"] = self._env["AGY_CUA_DRIVER"]
         proc = subprocess.Popen(
             [self.driver_bin, "mcp"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
+            bufsize=0,
             env=env,
         )
         self._proc = proc
         self._next_id = 0
-        self._request_unlocked("initialize", {
-            "protocolVersion": DEFAULT_PROTOCOL,
-            "capabilities": {},
-            "clientInfo": SERVER_INFO,
-        })
-        assert proc.stdin is not None
-        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
-        proc.stdin.flush()
+        try:
+            self._request_unlocked("initialize", {
+                "protocolVersion": DEFAULT_PROTOCOL,
+                "capabilities": {},
+                "clientInfo": SERVER_INFO,
+            })
+            assert proc.stdin is not None
+            proc.stdin.write((json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n").encode("utf-8"))
+            proc.stdin.flush()
+        except Exception:
+            self._reset_unlocked()
+            raise
         return proc
 
-    def _request_unlocked(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
+    def _readline_unlocked(self, deadline: float, method: str) -> str:
+        proc = self._proc
+        assert proc is not None and proc.stdout is not None
+        fd = proc.stdout.fileno()
+        while True:
+            nl_pos = self._rx_buf.find(b"\n")
+            if nl_pos != -1:
+                raw_line = bytes(self._rx_buf[: nl_pos + 1])
+                del self._rx_buf[: nl_pos + 1]
+                return raw_line.decode("utf-8", errors="replace")
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._reset_unlocked()
+                raise TimeoutError(f"cua-driver mcp timed out after {self.timeout_ms} ms during {method}")
+
+            with selectors.DefaultSelector() as sel:
+                sel.register(fd, selectors.EVENT_READ)
+                ready = sel.select(timeout=remaining)
+            if not ready:
+                self._reset_unlocked()
+                raise TimeoutError(f"cua-driver mcp timed out after {self.timeout_ms} ms during {method}")
+
+            chunk = os.read(fd, 65_536)
+            if not chunk:
+                self._reset_unlocked()
+                raise RuntimeError(f"cua-driver mcp exited during {method}")
+            self._rx_buf.extend(chunk)
+
+    def _request_unlocked(self, method: str, params: Mapping[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
         proc = self._proc
         assert proc is not None and proc.stdin is not None and proc.stdout is not None
         self._next_id += 1
         req_id = self._next_id
-        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": req_id, "method": method, "params": dict(params)}) + "\n")
-        proc.stdin.flush()
+        effective_timeout = timeout_s if timeout_s is not None else (self.timeout_ms / 1000.0)
+        deadline = time.monotonic() + max(0.001, effective_timeout)
+        try:
+            payload = (json.dumps({"jsonrpc": "2.0", "id": req_id, "method": method, "params": dict(params)}) + "\n").encode("utf-8")
+            proc.stdin.write(payload)
+            proc.stdin.flush()
+        except Exception as exc:
+            self._reset_unlocked()
+            raise RuntimeError(f"cua-driver mcp stdin write failed during {method}: {exc}") from exc
+
         while True:
-            line = proc.stdout.readline()
-            if not line:
-                raise RuntimeError(f"cua-driver mcp exited during {method}")
-            msg = json.loads(line)
+            line = self._readline_unlocked(deadline, method)
+            try:
+                msg = json.loads(line)
+            except ValueError as exc:
+                self._reset_unlocked()
+                raise RuntimeError(f"cua-driver mcp returned invalid JSON during {method}") from exc
+            if not isinstance(msg, Mapping):
+                self._reset_unlocked()
+                raise RuntimeError(f"cua-driver mcp returned non-object frame during {method}")
             if msg.get("id") == req_id:
                 if "error" in msg:
                     err = msg["error"]
@@ -1152,17 +1383,7 @@ class DriverClient:
 
     def close(self) -> None:
         with self._lock:
-            if self._proc is not None:
-                try:
-                    if self._proc.stdin:
-                        self._proc.stdin.close()
-                    if self._proc.stdout:
-                        self._proc.stdout.close()
-                    self._proc.terminate()
-                    self._proc.wait(timeout=1.0)
-                except Exception:
-                    pass
-                self._proc = None
+            self._reset_unlocked()
 
 
 TOOLS = [
@@ -1231,7 +1452,7 @@ TOOLS = [
             "2. Build or validate a closed candidate table bound to (pid, window_id, snapshot_id).\n"
             "3. Ask Jev (jev-1.13.0) to select one candidate ID (or reobserve/abstain) with zero auto-retries.\n"
             "4. Validate target scope, snapshot freshness, and background-only delivery before dispatching to cua-driver.\n"
-            "5. Take a fresh post-action window observation to verify the effect and record separate observe/provider/dispatch/verify timings."
+            "5. Take a fresh post-action window observation to classify outcome as dispatched, state_changed, goal_verified, or outcome_unknown and record separate observe/provider/dispatch/verify timings."
         ),
         "inputSchema": {
             "type": "object",
@@ -1260,11 +1481,40 @@ TOOLS = [
                 "expected_postcondition": {
                     "type": "object",
                     "additionalProperties": False,
-                    "description": "Optional postcondition checked against fresh post-dispatch AX state.",
+                    "description": (
+                        "Optional bound postcondition checked against fresh post-dispatch AX state. "
+                        "Required to achieve status='verified' (verification_outcome='goal_verified')."
+                    ),
                     "properties": {
-                        "static_text_contains": {"type": "string"},
-                        "element_value_equals": {"type": "string"},
-                        "element_label_contains": {"type": "string"},
+                        "static_text_equals": {
+                            "type": "string",
+                            "description": "Exact static text match (supports comma-grouped numeric equivalence, e.g. '4320' == '4,320').",
+                        },
+                        "static_text_contains": {
+                            "type": "string",
+                            "description": "Explicit substring check on window static text.",
+                        },
+                        "static_text_index": {
+                            "type": "integer",
+                            "description": "Optional index into post_static_texts (e.g. -1 for Calculator main display).",
+                        },
+                        "element_index": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Target element_index for element_* predicates (defaults to dispatched candidate element_index).",
+                        },
+                        "element_value_equals": {
+                            "type": "string",
+                            "description": "Exact value match on the bound target element_index.",
+                        },
+                        "element_label_equals": {
+                            "type": "string",
+                            "description": "Exact label match on the bound target element_index.",
+                        },
+                        "element_label_contains": {
+                            "type": "string",
+                            "description": "Substring label match on the bound target element_index.",
+                        },
                     },
                 },
             },
@@ -1277,6 +1527,8 @@ def _format_tool_result(payload: Mapping[str, Any], is_error: bool = False) -> d
     summary_lines = [
         f"schema={payload.get('schema')} status={payload.get('status', payload.get('kind', 'ok'))}"
     ]
+    if "verification_outcome" in payload:
+        summary_lines[0] += f" verification_outcome={payload.get('verification_outcome')}"
     if "selected_id" in payload and payload.get("selected_id"):
         summary_lines.append(
             f"selected_id={payload.get('selected_id')} model={payload.get('returned_model')} "
@@ -1317,7 +1569,8 @@ class JevMcpServer:
         driver_bin = find_driver(self.env)
         if not driver_bin:
             raise RuntimeError("cua-driver not found; run `bin/agy-cua doctor`")
-        self._driver_client = DriverClient(driver_bin)
+        timeout_ms = clamp_driver_timeout_ms(self.env.get("AGY_CUA_DRIVER_TIMEOUT_MS"))
+        self._driver_client = DriverClient(driver_bin, timeout_ms=timeout_ms)
         return self._driver_client
 
     def _record_trace(self, entry: Mapping[str, Any]) -> None:
@@ -1529,13 +1782,14 @@ class JevMcpServer:
             self._record_trace(payload)
             return _format_tool_result(payload, is_error=True)
 
+        target_el_idx = authorized["arguments"].get("element_index")
         driver_args = {
             k: v
             for k, v in authorized["arguments"].items()
             if k not in {"element_index", "snapshot_id"}
         }
-        if "element_index" in authorized["arguments"]:
-            driver_args["element_token"] = f"{pre_obs['snapshot_id']}:{authorized['arguments']['element_index']}"
+        if target_el_idx is not None:
+            driver_args["element_token"] = f"{pre_obs['snapshot_id']}:{target_el_idx}"
         if authorized["tool"] == "set_value":
             driver_args.pop("delivery_mode", None)
         sanitized_args = {
@@ -1559,6 +1813,7 @@ class JevMcpServer:
             payload = {
                 "schema": "agy_cua.jev_step_v1",
                 "status": "dispatch_failed",
+                "verification_outcome": "outcome_unknown",
                 "reason": str(exc),
                 "pid": pid,
                 "window_id": window_id,
@@ -1586,6 +1841,7 @@ class JevMcpServer:
         safe_receipt = "<redacted>" if authorized["tool"] in {"type_text", "set_value"} else dispatch_text
 
         # Stage 5: Fresh observation & independent postcondition verification
+        expected_post = args.get("expected_postcondition")
         verify_started = time.perf_counter()
         try:
             raw_post = driver.call_tool(
@@ -1597,9 +1853,10 @@ class JevMcpServer:
                 raise RuntimeError(err_txt or "post-dispatch get_window_state returned isError=true")
             post_obs = extract_window_observation(raw_post, expected_pid=pid, expected_window_id=window_id)
             state_changed, post_ok, verify_reason = check_postcondition(
-                args.get("expected_postcondition"),
+                expected_post,
                 pre_obs,
                 post_obs,
+                target_element_index=target_el_idx,
             )
         except Exception as exc:
             verify_ms = round((time.perf_counter() - verify_started) * 1000, 2)
@@ -1609,6 +1866,7 @@ class JevMcpServer:
             payload = {
                 "schema": "agy_cua.jev_step_v1",
                 "status": "verification_failed",
+                "verification_outcome": "outcome_unknown",
                 "reason": str(exc),
                 "pid": pid,
                 "window_id": window_id,
@@ -1634,9 +1892,23 @@ class JevMcpServer:
             return _format_tool_result(payload, is_error=True)
         verify_ms = round((time.perf_counter() - verify_started) * 1000, 2)
 
+        if expected_post is None:
+            verification_outcome = "state_changed" if state_changed else "dispatched"
+            step_status = verification_outcome
+            is_err = False
+        elif post_ok:
+            verification_outcome = "goal_verified"
+            step_status = "verified"
+            is_err = False
+        else:
+            verification_outcome = "state_changed" if state_changed else "dispatched"
+            step_status = "postcondition_unmet"
+            is_err = True
+
         payload = {
             "schema": "agy_cua.jev_step_v1",
-            "status": "verified" if post_ok else "postcondition_unmet",
+            "status": step_status,
+            "verification_outcome": verification_outcome,
             "verified": post_ok,
             "verification_reason": verify_reason,
             "state_changed": state_changed,
@@ -1667,7 +1939,7 @@ class JevMcpServer:
             "accounting": self.accounting.to_dict(),
         }
         self._record_trace(payload)
-        return _format_tool_result(payload, is_error=not post_ok)
+        return _format_tool_result(payload, is_error=is_err)
 
     def handle_message(self, message: Any) -> dict[str, Any] | None:
         if not isinstance(message, Mapping):

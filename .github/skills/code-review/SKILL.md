@@ -26,7 +26,7 @@ Use this skill when reviewing pull requests in `saariuslystoned/agy-cua`. Focus 
 4. **Pinned Jev (`jev-1.13.0`) & Verification Invariants:**
    - Jev is text-only (`jev-1.13.0`). Never send screenshots, base64 images, or unredacted secrets to Jev.
    - Single-shot, zero-retry policy (`max_attempts_per_call = 1`). Any uncertain provider call or failed post-dispatch verification increments `uncertain_calls` / `uncertain_side_effects` and halts the session (`halted: true`).
-   - Post-dispatch verification (`check_postcondition`) requires a fresh `snapshot_id` (`post_snapshot_id != pre_snapshot_id`). When `expected_postcondition` is `None`, verification requires an observable AX state change (`state_changed == True`); idempotent actions that may leave the display unchanged (such as clicking `All Clear` when Calculator already shows `0`) must pass an explicit `expected_postcondition` (e.g. `{"static_text_contains": "0"}`).
+   - Post-dispatch verification (`check_postcondition`) requires a fresh `snapshot_id` (`post_snapshot_id != pre_snapshot_id`) and distinguishes four outcomes (`dispatched`, `state_changed`, `goal_verified`, `outcome_unknown`). When `expected_postcondition` is `None`, `jev_step` never reports `verified: true` (`goal_verified`); it reports `state_changed` or `dispatched`. Goal verification requires an explicit bound `expected_postcondition` (e.g. `{"static_text_equals": "0"}` for `All Clear`, or element predicates bound to `element_index` with role continuity).
 
 5. **Credentials & Secret Hygiene:**
    - The TypeSafe API key lives in macOS Keychain (`service: "typesafe-jev"`) or runtime `TYPESAFE_API_KEY` env var.
