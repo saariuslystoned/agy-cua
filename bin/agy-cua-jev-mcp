@@ -1048,7 +1048,7 @@ def authorize_candidate_dispatch(
     return {"id": selected_id, "tool": tool, "arguments": args, "description": candidate.get("description")}
 
 
-_NUMERIC_GROUPED_RE = re.compile(r"^[+-]?\d[\d,]*(?:\.\d+)?$")
+_NUMERIC_GROUPED_RE = re.compile(r"^[+-]?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?$")
 
 
 def _normalize_numeric_grouped(text: str) -> str | None:
@@ -1156,7 +1156,10 @@ def check_postcondition(
         if idx_err is not None or scoped_texts is None:
             return state_changed, False, idx_err or "invalid_static_text_index"
         needle = raw_needle
-        if not any(needle in t or needle in t.replace(",", "") for t in scoped_texts):
+        if not any(
+            needle in t or (_normalize_numeric_grouped(t) is not None and needle in (_normalize_numeric_grouped(t) or ""))
+            for t in scoped_texts
+        ):
             return state_changed, False, f"expected static_text_contains={needle!r}, got {scoped_texts!r}"
 
     has_element_pred = any(
@@ -1186,20 +1189,21 @@ def check_postcondition(
             for e in (post_obs.get("elements") or [])
             if isinstance(e, Mapping) and isinstance(e.get("element_index"), int)
         }
+        if bound_idx not in pre_by_idx:
+            return state_changed, False, f"target_element_missing_in_pre_obs: element_index={bound_idx}"
         if bound_idx not in post_by_idx:
             return state_changed, False, f"target_element_missing: element_index={bound_idx} not in post_obs"
 
+        pre_el = pre_by_idx[bound_idx]
         post_el = post_by_idx[bound_idx]
-        pre_el = pre_by_idx.get(bound_idx)
-        if pre_el is not None:
-            pre_role = str(pre_el.get("role") or "").strip()
-            post_role = str(post_el.get("role") or "").strip()
-            if pre_role and post_role and pre_role != post_role:
-                return (
-                    state_changed,
-                    False,
-                    f"target_element_role_mismatch: element_index={bound_idx} pre_role={pre_role!r} != post_role={post_role!r}",
-                )
+        pre_role = str(pre_el.get("role") or "").strip()
+        post_role = str(post_el.get("role") or "").strip()
+        if not pre_role or not post_role or pre_role != post_role:
+            return (
+                state_changed,
+                False,
+                f"target_element_role_mismatch: element_index={bound_idx} pre_role={pre_role!r} != post_role={post_role!r}",
+            )
 
         if "element_value_equals" in expected:
             raw_val = expected["element_value_equals"]
@@ -1282,6 +1286,32 @@ class DriverClient:
                 except Exception:
                     pass
 
+    def _write_all_unlocked(self, fd: int, data: bytes, deadline: float, method: str) -> None:
+        view = memoryview(data)
+        sent = 0
+        while sent < len(view):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._reset_unlocked()
+                raise TimeoutError(f"cua-driver mcp write timed out after {self.timeout_ms} ms during {method}")
+            with selectors.DefaultSelector() as sel:
+                sel.register(fd, selectors.EVENT_WRITE)
+                ready = sel.select(timeout=remaining)
+            if not ready:
+                self._reset_unlocked()
+                raise TimeoutError(f"cua-driver mcp write timed out after {self.timeout_ms} ms during {method}")
+            try:
+                written = os.write(fd, view[sent:])
+            except BlockingIOError:
+                continue
+            except OSError as exc:
+                self._reset_unlocked()
+                raise RuntimeError(f"cua-driver mcp stdin write failed during {method}: {exc}") from exc
+            if written <= 0:
+                self._reset_unlocked()
+                raise RuntimeError(f"cua-driver mcp stdin closed during {method}")
+            sent += written
+
     def _ensure_started(self) -> subprocess.Popen[bytes]:
         if self._proc is not None and self._proc.poll() is None:
             return self._proc
@@ -1297,6 +1327,9 @@ class DriverClient:
             bufsize=0,
             env=env,
         )
+        assert proc.stdin is not None and proc.stdout is not None
+        os.set_blocking(proc.stdin.fileno(), False)
+        os.set_blocking(proc.stdout.fileno(), False)
         self._proc = proc
         self._next_id = 0
         try:
@@ -1305,9 +1338,9 @@ class DriverClient:
                 "capabilities": {},
                 "clientInfo": SERVER_INFO,
             })
-            assert proc.stdin is not None
-            proc.stdin.write((json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n").encode("utf-8"))
-            proc.stdin.flush()
+            init_notif = (json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n").encode("utf-8")
+            deadline = time.monotonic() + (self.timeout_ms / 1000.0)
+            self._write_all_unlocked(proc.stdin.fileno(), init_notif, deadline, "notifications/initialized")
         except Exception:
             self._reset_unlocked()
             raise
@@ -1336,7 +1369,13 @@ class DriverClient:
                 self._reset_unlocked()
                 raise TimeoutError(f"cua-driver mcp timed out after {self.timeout_ms} ms during {method}")
 
-            chunk = os.read(fd, 65_536)
+            try:
+                chunk = os.read(fd, 65_536)
+            except BlockingIOError:
+                continue
+            except OSError as exc:
+                self._reset_unlocked()
+                raise RuntimeError(f"cua-driver mcp stdout read failed during {method}: {exc}") from exc
             if not chunk:
                 self._reset_unlocked()
                 raise RuntimeError(f"cua-driver mcp exited during {method}")
@@ -1349,13 +1388,8 @@ class DriverClient:
         req_id = self._next_id
         effective_timeout = timeout_s if timeout_s is not None else (self.timeout_ms / 1000.0)
         deadline = time.monotonic() + max(0.001, effective_timeout)
-        try:
-            payload = (json.dumps({"jsonrpc": "2.0", "id": req_id, "method": method, "params": dict(params)}) + "\n").encode("utf-8")
-            proc.stdin.write(payload)
-            proc.stdin.flush()
-        except Exception as exc:
-            self._reset_unlocked()
-            raise RuntimeError(f"cua-driver mcp stdin write failed during {method}: {exc}") from exc
+        payload = (json.dumps({"jsonrpc": "2.0", "id": req_id, "method": method, "params": dict(params)}) + "\n").encode("utf-8")
+        self._write_all_unlocked(proc.stdin.fileno(), payload, deadline, method)
 
         while True:
             line = self._readline_unlocked(deadline, method)

@@ -716,6 +716,11 @@ class StdioEndToEndTest(unittest.TestCase):
         )
         self.assertFalse(met_wrong_idx)
 
+        # Malformed comma-separated string '1,,0' must not match '10'
+        post_malformed = {"snapshot_id": "s00000016", "static_texts": ["1,,0"], "elements": []}
+        _, met_malformed, _ = jev.check_postcondition({"static_text_equals": "10"}, pre_obs, post_malformed)
+        self.assertFalse(met_malformed)
+
     def test_false_positive_3_element_predicates_must_bind_to_target_element(self):
         pre_obs = {
             "snapshot_id": "s00000011",
@@ -751,6 +756,15 @@ class StdioEndToEndTest(unittest.TestCase):
         )
         self.assertFalse(met_wrong_field)
         self.assertIn("element_value_equals", reason_wrong_field)
+
+        # Element index not present in pre_obs must fail
+        _, met_missing_pre, reason_missing_pre = jev.check_postcondition(
+            {"element_value_equals": "validated", "element_index": 99},
+            pre_obs,
+            post_obs,
+        )
+        self.assertFalse(met_missing_pre)
+        self.assertIn("target_element_missing_in_pre_obs", reason_missing_pre)
 
         # Role drift between pre_obs and post_obs on bound element_index must fail
         post_role_drift = {
