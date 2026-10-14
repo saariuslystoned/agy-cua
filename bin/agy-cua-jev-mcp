@@ -328,7 +328,7 @@ def validate_select_request(args: Mapping[str, Any]) -> dict[str, Any]:
     for item in raw_elements:
         if not isinstance(item, Mapping):
             raise ValueError("each element must be an object")
-        el_allowed = {"element_index", "role", "label", "value", "state", "enabled"}
+        el_allowed = {"element_index", "role", "label", "state", "enabled"}
         if not set(item.keys()).issubset(el_allowed):
             raise ValueError(f"element contains unsupported fields: {sorted(set(item.keys()) - el_allowed)}")
         role = item.get("role")
@@ -343,10 +343,6 @@ def validate_select_request(args: Mapping[str, Any]) -> dict[str, Any]:
             if not isinstance(idx, int) or isinstance(idx, bool) or idx < 0:
                 raise ValueError("element_index must be a non-negative integer")
             entry["element_index"] = idx
-        if "value" in item and item["value"] is not None:
-            if not isinstance(item["value"], str):
-                raise ValueError("element value must be a string")
-            entry["value"] = item["value"][:200]
         if "state" in item and item["state"] is not None:
             if not isinstance(item["state"], str):
                 raise ValueError("element state must be a string")
@@ -777,14 +773,14 @@ def extract_window_observation(
         }:
             continue
 
-        state_str = "enabled"
-        if value:
-            state_str = f"value={value[:60]}"
+        is_text_input = role in {"AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"}
+        state_str = "enabled (has_value)" if value else "enabled"
+        display_label = label or (value if not is_text_input else "") or role
 
         compact_el: dict[str, Any] = {
             "element_index": idx,
             "role": role,
-            "label": label or value or role,
+            "label": display_label,
             "state": state_str,
         }
         if value is not None:
@@ -792,16 +788,14 @@ def extract_window_observation(
         compact_elements.append(compact_el)
 
         if len(auto_candidates) < MAX_AUTO_CANDIDATES:
-            base_id = f"ax.{idx}.{_slug(label or value or role)}"
+            base_id = f"ax.{idx}.{_slug(display_label)}"
             cid = base_id
             suffix = 2
             while cid in used_ids:
                 cid = f"{base_id}-{suffix}"
                 suffix += 1
             used_ids.add(cid)
-            desc = f"Click [{idx}] {role} {json.dumps(label or value or role, ensure_ascii=False)}"
-            if value and value != label:
-                desc += f" (current value: {json.dumps(value[:60], ensure_ascii=False)})"
+            desc = f"Click [{idx}] {role} {json.dumps(display_label, ensure_ascii=False)}"
             auto_candidates.append({
                 "id": cid,
                 "description": desc,
@@ -1416,7 +1410,15 @@ class JevMcpServer:
                 "pid": pid,
                 "window_id": window_id,
                 "snapshot_id": pre_obs["snapshot_id"],
-                "elements": pre_obs["elements"],
+                "elements": [
+                    {
+                        "element_index": e["element_index"],
+                        "role": e["role"],
+                        "label": e["label"],
+                        "state": e["state"],
+                    }
+                    for e in pre_obs["elements"]
+                ],
                 "history": history_in,
                 "candidates": [{"id": c["id"], "description": c["description"]} for c in bound_candidates],
             })

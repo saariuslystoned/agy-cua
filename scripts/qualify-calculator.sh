@@ -199,7 +199,7 @@ direct_cua_mutations = sum(
     1 for r in rows
     if r[2] in {"agy-cua", "agy-cua_agy-cua"} and r[3] in mutating_driver_tools
 )
-min_jev_steps = len(str(a_val)) + len(str(b_val)) + 2
+min_jev_steps = len(str(a_val)) + len(str(b_val)) + 3
 all_jev_verified = bool(jev_entries) and all(
     e.get("schema") == "agy_cua.jev_step_v1"
     and e.get("status") == "verified"
@@ -213,8 +213,9 @@ all_jev_verified = bool(jev_entries) and all(
 final_post_texts = (jev_entries[-1].get("post_static_texts") or []) if jev_entries else []
 jev_sequence_complete = (
     len(jev_entries) >= min_jev_steps
-    and any("multiply" in str(s) for s in jev_selected)
     and bool(jev_selected)
+    and "clear" in str(jev_selected[0])
+    and any("multiply" in str(s) for s in jev_selected)
     and "equals" in str(jev_selected[-1])
     and bool(final_post_texts)
     and str(final_post_texts[-1]).replace(",", "") == expected
