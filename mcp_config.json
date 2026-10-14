@@ -6,6 +6,13 @@
         "-c",
         "exec /usr/bin/env python3 \"${AGY_CUA_HOME:-$HOME/.gemini/config/plugins/agy-cua}/bin/agy-cua-mcp\""
       ]
+    },
+    "agy-cua-jev": {
+      "command": "/bin/sh",
+      "args": [
+        "-c",
+        "exec /usr/bin/env python3 \"${AGY_CUA_HOME:-$HOME/.gemini/config/plugins/agy-cua}/bin/agy-cua-jev-mcp\""
+      ]
     }
   }
 }

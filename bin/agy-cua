@@ -1,7 +1,8 @@
 #!/bin/bash
-# agy-cua: set up and check Cua Driver computer use for Google Antigravity.
+# agy-cua: set up and check Cua Driver + Jev computer use for Google Antigravity.
 #
-#   agy-cua doctor              read-only readiness report
+#   agy-cua doctor              read-only readiness report (driver + Jev route)
+#   agy-cua jev-key             store TypeSafe Jev key privately in macOS Keychain
 #   agy-cua install             validate, then install this repo as an Antigravity plugin
 #   agy-cua qualify [args...]   run the headless Calculator end-to-end check
 set -uo pipefail
@@ -42,6 +43,16 @@ doctor() {
     fail "cua-driver not found; install Cua Driver: curl -fsSL https://cua.ai/driver/install.sh | bash"
   fi
 
+  if JEV_STATUS="$(python3 "$ROOT/bin/agy-cua-jev-mcp" --check 2>/dev/null)"; then
+    JEV_ROUTE="$(jq -r '.route // "unknown"' <<<"$JEV_STATUS")"
+    JEV_MODEL="$(jq -r '.configured_model // "unknown"' <<<"$JEV_STATUS")"
+    JEV_SOURCE="$(jq -r '.key_source // "unknown"' <<<"$JEV_STATUS")"
+    ok "Jev route ready ($JEV_ROUTE, model $JEV_MODEL, key_source=$JEV_SOURCE)"
+  else
+    JEV_REASON="$(jq -r '.reason // "unavailable"' <<<"${JEV_STATUS:-{}}" 2>/dev/null)"
+    warn "Jev route not ready ($JEV_REASON; run: bin/agy-cua jev-key)"
+  fi
+
   if [[ -x "$AGY" ]]; then
     if [[ -e "$HOME/.gemini/config/plugins/agy-cua" ]]; then ok "agy-cua plugin installed"
     else warn "agy-cua plugin not installed (run: agy-cua install)"; fi
@@ -58,6 +69,13 @@ doctor() {
 
 case "${1:-}" in
   doctor) doctor ;;
+  jev-key)
+    SERVICE="${JEV_KEYCHAIN_SERVICE:-typesafe-jev}"
+    echo "Storing TypeSafe Jev API key in macOS Keychain (service: $SERVICE)."
+    echo "Paste the key at the prompt below (input is hidden and never written to disk/logs):"
+    /usr/bin/security add-generic-password -U -s "$SERVICE" -a "${USER:-$(id -un)}" -w \
+      && python3 "$ROOT/bin/agy-cua-jev-mcp" --check
+    ;;
   install)
     # Install committed files only, so local runs/ proof and .git stay out of the plugin.
     SRC="$ROOT"
@@ -69,5 +87,5 @@ case "${1:-}" in
       && echo "Installed. Restart Antigravity (app and any running agy sessions) to load it."
     ;;
   qualify) shift; exec "$ROOT/scripts/qualify-calculator.sh" "$@" ;;
-  *) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
