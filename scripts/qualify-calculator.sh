@@ -117,34 +117,31 @@ GK_REAPER=$!
 START=$(date +%s)
 ( cd "$WS" && AGY_CUA_JEV_TRACE_FILE="$JEV_TRACE" "$AGY" -p "$(cat "$OUT/prompt.txt")" --model "$MODEL" \
     --dangerously-skip-permissions --sandbox --output-format stream-json \
-    --print-timeout "$TIMEOUT" > "$OUT/agy.jsonl" 2> "$OUT/agy.stderr" )
-AGY_EXIT=$?
+    --print-timeout "$TIMEOUT" 2>/dev/null ) \
+  | python3 "$ROOT/scripts/stream-metadata.py" > "$OUT/metadata.json"
+PIPE_EXITS=("${PIPESTATUS[@]}")
+AGY_EXIT=${PIPE_EXITS[0]}
+METADATA_EXIT=${PIPE_EXITS[1]}
 DURATION=$(( $(date +%s) - START ))
 cleanup
 SAMPLER=""
 GK_REAPER=""
 "$ROOT/scripts/probe-focus.sh" > "$OUT/focus-after.json"
 
-jq -r 'select(.event=="step_update" and .step_update.step_type=="tool" and (.step_update.state=="DONE" or .step_update.state=="ERROR"))
-  | .step_update | [.step_index, .state, (.tool_info.parameters.ServerName // "-"),
-    (.tool_info.parameters.ToolName // .tool_name), (.tool_info.parameters.Arguments // .tool_info.parameters // {} | tojson | .[0:160]),
-    ((.tool_info.error.message // .tool_info.output // "") | tostring | gsub("\n"; " ") | .[0:200])] | @tsv' \
-  "$OUT/agy.jsonl" > "$OUT/tool-calls.tsv"
-jq -r 'select(.event=="result") | .result.response // ""' "$OUT/agy.jsonl" > "$OUT/agent-answer.md"
-
 python3 "$ROOT/scripts/raw_mcp.py" window-state Calculator --png "$OUT/calculator-window.png" \
   > "$OUT/readback.json" 2> "$OUT/readback.stderr"
 DISPLAY_VALUE="$(jq -r '.static_texts[-1] // ""' "$OUT/readback.json" 2>/dev/null)"
 
-python3 - "$OUT" "$EXPECTED" "$DISPLAY_VALUE" "$AGY_EXIT" "$DURATION" "$MODEL" "$REQUIRE_JEV" "$A" "$B" <<'PY'
-import csv, json, os, statistics, sys
-out, expected, display, agy_exit, duration, model, require_jev, a_val, b_val = sys.argv[1:]
+python3 - "$OUT" "$EXPECTED" "$DISPLAY_VALUE" "$AGY_EXIT" "$DURATION" "$MODEL" "$METADATA_EXIT" "$INSTALLED" "$REQUIRE_JEV" "$A" "$B" <<'PY'
+import json, os, statistics, sys
+out, expected, display, agy_exit, duration, model, metadata_exit, installed, require_jev, a_val, b_val = sys.argv[1:]
 require_jev_bool = require_jev == "1"
-rows = list(csv.reader(open(f"{out}/tool-calls.tsv"), delimiter="\t", quoting=csv.QUOTE_NONE))
-servers = sorted({r[2] for r in rows if r[2] != "-"})
-calc_front = sum(1 for line in open(f"{out}/focus-trace.jsonl")
-                 if json.loads(line).get("front_bundle") == "com.apple.calculator")
-skill_read = any("SKILL.md" in r[4] for r in rows)
+metadata = json.load(open(f"{out}/metadata.json", encoding="utf-8"))
+rows = metadata["tools"]
+servers = sorted({r["server"] for r in rows if r.get("server")})
+focus = [json.loads(line) for line in open(f"{out}/focus-trace.jsonl", encoding="utf-8") if line.strip()]
+calc_front = sum(r.get("front_bundle") == "com.apple.calculator" for r in focus)
+unknown_focus = sum(not r.get("front_bundle") for r in focus)
 
 trace_file = f"{out}/jev-trace.jsonl"
 jev_entries = []
@@ -153,34 +150,8 @@ if os.path.exists(trace_file):
         if line.strip():
             jev_entries.append(json.loads(line))
 
-if not jev_entries and os.path.exists(f"{out}/agy.jsonl"):
-    decoder = json.JSONDecoder()
-    for line in open(f"{out}/agy.jsonl", encoding="utf-8"):
-        if not line.strip():
-            continue
-        ev = json.loads(line)
-        su = ev.get("step_update") or {}
-        if ev.get("event") == "step_update" and su.get("step_type") == "tool" and su.get("state") == "DONE":
-            ti = su.get("tool_info") or {}
-            params = ti.get("parameters") or {}
-            srv = params.get("ServerName") or ""
-            if srv in {"agy-cua-jev", "agy-cua_agy-cua-jev"}:
-                raw_out = str(ti.get("output") or "")
-                pos = 0
-                parsed_obj = None
-                while True:
-                    idx = raw_out.find("{", pos)
-                    if idx < 0:
-                        break
-                    try:
-                        obj, end = decoder.raw_decode(raw_out, idx)
-                        if isinstance(obj, dict) and "schema" in obj:
-                            parsed_obj = obj
-                        pos = end
-                    except Exception:
-                        pos = idx + 1
-                if parsed_obj is not None:
-                    jev_entries.append(parsed_obj)
+if not jev_entries:
+    jev_entries = list(metadata.get("jev_entries") or [])
 
 observe_vals = [e.get("timings_ms", {}).get("observe_ms", 0.0) for e in jev_entries if "timings_ms" in e]
 provider_vals = [e.get("timings_ms", {}).get("provider_ms", e.get("provider_ms", 0.0)) for e in jev_entries]
@@ -197,7 +168,7 @@ mutating_driver_tools = {
 }
 direct_cua_mutations = sum(
     1 for r in rows
-    if r[2] in {"agy-cua", "agy-cua_agy-cua"} and r[3] in mutating_driver_tools
+    if r.get("server") in {"agy-cua", "agy-cua_agy-cua"} and r.get("tool") in mutating_driver_tools
 )
 min_jev_steps = len(str(a_val)) + len(str(b_val)) + 3
 all_jev_verified = bool(jev_entries) and all(
@@ -226,7 +197,7 @@ servers_ok = bool(servers) and all(s in allowed_servers for s in servers)
 jev_used = any(s in {"agy-cua-jev", "agy-cua_agy-cua-jev"} for s in servers) and len(jev_entries) > 0
 
 result = {
-    "source": "installed-plugin" if "/plugins/agy-cua/" in open(f"{out}/tool-calls.tsv").read() else "workspace",
+    "source": "installed-plugin" if installed == "1" else "workspace",
     "model": model,
     "agy_exit": int(agy_exit),
     "duration_s": int(duration),
@@ -234,9 +205,15 @@ result = {
     "display": display,
     "display_matches": display.replace(",", "") == expected,
     "tool_calls": len(rows),
-    "errors": sum(1 for r in rows if r[1] == "ERROR"),
+    "errors": sum(r.get("state") == "ERROR" for r in rows),
     "mcp_servers_used": servers,
-    "skill_file_read": skill_read,
+    "skill_file_read": metadata["skill_file_read"],
+    "result_seen": metadata["result_seen"],
+    "stream_parse_errors": metadata["parse_errors"],
+    "token_usage": metadata["token_usage"],
+    "final_status": metadata["final_status"],
+    "focus_samples": len(focus),
+    "unidentified_focus_samples": unknown_focus,
     "calculator_frontmost_samples": calc_front,
     "jev": {
         "required": require_jev_bool,
@@ -255,15 +232,21 @@ result = {
             "dispatch_total_ms": round(sum(dispatch_vals), 2),
             "verify_total_ms": round(sum(verify_vals), 2),
             "provider_median_ms": round(statistics.median(provider_vals), 2) if provider_vals else 0.0,
-            "dispatch_median_ms": round(statistics.median(dispatch_vals), 2) if dispatch_vals else 0.0,
+            "dispatch_median_ms": round(statistics.median(dispatch_vals), 2) if provider_vals else 0.0,
         },
     },
 }
 result["verdict"] = "PASS" if (
     result["display_matches"]
     and result["agy_exit"] == 0
-    and result["errors"] == 0
-    and result["calculator_frontmost_samples"] == 0
+    and int(metadata_exit) == 0
+    and result["result_seen"]
+    and result["final_status"] == "SUCCESS"
+    and not result["stream_parse_errors"]
+    and not result["errors"]
+    and bool(focus)
+    and not calc_front
+    and not unknown_focus
     and servers_ok
     and (
         not require_jev_bool
@@ -276,7 +259,7 @@ result["verdict"] = "PASS" if (
         )
     )
 ) else "FAIL"
-json.dump(result, open(f"{out}/result.json", "w"), indent=2)
+json.dump(result, open(f"{out}/result.json", "w", encoding="utf-8"), indent=2)
 print(json.dumps(result, indent=2))
 sys.exit(0 if result["verdict"] == "PASS" else 1)
 PY
