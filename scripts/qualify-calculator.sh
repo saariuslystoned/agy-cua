@@ -157,26 +157,33 @@ if os.path.exists(trace_file):
         if line.strip():
             raw_jev_entries.append(json.loads(line))
 
-if not raw_jev_entries:
+from_trace = bool(raw_jev_entries)
+if not from_trace:
     raw_jev_entries = list(metadata.get("jev_entries") or [])
 
 batch_entries = [e for e in raw_jev_entries if e.get("schema") == "agy_cua.jev_batch_v1"]
-step_entries = [e for e in raw_jev_entries if e.get("schema") == "agy_cua.jev_step_v1"]
-if not step_entries and batch_entries:
-    for b in batch_entries:
-        for s in (b.get("completed_steps") or []):
-            if isinstance(s, dict):
-                step_item = dict(s)
-                step_item.setdefault("schema", "agy_cua.jev_step_v1")
-                step_item.setdefault("returned_model", b.get("returned_model"))
-                step_item.setdefault("sdk_identity", b.get("sdk_identity"))
-                step_item.setdefault("accounting", b.get("accounting"))
-                step_entries.append(step_item)
-        if isinstance(b.get("failed_step"), dict):
-            failed_item = dict(b["failed_step"])
-            failed_item.setdefault("schema", "agy_cua.jev_step_v1")
-            failed_item.setdefault("accounting", b.get("accounting"))
-            step_entries.append(failed_item)
+step_entries = []
+if from_trace:
+    step_entries = [e for e in raw_jev_entries if e.get("schema") == "agy_cua.jev_step_v1"]
+else:
+    for entry in raw_jev_entries:
+        schema = entry.get("schema")
+        if schema == "agy_cua.jev_step_v1":
+            step_entries.append(entry)
+        elif schema == "agy_cua.jev_batch_v1":
+            for s in (entry.get("completed_steps") or []):
+                if isinstance(s, dict):
+                    step_item = dict(s)
+                    step_item.setdefault("schema", "agy_cua.jev_step_v1")
+                    step_item.setdefault("returned_model", entry.get("returned_model"))
+                    step_item.setdefault("sdk_identity", entry.get("sdk_identity"))
+                    step_item.setdefault("accounting", entry.get("accounting"))
+                    step_entries.append(step_item)
+            if isinstance(entry.get("failed_step"), dict):
+                failed_item = dict(entry["failed_step"])
+                failed_item.setdefault("schema", "agy_cua.jev_step_v1")
+                failed_item.setdefault("accounting", entry.get("accounting"))
+                step_entries.append(failed_item)
 
 jev_entries = step_entries if step_entries else raw_jev_entries
 

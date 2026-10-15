@@ -2066,7 +2066,8 @@ class JevMcpServer:
             _mutate_target_state_file(state_path, _mutate)
 
     def _record_trace(self, entry: Mapping[str, Any]) -> None:
-        self.accounting.history_log.append(dict(entry))
+        if entry.get("schema") != "agy_cua.jev_batch_v1":
+            self.accounting.history_log.append(dict(entry))
         trace_path = self.env.get("AGY_CUA_JEV_TRACE_FILE")
         if trace_path:
             try:
@@ -2170,6 +2171,10 @@ class JevMcpServer:
             self._record_trace(payload)
             return _format_tool_result(payload, is_error=True)
 
+        def release_if_unowned() -> None:
+            if not was_owned:
+                self._release_single_target(pid, window_id)
+
         def remaining_timeout_s(default_s: float) -> float:
             if _deadline_monotonic is None:
                 return default_s
@@ -2201,8 +2206,7 @@ class JevMcpServer:
                 raise RuntimeError(err_txt or "get_window_state returned isError=true")
             pre_obs = extract_window_observation(raw_pre, expected_pid=pid, expected_window_id=window_id)
         except Exception as exc:
-            if not was_owned:
-                self._release_single_target(pid, window_id)
+            release_if_unowned()
             obs_ms = round((time.perf_counter() - obs_started) * 1000, 2)
             payload = {
                 "schema": "agy_cua.jev_step_v1",
@@ -2228,6 +2232,7 @@ class JevMcpServer:
         obs_ms = round((time.perf_counter() - obs_started) * 1000, 2)
 
         if expected_snap is not None and pre_obs["snapshot_id"] != expected_snap:
+            release_if_unowned()
             payload = {
                 "schema": "agy_cua.jev_step_v1",
                 "status": "stale_snapshot",
@@ -2253,6 +2258,7 @@ class JevMcpServer:
             return _format_tool_result(payload, is_error=True)
 
         if _expected_pre_sig is not None and _obs_state_signature(pre_obs) != _expected_pre_sig:
+            release_if_unowned()
             payload = {
                 "schema": "agy_cua.jev_step_v1",
                 "status": "stale_snapshot",
@@ -2305,6 +2311,7 @@ class JevMcpServer:
                 "candidates": [{"id": c["id"], "description": c["description"]} for c in bound_candidates],
             })
         except Exception as exc:
+            release_if_unowned()
             payload = {
                 "schema": "agy_cua.jev_step_v1",
                 "status": "candidate_refused",
@@ -2355,6 +2362,7 @@ class JevMcpServer:
             if _deadline_monotonic is not None:
                 rem_ms = int((_deadline_monotonic - time.monotonic()) * 1000)
                 if rem_ms <= 0:
+                    release_if_unowned()
                     payload = {
                         "schema": "agy_cua.jev_step_v1",
                         "status": "batch_timeout",
@@ -2392,6 +2400,7 @@ class JevMcpServer:
             provider_ms = decision.get("provider_ms", 0.0)
 
         if decision["kind"] != "selected":
+            release_if_unowned()
             payload = {
                 "schema": "agy_cua.jev_step_v1",
                 "status": decision["kind"],
@@ -2434,6 +2443,7 @@ class JevMcpServer:
                 valid_element_indices=pre_obs["indexed_element_ids"],
             )
         except Exception as exc:
+            release_if_unowned()
             payload = {
                 "schema": "agy_cua.jev_step_v1",
                 "status": "authorization_refused",
@@ -2475,12 +2485,43 @@ class JevMcpServer:
             k: ("<redacted>" if k in {"text", "value"} else v)
             for k, v in driver_args.items()
         }
+        try:
+            dispatch_timeout_s = remaining_timeout_s(driver.timeout_ms / 1000.0)
+        except TimeoutError as exc:
+            release_if_unowned()
+            payload = {
+                "schema": "agy_cua.jev_step_v1",
+                "status": "batch_timeout",
+                "verification_outcome": "not_executed",
+                "reason": str(exc),
+                "pid": pid,
+                "window_id": window_id,
+                "session_id": self.session_id,
+                "pre_snapshot_id": pre_obs["snapshot_id"],
+                "selected_id": authorized["id"],
+                "returned_model": decision.get("returned_model"),
+                "confidence": decision.get("confidence"),
+                "probabilities": decision.get("probabilities"),
+                "verified": False,
+                "uncertain_side_effect": False,
+                "timings_ms": {
+                    "observe_ms": obs_ms,
+                    "provider_ms": provider_ms,
+                    "dispatch_ms": 0.0,
+                    "verify_ms": 0.0,
+                    "total_ms": round((time.perf_counter() - step_started) * 1000, 2),
+                },
+                "accounting": self.accounting.to_dict(),
+            }
+            self._record_trace(payload)
+            return _format_tool_result(payload, is_error=True)
+
         dispatch_started = time.perf_counter()
         try:
             dispatch_res = driver.call_tool(
                 authorized["tool"],
                 driver_args,
-                timeout_s=remaining_timeout_s(driver.timeout_ms / 1000.0),
+                timeout_s=dispatch_timeout_s,
                 deadline_monotonic=_deadline_monotonic,
             )
             dispatch_text = "".join(
@@ -2960,7 +3001,11 @@ class JevMcpServer:
                 remaining_steps = format_remaining(idx + 1)
                 break
 
-        if not was_owned and not completed_steps and (failed_step or {}).get("status") == "observation_failed":
+        if (
+            not was_owned
+            and not completed_steps
+            and (failed_step or {}).get("verification_outcome") == "not_executed"
+        ):
             self._release_single_target(pid, window_id)
 
         all_verified = failed_step is None and len(completed_steps) == len(raw_steps)
@@ -3093,6 +3138,8 @@ class JevMcpServer:
         return fail(-32601, f"Method not found: {method}")
 
     def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
         self._release_targets()
         if self._driver_client is not None:
