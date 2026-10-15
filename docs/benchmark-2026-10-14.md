@@ -108,7 +108,9 @@ With `approvalPolicy=on-request`, the native tool instead required
 granting approval or manufacturing a host response. Calculator access succeeded
 from this existing desktop chat, so the evidence does **not** establish that
 native Computer Use is globally unscriptable. The unresolved part is approval
-routing for a new benchmark session. The desktop chat creation/message tools
+routing for a new benchmark session. A later read-only probe returned the
+classified failure `native_plugin_call_failed`; that additional failure is also
+preserved in the evidence. The desktop chat creation/message tools
 offer model and reasoning controls but no speed field, so they alone cannot
 establish a requested-speed manual fallback. No default-speed substitute ran.
 

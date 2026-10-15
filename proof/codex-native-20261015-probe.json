@@ -739,7 +739,8 @@
     "Native desktop chat Calculator access worked; fresh app-server session required approval. This does not prove CLI native Computer Use is globally unsupported.",
     "No dedicated noncompeting desktop interval established; observed Cua Driver CPU load, existing services left untouched.",
     "Fixture compiled from unchanged source; no fixture UI/setup completion claimed.",
-    "Implementation-context source inspection exposed the fixture sentinel; no measured solver ran. Resume only in fresh solver contexts without source/verifier access."
+    "Implementation-context source inspection exposed the fixture sentinel; no measured solver ran. Resume only in fresh solver contexts without source/verifier access.",
+    "A later read-only probe returned native_plugin_call_failed without persisting arbitrary error text; this additional failure is preserved, not replaced with a successful retry."
   ],
   "acceptance": {
     "same_tasks": "task IDs inspected; no completed task setup/run",
@@ -764,5 +765,127 @@
       "command": "git diff --check",
       "exit_code": 0
     }
-  ]
+  ],
+  "additional_probe": {
+    "timestamp_utc": "2026-10-15T17:04:24.167784+00:00",
+    "probe_kind": "metadata_and_read_only_plugin_call",
+    "model_turns_started": 0,
+    "benchmark_tasks_started": 0,
+    "requested_labels": [
+      "6.1 sol fast",
+      "6.1 sol astra ultrafast"
+    ],
+    "status": "blocked",
+    "cost_usd": null,
+    "cost_note": "No model turn requested; subscription marginal billing unavailable.",
+    "runtime": {
+      "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_probe; 0.1)",
+      "platformFamily": "unix",
+      "platformOs": "macos"
+    },
+    "account_type": "chatgpt",
+    "models": [
+      {
+        "id": "gpt-6.1-sol",
+        "model": "gpt-6.1-sol",
+        "supportedReasoningEfforts": [
+          {
+            "reasoningEffort": "low",
+            "description": "Fast responses with lighter reasoning"
+          },
+          {
+            "reasoningEffort": "medium",
+            "description": "Balances speed and reasoning depth for everyday tasks"
+          },
+          {
+            "reasoningEffort": "high",
+            "description": "Greater reasoning depth for complex problems"
+          },
+          {
+            "reasoningEffort": "xhigh",
+            "description": "Extra high reasoning depth for complex problems"
+          },
+          {
+            "reasoningEffort": "max",
+            "description": "Maximum reasoning depth for the hardest problems"
+          },
+          {
+            "reasoningEffort": "ultra",
+            "description": "Maximum reasoning with automatic task delegation"
+          }
+        ],
+        "defaultReasoningEffort": "low",
+        "serviceTiers": [
+          {
+            "id": "priority",
+            "name": "Fast",
+            "description": "2x speed, increased usage"
+          }
+        ],
+        "defaultServiceTier": null
+      },
+      {
+        "id": "gpt-6-astra",
+        "model": "gpt-6-astra",
+        "supportedReasoningEfforts": [
+          {
+            "reasoningEffort": "low",
+            "description": "Fast responses with lighter reasoning"
+          },
+          {
+            "reasoningEffort": "medium",
+            "description": "Balances speed and reasoning depth for everyday tasks"
+          },
+          {
+            "reasoningEffort": "high",
+            "description": "Greater reasoning depth for complex problems"
+          },
+          {
+            "reasoningEffort": "xhigh",
+            "description": "Extra high reasoning depth for complex problems"
+          },
+          {
+            "reasoningEffort": "max",
+            "description": "Maximum reasoning depth for the hardest problems"
+          },
+          {
+            "reasoningEffort": "ultra",
+            "description": "Maximum reasoning with automatic task delegation"
+          }
+        ],
+        "defaultReasoningEffort": "medium",
+        "serviceTiers": [
+          {
+            "id": "priority",
+            "name": "Fast",
+            "description": "2x speed, increased usage"
+          },
+          {
+            "id": "ultrafast",
+            "name": "Ultrafast",
+            "description": "The fastest available responses for latency-sensitive work."
+          }
+        ],
+        "defaultServiceTier": null
+      }
+    ],
+    "native_servers": [
+      {
+        "name": "cua_repl",
+        "tools": [
+          "js",
+          "js_reset",
+          "turn_ended"
+        ]
+      }
+    ],
+    "thread_configuration": {
+      "model": "gpt-6.1-sol",
+      "modelProvider": "openai",
+      "serviceTier": "priority",
+      "reasoningEffort": "low"
+    },
+    "plugin_is_error": true,
+    "blocker": "native_plugin_call_failed"
+  }
 }
