@@ -154,6 +154,7 @@ def main():
         if not driver_binary:
             raise RuntimeError("setup_driver_unavailable")
         driver = harness.jev_mod.DriverClient(driver_binary)
+        blocked_tasks = {}
         # Non-inference safety/admission preflight before any measured request.
         for task_id in ("T3_appkit_form", "T5b_1password_vault_item"):
             task = next(t for t in harness.build_tasks() if t.task_id == task_id)
@@ -179,9 +180,12 @@ def main():
                     "canary_prefix_present": "CANARY-VAULT-SECRET" in encoded_receipt,
                     "secure_marker_present": "\uf79a" in encoded_receipt or "\\uf79a" in encoded_receipt.lower(),
                 }
-                if receipt.get("isError") or harness.contains_secret_canary(encoded_receipt):
+                if receipt.get("isError") or payload["secure_preflight_audit"]["canary_prefix_present"]:
                     raise RuntimeError("native_secure_redaction_unverified")
-                payload["secure_preflight"] = "native AX response audited in memory; no canary marker; no model request"
+                if harness.contains_secret_canary(encoded_receipt):
+                    blocked_tasks[task_id] = "native_secure_marker_rejected_by_unchanged_canary_guard"
+                payload["secure_preflight"] = "audited in memory without inference; marker-bearing task blocked before model exposure"
+                payload["blocked_tasks"] = blocked_tasks
             session.close(); session = None
             cleanup(proc); proc = None
         checkpoint("admitted")
@@ -198,6 +202,11 @@ def main():
                            "focus_violations": None, "focus_probe_errors": None,
                            **{k: None for k in UNAVAILABLE}}
                     payload["results"].append(row)
+                    if task.task_id in blocked_tasks:
+                        row.update(status="blocked", blocker=blocked_tasks[task.task_id])
+                        checkpoint("running")
+                        event("task_blocked", task=task.task_id, arm=arm, repetition=repetition, blocker=row["blocker"])
+                        continue
                     metrics = AgentMetrics(harness.contains_secret_canary, event)
                     started = focus = None
                     checkpoint("running")
@@ -247,8 +256,8 @@ def main():
                             session.close(); session = None
                         cleanup(proc); proc = None
                         checkpoint("running")
-        checkpoint("completed")
-        event("completed", task_runs=len(payload["results"]))
+        checkpoint("completed_with_blocked_tasks" if blocked_tasks else "completed")
+        event("completed", task_slots=len(payload["results"]), blocked_slots=sum(r["status"] == "blocked" for r in payload["results"]))
         return 0
     except Exception as exc:
         reason = str(exc) if isinstance(exc, (RuntimeError, TimeoutError)) else type(exc).__name__
