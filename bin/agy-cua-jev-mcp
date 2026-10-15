@@ -136,6 +136,10 @@ VALUE_SETTABLE_AX_ROLES = TEXT_INPUT_AX_ROLES | frozenset({
 
 MIN_OBSERVE_MAX_DEPTH = 1
 MAX_OBSERVE_MAX_DEPTH = 12
+MIN_OBSERVE_MAX_ELEMENTS = 1
+MAX_OBSERVE_MAX_ELEMENTS = 1_000
+MIN_OBSERVE_WALK_TIMEOUT_MS = 100
+MAX_OBSERVE_WALK_TIMEOUT_MS = 10_000
 
 WINDOW_ROOT_ROLES = frozenset({"AXWindow", "AXApplication", "AXSheet", "AXDialog"})
 MENU_BAR_ROLES = frozenset({"AXMenuBar", "AXMenuBarItem", "AXMenu", "AXMenuItem"})
@@ -2495,6 +2499,24 @@ TOOLS = [
                         "(post-action) get_window_state calls (e.g. max_depth=2 for macOS Mail toolbar discovery)."
                     ),
                 },
+                "max_elements": {
+                    "type": "integer",
+                    "minimum": MIN_OBSERVE_MAX_ELEMENTS,
+                    "maximum": MAX_OBSERVE_MAX_ELEMENTS,
+                    "description": (
+                        "Optional AX tree walk element cap (1..1000) forwarded to both Stage 1 (pre-action) and "
+                        "Stage 5 (post-action) get_window_state calls."
+                    ),
+                },
+                "walk_timeout_ms": {
+                    "type": "integer",
+                    "minimum": MIN_OBSERVE_WALK_TIMEOUT_MS,
+                    "maximum": MAX_OBSERVE_WALK_TIMEOUT_MS,
+                    "description": (
+                        "Optional AX tree walk timeout in milliseconds (100..10000) forwarded as timeout_ms to both "
+                        "Stage 1 (pre-action) and Stage 5 (post-action) get_window_state calls."
+                    ),
+                },
                 "mode": {
                     "type": "string",
                     "enum": ["jev", "deterministic"],
@@ -2559,10 +2581,11 @@ TOOLS = [
                     "type": "boolean",
                     "description": (
                         "If true, when step k achieves verification_outcome='goal_verified' and step k+1 uses the "
-                        "same (query, max_depth) scope without requiring a pixel screenshot anchor, step k's verified "
-                        "post-observation is reused as step k+1's pre-observation while binding a fresh element_token "
-                        "to step k's post_snapshot_id. Only honoured together with allow_interstep_drift=true, because a "
-                        "reused observation cannot detect external drift; otherwise each step takes a fresh read."
+                        "same (query, max_depth, max_elements, walk_timeout_ms) scope without requiring a pixel "
+                        "screenshot anchor, step k's verified post-observation is reused as step k+1's pre-observation "
+                        "while binding a fresh element_token to step k's post_snapshot_id. Only honoured together with "
+                        "allow_interstep_drift=true, because a reused observation cannot detect external drift; "
+                        "otherwise each step takes a fresh read."
                     ),
                 },
                 "steps": {
@@ -2586,6 +2609,16 @@ TOOLS = [
                                 "type": "integer",
                                 "minimum": MIN_OBSERVE_MAX_DEPTH,
                                 "maximum": MAX_OBSERVE_MAX_DEPTH,
+                            },
+                            "max_elements": {
+                                "type": "integer",
+                                "minimum": MIN_OBSERVE_MAX_ELEMENTS,
+                                "maximum": MAX_OBSERVE_MAX_ELEMENTS,
+                            },
+                            "walk_timeout_ms": {
+                                "type": "integer",
+                                "minimum": MIN_OBSERVE_WALK_TIMEOUT_MS,
+                                "maximum": MAX_OBSERVE_WALK_TIMEOUT_MS,
                             },
                             "expected_snapshot_id": {"type": "string", "pattern": "^s[0-9a-f]{8,}$"},
                             "candidates": {"type": "array", "items": {"type": "object"}},
@@ -2920,6 +2953,36 @@ class JevMcpServer:
                 )
             max_depth_val = raw_depth
 
+        max_elements_val: int | None = None
+        if "max_elements" in args and args["max_elements"] is not None:
+            raw_max_el = args["max_elements"]
+            if (
+                not isinstance(raw_max_el, int)
+                or isinstance(raw_max_el, bool)
+                or raw_max_el < MIN_OBSERVE_MAX_ELEMENTS
+                or raw_max_el > MAX_OBSERVE_MAX_ELEMENTS
+            ):
+                return _format_tool_result(
+                    {"schema": "agy_cua.jev_step_v1", "status": "refused", "reason": "invalid_max_elements"},
+                    is_error=True,
+                )
+            max_elements_val = raw_max_el
+
+        walk_timeout_ms_val: int | None = None
+        if "walk_timeout_ms" in args and args["walk_timeout_ms"] is not None:
+            raw_walk_to = args["walk_timeout_ms"]
+            if (
+                not isinstance(raw_walk_to, int)
+                or isinstance(raw_walk_to, bool)
+                or raw_walk_to < MIN_OBSERVE_WALK_TIMEOUT_MS
+                or raw_walk_to > MAX_OBSERVE_WALK_TIMEOUT_MS
+            ):
+                return _format_tool_result(
+                    {"schema": "agy_cua.jev_step_v1", "status": "refused", "reason": "invalid_walk_timeout_ms"},
+                    is_error=True,
+                )
+            walk_timeout_ms_val = raw_walk_to
+
         mode = str(args.get("mode") or ("deterministic" if args.get("deterministic") is True else "jev")).strip()
         if mode not in {"jev", "deterministic"}:
             return _format_tool_result(
@@ -2981,6 +3044,14 @@ class JevMcpServer:
                 raise TimeoutError("batch deadline exceeded")
             return min(default_s, rem)
 
+        def obs_call_timeout_s(drv: DriverClient) -> float:
+            base_ms = (
+                max(drv.timeout_ms, walk_timeout_ms_val + 1000)
+                if walk_timeout_ms_val is not None
+                else drv.timeout_ms
+            )
+            return remaining_timeout_s(base_ms / 1000.0)
+
         # Stage 1: Observe target window via cua-driver (text-only to Jev; anchor window screenshot in driver session only if a candidate uses window-local pixels)
         needs_pixel_anchor = False
         if isinstance(raw_cands, list):
@@ -3032,10 +3103,14 @@ class JevMcpServer:
                     pre_obs_args["query"] = query_val
                 if max_depth_val is not None:
                     pre_obs_args["max_depth"] = max_depth_val
+                if max_elements_val is not None:
+                    pre_obs_args["max_elements"] = max_elements_val
+                if walk_timeout_ms_val is not None:
+                    pre_obs_args["timeout_ms"] = walk_timeout_ms_val
                 raw_pre = driver.call_tool(
                     "get_window_state",
                     pre_obs_args,
-                    timeout_s=remaining_timeout_s(driver.timeout_ms / 1000.0),
+                    timeout_s=obs_call_timeout_s(driver),
                     deadline_monotonic=_deadline_monotonic,
                 )
                 if raw_pre.get("isError"):
@@ -3450,10 +3525,14 @@ class JevMcpServer:
                 post_obs_args["query"] = query_val
             if max_depth_val is not None:
                 post_obs_args["max_depth"] = max_depth_val
+            if max_elements_val is not None:
+                post_obs_args["max_elements"] = max_elements_val
+            if walk_timeout_ms_val is not None:
+                post_obs_args["timeout_ms"] = walk_timeout_ms_val
             raw_post = driver.call_tool(
                 "get_window_state",
                 post_obs_args,
-                timeout_s=remaining_timeout_s(driver.timeout_ms / 1000.0),
+                timeout_s=obs_call_timeout_s(driver),
                 deadline_monotonic=_deadline_monotonic,
             )
             if raw_post.get("isError"):
@@ -3773,6 +3852,46 @@ class JevMcpServer:
                         },
                         is_error=True,
                     )
+            if "max_elements" in step_spec and step_spec["max_elements"] is not None:
+                s_max_el = step_spec["max_elements"]
+                if (
+                    not isinstance(s_max_el, int)
+                    or isinstance(s_max_el, bool)
+                    or s_max_el < MIN_OBSERVE_MAX_ELEMENTS
+                    or s_max_el > MAX_OBSERVE_MAX_ELEMENTS
+                ):
+                    return _format_tool_result(
+                        {
+                            "schema": "agy_cua.jev_batch_v1",
+                            "status": "refused",
+                            "reason": "invalid_max_elements",
+                            "step_index": idx,
+                            "pid": pid,
+                            "window_id": window_id,
+                            "session_id": self.session_id,
+                        },
+                        is_error=True,
+                    )
+            if "walk_timeout_ms" in step_spec and step_spec["walk_timeout_ms"] is not None:
+                s_walk_to = step_spec["walk_timeout_ms"]
+                if (
+                    not isinstance(s_walk_to, int)
+                    or isinstance(s_walk_to, bool)
+                    or s_walk_to < MIN_OBSERVE_WALK_TIMEOUT_MS
+                    or s_walk_to > MAX_OBSERVE_WALK_TIMEOUT_MS
+                ):
+                    return _format_tool_result(
+                        {
+                            "schema": "agy_cua.jev_batch_v1",
+                            "status": "refused",
+                            "reason": "invalid_walk_timeout_ms",
+                            "step_index": idx,
+                            "pid": pid,
+                            "window_id": window_id,
+                            "session_id": self.session_id,
+                        },
+                        is_error=True,
+                    )
             s_cands = step_spec.get("candidates")
             if s_cands is not None and (
                 not isinstance(s_cands, list) or len(s_cands) == 0 or len(s_cands) > MAX_AUTO_CANDIDATES
@@ -3877,7 +3996,7 @@ class JevMcpServer:
         remaining_steps: list[dict[str, Any]] = []
         prev_post_sig: tuple[Any, ...] | None = None
         prev_post_obs: dict[str, Any] | None = None
-        prev_obs_scope: tuple[str | None, int | None] | None = None
+        prev_obs_scope: tuple[str | None, int | None, int | None, int | None] | None = None
 
         agg_observe_ms = 0.0
         agg_provider_ms = 0.0
@@ -3915,6 +4034,10 @@ class JevMcpServer:
                 step_args["query"] = step_spec["query"]
             if "max_depth" in step_spec and step_spec["max_depth"] is not None:
                 step_args["max_depth"] = step_spec["max_depth"]
+            if "max_elements" in step_spec and step_spec["max_elements"] is not None:
+                step_args["max_elements"] = step_spec["max_elements"]
+            if "walk_timeout_ms" in step_spec and step_spec["walk_timeout_ms"] is not None:
+                step_args["walk_timeout_ms"] = step_spec["walk_timeout_ms"]
             if "candidates" in step_spec:
                 step_args["candidates"] = step_spec["candidates"]
             if "expected_snapshot_id" in step_spec:
@@ -3925,6 +4048,8 @@ class JevMcpServer:
             curr_obs_scope = (
                 step_spec["query"].strip() if isinstance(step_spec.get("query"), str) else None,
                 step_spec.get("max_depth"),
+                step_spec.get("max_elements"),
+                step_spec.get("walk_timeout_ms"),
             )
             out_sig: list[tuple[Any, ...]] = []
             out_obs: list[dict[str, Any]] = []

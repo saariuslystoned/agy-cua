@@ -2831,7 +2831,332 @@ class StdioEndToEndTest(unittest.TestCase):
         ], calc)
         self.assertEqual([c["id"] for c in ok], ["xy", "ret"])
 
+    def test_observation_budget_validation_refuses_invalid_max_elements_and_walk_timeout_ms(self):
+        server = jev.JevMcpServer(
+            env={"TYPESAFE_API_KEY": "test-key"},
+            keychain_reader=lambda _: None,
+        )
+        try:
+            for invalid_max_el in (0, -5, 1001, True, False, "64", 12.5):
+                step_sc = server.handle_step({
+                    "pid": 10,
+                    "window_id": 20,
+                    "goal": "Click button",
+                    "max_elements": invalid_max_el,
+                })["structuredContent"]
+                self.assertEqual(step_sc["status"], "refused")
+                self.assertEqual(step_sc["reason"], "invalid_max_elements")
+
+                batch_sc = server.handle_batch({
+                    "pid": 10,
+                    "window_id": 20,
+                    "steps": [{
+                        "goal": "Click button",
+                        "max_elements": invalid_max_el,
+                        "expected_postcondition": {"static_text_equals": "ok"},
+                    }],
+                })["structuredContent"]
+                self.assertEqual(batch_sc["status"], "refused")
+                self.assertEqual(batch_sc["reason"], "invalid_max_elements")
+
+            for invalid_walk_to in (0, 99, -100, 10001, True, False, "1000", 250.5):
+                step_sc = server.handle_step({
+                    "pid": 10,
+                    "window_id": 20,
+                    "goal": "Click button",
+                    "walk_timeout_ms": invalid_walk_to,
+                })["structuredContent"]
+                self.assertEqual(step_sc["status"], "refused")
+                self.assertEqual(step_sc["reason"], "invalid_walk_timeout_ms")
+
+                batch_sc = server.handle_batch({
+                    "pid": 10,
+                    "window_id": 20,
+                    "steps": [{
+                        "goal": "Click button",
+                        "walk_timeout_ms": invalid_walk_to,
+                        "expected_postcondition": {"static_text_equals": "ok"},
+                    }],
+                })["structuredContent"]
+                self.assertEqual(batch_sc["status"], "refused")
+                self.assertEqual(batch_sc["reason"], "invalid_walk_timeout_ms")
+        finally:
+            server.close()
+
+    def test_observation_budget_passthrough_and_deadline_expansion_stdio(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            driver_script = os.path.join(tmp, "cua-driver-slow-walk")
+            log_file = os.path.join(tmp, "slow-walk-calls.jsonl")
+            with open(driver_script, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent(f"""\
+                    #!/usr/bin/env python3
+                    import json, sys, time
+                    reads = 0
+                    status = "Inbox"
+                    log_path = {log_file!r}
+                    for line in sys.stdin:
+                        msg = json.loads(line)
+                        if "id" not in msg:
+                            continue
+                        method = msg.get("method")
+                        if method == "initialize":
+                            res = {{"protocolVersion": "2025-06-18", "capabilities": {{}}, "serverInfo": {{"name": "fake"}}}}
+                        elif method == "tools/call":
+                            params = msg.get("params", {{}})
+                            name = params.get("name")
+                            args = params.get("arguments", {{}})
+                            with open(log_path, "a", encoding="utf-8") as lf:
+                                lf.write(json.dumps({{"name": name, "args": args}}) + "\\n")
+                            if name == "get_window_state":
+                                reads += 1
+                                # Sleep 350ms: exceeds AGY_CUA_DRIVER_TIMEOUT_MS=200 unless walk_timeout_ms expands outer deadline
+                                time.sleep(0.35)
+                                snap = f"s0000{{reads:04d}}"
+                                md = f'- [0] AXWindow "Mail"\\n  - AXStaticText = "Folder={{status}}"\\n  - [5] AXButton "Mailbox VIP"'
+                                res = {{
+                                    "content": [{{"type": "text", "text": md}}],
+                                    "structuredContent": {{
+                                        "pid": 55, "window_id": 500, "snapshot_id": snap, "tree_markdown": md,
+                                        "app_name": "Mail", "window_title": "Mail",
+                                        "elements": [
+                                            {{"element_index": 0, "role": "AXWindow", "label": "Mail"}},
+                                            {{"element_index": 1, "role": "AXStaticText", "label": f"Folder={{status}}", "value": f"Folder={{status}}", "parent_index": 0}},
+                                            {{"element_index": 5, "role": "AXButton", "label": "Mailbox VIP", "enabled": True, "parent_index": 0, "actions": ["AXPress"]}},
+                                        ],
+                                    }},
+                                }}
+                            elif name == "click":
+                                status = "VIP"
+                                res = {{"content": [{{"type": "text", "text": "clicked"}}], "structuredContent": {{"ok": True}}}}
+                            else:
+                                res = {{"content": [{{"type": "text", "text": "ok"}}], "structuredContent": {{"ok": True}}}}
+                        else:
+                            res = {{}}
+                        print(json.dumps({{"jsonrpc": "2.0", "id": msg["id"], "result": res}}), flush=True)
+                """))
+            os.chmod(driver_script, os.stat(driver_script).st_mode | stat.S_IEXEC)
+
+            proc = subprocess.Popen(
+                [sys.executable, JEV_MCP],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env={
+                    **os.environ,
+                    "AGY_CUA_DRIVER": driver_script,
+                    "AGY_CUA_DRIVER_TIMEOUT_MS": "200",
+                    "TYPESAFE_API_KEY": "test-key",
+                },
+            )
+            try:
+                assert proc.stdin is not None and proc.stdout is not None
+                proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n")
+                proc.stdin.flush()
+                init_line = json.loads(proc.stdout.readline())
+                self.assertEqual(init_line["id"], 1)
+
+                # Without walk_timeout_ms, default AGY_CUA_DRIVER_TIMEOUT_MS=200 times out against 350ms driver sleep
+                proc.stdin.write(json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {
+                            "pid": 55,
+                            "window_id": 500,
+                            "goal": "Select Mailbox VIP",
+                            "mode": "deterministic",
+                            "candidates": [{
+                                "id": "click.vip",
+                                "description": "Click Mailbox VIP",
+                                "tool": "click",
+                                "element_index": 5,
+                            }],
+                            "expected_postcondition": {"static_text_contains": "Folder=VIP"},
+                        },
+                    },
+                }) + "\n")
+                proc.stdin.flush()
+                timeout_resp = json.loads(proc.stdout.readline())
+                self.assertEqual(timeout_resp["result"]["structuredContent"]["status"], "observation_failed")
+
+                # With max_elements=120 and walk_timeout_ms=600, outer driver deadline expands to 1600ms (> 350ms sleep)
+                proc.stdin.write(json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {
+                            "pid": 55,
+                            "window_id": 500,
+                            "goal": "Select Mailbox VIP",
+                            "mode": "deterministic",
+                            "query": "Mailbox",
+                            "max_depth": 3,
+                            "max_elements": 120,
+                            "walk_timeout_ms": 600,
+                            "candidates": [{
+                                "id": "click.vip",
+                                "description": "Click Mailbox VIP",
+                                "tool": "click",
+                                "element_index": 5,
+                            }],
+                            "expected_postcondition": {"static_text_contains": "Folder=VIP"},
+                        },
+                    },
+                }) + "\n")
+                proc.stdin.flush()
+                step_resp = json.loads(proc.stdout.readline())
+                sc = step_resp["result"]["structuredContent"]
+                self.assertEqual(sc["status"], "verified")
+                self.assertEqual(sc["verification_outcome"], "goal_verified")
+                self.assertTrue(sc["verified"])
+            finally:
+                for stream in (proc.stdin, proc.stdout, proc.stderr):
+                    if stream is not None:
+                        stream.close()
+                proc.terminate()
+                proc.wait(timeout=3.0)
+
+            with open(log_file, "r", encoding="utf-8") as lf:
+                logged = [json.loads(line) for line in lf if line.strip()]
+            gws_calls = [c["args"] for c in logged if c["name"] == "get_window_state"]
+            # First call was the unexpanded timeout attempt; next two are pre_obs and post_obs with walk_timeout_ms=600
+            self.assertEqual(len(gws_calls), 3)
+            for gws_arg in gws_calls[1:]:
+                self.assertEqual(gws_arg.get("query"), "Mailbox")
+                self.assertEqual(gws_arg.get("max_depth"), 3)
+                self.assertEqual(gws_arg.get("max_elements"), 120)
+                self.assertEqual(gws_arg.get("timeout_ms"), 600)
+
+    def test_batch_chain_observations_requires_matching_full_observation_budget_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            driver_script = os.path.join(tmp, "cua-driver-scope-chain")
+            log_file = os.path.join(tmp, "scope-chain-calls.jsonl")
+            with open(driver_script, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent(f"""\
+                    #!/usr/bin/env python3
+                    import json, sys
+                    reads = 0
+                    val = "v0"
+                    log_path = {log_file!r}
+                    for line in sys.stdin:
+                        msg = json.loads(line)
+                        if "id" not in msg:
+                            continue
+                        method = msg.get("method")
+                        if method == "initialize":
+                            res = {{"protocolVersion": "2025-06-18", "capabilities": {{}}, "serverInfo": {{"name": "fake"}}}}
+                        elif method == "tools/call":
+                            params = msg.get("params", {{}})
+                            name = params.get("name")
+                            args = params.get("arguments", {{}})
+                            with open(log_path, "a", encoding="utf-8") as lf:
+                                lf.write(json.dumps({{"name": name, "args": args}}) + "\\n")
+                            if name == "get_window_state":
+                                reads += 1
+                                snap = f"s0000{{reads:04d}}"
+                                md = f'- [0] AXWindow "Draft"\\n  - [3] AXTextField (Subject) = "{{val}}"'
+                                res = {{
+                                    "content": [{{"type": "text", "text": md}}],
+                                    "structuredContent": {{
+                                        "pid": 88, "window_id": 900, "snapshot_id": snap, "tree_markdown": md,
+                                        "app_name": "BenchApp", "window_title": "Draft",
+                                        "elements": [
+                                            {{"element_index": 0, "role": "AXWindow", "label": "Draft"}},
+                                            {{"element_index": 3, "role": "AXTextField", "label": "Subject", "value": val, "enabled": True, "parent_index": 0, "actions": ["AXPress"]}},
+                                        ],
+                                    }},
+                                }}
+                            elif name == "set_value":
+                                val = str(args.get("value", ""))
+                                res = {{"content": [{{"type": "text", "text": "value set"}}], "structuredContent": {{"ok": True}}}}
+                            else:
+                                res = {{"content": [{{"type": "text", "text": "ok"}}], "structuredContent": {{"ok": True}}}}
+                        else:
+                            res = {{}}
+                        print(json.dumps({{"jsonrpc": "2.0", "id": msg["id"], "result": res}}), flush=True)
+                """))
+            os.chmod(driver_script, os.stat(driver_script).st_mode | stat.S_IEXEC)
+
+            server = jev.JevMcpServer(
+                env={"AGY_CUA_DRIVER": driver_script, "TYPESAFE_API_KEY": "test-key"},
+                keychain_reader=lambda _: None,
+            )
+            try:
+                def step_spec(v: str, *, max_el: int, walk_ms: int) -> dict:
+                    return {
+                        "goal": f"Set Subject to {v}",
+                        "mode": "deterministic",
+                        "query": "Subject",
+                        "max_depth": 3,
+                        "max_elements": max_el,
+                        "walk_timeout_ms": walk_ms,
+                        "candidates": [{
+                            "id": f"set.{v}",
+                            "description": f"Set Subject to {v}",
+                            "tool": "set_value",
+                            "element_index": 3,
+                            "value": v,
+                        }],
+                        "expected_postcondition": {"element_value_equals": v},
+                    }
+
+                resp = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_batch",
+                        "arguments": {
+                            "pid": 88,
+                            "window_id": 900,
+                            "chain_observations": True,
+                            "allow_interstep_drift": True,
+                            "steps": [
+                                step_spec("v1", max_el=50, walk_ms=1500),
+                                # Same (query, max_depth, max_elements, walk_timeout_ms) -> chained
+                                step_spec("v2", max_el=50, walk_ms=1500),
+                                # Changed max_elements (50 -> 100) -> must re-observe
+                                step_spec("v3", max_el=100, walk_ms=1500),
+                                # Changed walk_timeout_ms (1500 -> 2500) -> must re-observe
+                                step_spec("v4", max_el=100, walk_ms=2500),
+                            ],
+                        },
+                    },
+                })
+            finally:
+                server.close()
+
+            sc = resp["result"]["structuredContent"]
+            self.assertEqual(sc["status"], "verified")
+            self.assertTrue(sc["all_verified"])
+            self.assertEqual(sc["completed_count"], 4)
+            self.assertEqual(
+                [s["observation_chained"] for s in sc["completed_steps"]],
+                [False, True, False, False],
+            )
+            with open(log_file, "r", encoding="utf-8") as lf:
+                logged = [json.loads(line) for line in lf if line.strip()]
+            gws_calls = [c["args"] for c in logged if c["name"] == "get_window_state"]
+            # Step 0: pre+post (2); Step 1: post only (1); Step 2: pre+post (2); Step 3: pre+post (2) -> total 7 calls
+            self.assertEqual(len(gws_calls), 7)
+            self.assertEqual(
+                [(c.get("max_elements"), c.get("timeout_ms")) for c in gws_calls],
+                [
+                    (50, 1500),   # Step 0 pre
+                    (50, 1500),   # Step 0 post
+                    (50, 1500),   # Step 1 post (pre was chained)
+                    (100, 1500),  # Step 2 pre (max_elements changed)
+                    (100, 1500),  # Step 2 post
+                    (100, 2500),  # Step 3 pre (walk_timeout_ms changed)
+                    (100, 2500),  # Step 3 post
+                ],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
-
