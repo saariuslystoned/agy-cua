@@ -1,0 +1,915 @@
+{
+  "timestamp_utc": "2026-10-15T17:03:05.937677+00:00",
+  "run_status": "blocked_before_benchmark",
+  "issue": 12,
+  "repo": "saariuslystoned/agy-cua",
+  "worktree": "/Users/bobbybones/Developer/side-quests/agy-cua-worktrees/issue-12-codex-cu",
+  "branch": "codex/issue-12-codex-cu",
+  "base_sha": "154edf54e6223b4c61543d78206247535b3e2b89",
+  "pr11_state_at_freeze": "OPEN",
+  "method": "native_app_server_capability_probe_only",
+  "arms": [
+    {
+      "requested_label": "6.1 sol fast",
+      "model_candidate": "gpt-6.1-sol",
+      "service_tier_candidate": "priority",
+      "reasoning_for_future_runs": "low",
+      "resolution": "catalog_supported_execution_blocked"
+    },
+    {
+      "requested_label": "6.1 sol astra ultrafast",
+      "model_candidate": "gpt-6-astra",
+      "service_tier_candidate": "ultrafast",
+      "reasoning_for_future_runs": "low",
+      "resolution": "user_final_choice_catalog_supported_execution_blocked",
+      "clarification": {
+        "source": "Bobby latest reply in implementation chat",
+        "answer": "okay so use 6.1 sol fast and 6 astra ultrafast",
+        "supersedes": "earlier GPT-6.1 Sol + Ultrafast reply",
+        "original_requested_label_preserved": true
+      }
+    }
+  ],
+  "benchmark_task_runs_started": 0,
+  "results": [],
+  "planned_not_run": [
+    {
+      "task_id": "T1_calc_arith",
+      "requested_arm": "6.1 sol fast",
+      "repetition": 1,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T1_calc_arith",
+      "requested_arm": "6.1 sol astra ultrafast",
+      "repetition": 1,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T2_calc_recovery",
+      "requested_arm": "6.1 sol fast",
+      "repetition": 1,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T2_calc_recovery",
+      "requested_arm": "6.1 sol astra ultrafast",
+      "repetition": 1,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T3_appkit_form",
+      "requested_arm": "6.1 sol fast",
+      "repetition": 1,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T3_appkit_form",
+      "requested_arm": "6.1 sol astra ultrafast",
+      "repetition": 1,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T4_appkit_dense",
+      "requested_arm": "6.1 sol fast",
+      "repetition": 1,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T4_appkit_dense",
+      "requested_arm": "6.1 sol astra ultrafast",
+      "repetition": 1,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T5a_mail_triage_draft",
+      "requested_arm": "6.1 sol fast",
+      "repetition": 1,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T5a_mail_triage_draft",
+      "requested_arm": "6.1 sol astra ultrafast",
+      "repetition": 1,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T5b_1password_vault_item",
+      "requested_arm": "6.1 sol fast",
+      "repetition": 1,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T5b_1password_vault_item",
+      "requested_arm": "6.1 sol astra ultrafast",
+      "repetition": 1,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T1_calc_arith",
+      "requested_arm": "6.1 sol fast",
+      "repetition": 2,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T1_calc_arith",
+      "requested_arm": "6.1 sol astra ultrafast",
+      "repetition": 2,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T2_calc_recovery",
+      "requested_arm": "6.1 sol fast",
+      "repetition": 2,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T2_calc_recovery",
+      "requested_arm": "6.1 sol astra ultrafast",
+      "repetition": 2,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T3_appkit_form",
+      "requested_arm": "6.1 sol fast",
+      "repetition": 2,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T3_appkit_form",
+      "requested_arm": "6.1 sol astra ultrafast",
+      "repetition": 2,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T4_appkit_dense",
+      "requested_arm": "6.1 sol fast",
+      "repetition": 2,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T4_appkit_dense",
+      "requested_arm": "6.1 sol astra ultrafast",
+      "repetition": 2,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T5a_mail_triage_draft",
+      "requested_arm": "6.1 sol fast",
+      "repetition": 2,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T5a_mail_triage_draft",
+      "requested_arm": "6.1 sol astra ultrafast",
+      "repetition": 2,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T5b_1password_vault_item",
+      "requested_arm": "6.1 sol fast",
+      "repetition": 2,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    },
+    {
+      "task_id": "T5b_1password_vault_item",
+      "requested_arm": "6.1 sol astra ultrafast",
+      "repetition": 2,
+      "status": "not_run",
+      "unavailable_reason": "No admitted benchmark session: native plugin requests explicit Calculator app approval through mcpServer/elicitation/request. Both final model/speed choices are catalog-supported.",
+      "passed": null,
+      "wall_s": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_usd": null,
+      "focus_violations": null,
+      "focus_probe_errors": null
+    }
+  ],
+  "live_models": [
+    {
+      "id": "gpt-6.1-sol",
+      "model": "gpt-6.1-sol",
+      "supportedReasoningEfforts": [
+        {
+          "reasoningEffort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "reasoningEffort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "reasoningEffort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "reasoningEffort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "reasoningEffort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        },
+        {
+          "reasoningEffort": "ultra",
+          "description": "Maximum reasoning with automatic task delegation"
+        }
+      ],
+      "defaultReasoningEffort": "low",
+      "serviceTiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "2x speed, increased usage"
+        }
+      ],
+      "defaultServiceTier": null
+    },
+    {
+      "id": "gpt-6-astra",
+      "model": "gpt-6-astra",
+      "supportedReasoningEfforts": [
+        {
+          "reasoningEffort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "reasoningEffort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "reasoningEffort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "reasoningEffort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "reasoningEffort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        },
+        {
+          "reasoningEffort": "ultra",
+          "description": "Maximum reasoning with automatic task delegation"
+        }
+      ],
+      "defaultReasoningEffort": "medium",
+      "serviceTiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "2x speed, increased usage"
+        },
+        {
+          "id": "ultrafast",
+          "name": "Ultrafast",
+          "description": "The fastest available responses for latency-sensitive work."
+        }
+      ],
+      "defaultServiceTier": null
+    }
+  ],
+  "native_plugin_versions": {
+    "unified-computer-use": "26.1007.71326",
+    "computer-use": "1.0.1001425"
+  },
+  "codex_cli_version": "0.161.0",
+  "driver_version": "0.35.4",
+  "fixture_build": {
+    "task_ids": [
+      "T1_calc_arith",
+      "T2_calc_recovery",
+      "T3_appkit_form",
+      "T4_appkit_dense",
+      "T5a_mail_triage_draft",
+      "T5b_1password_vault_item"
+    ],
+    "source_sha256": "cab5753af003a01ba2051cc3f6074a3d4ced30101ac8c13971a5b7d549441483",
+    "binary_sha256": "1b5972f1a1e1400527a66286341a8bfe0f56a57aec0438680e3a63fd913eb768",
+    "binary_path": "/Users/bobbybones/Developer/side-quests/agy-cua-worktrees/issue-12-codex-cu/runs/.cache/bench_fixture",
+    "driver_path": "/Users/bobbybones/.local/bin/cua-driver",
+    "python": "3.14.7"
+  },
+  "probe": {
+    "timestamp_utc": "2026-10-15T17:01:48.732735+00:00",
+    "probe_kind": "metadata_and_read_only_plugin_call",
+    "model_turns_started": 0,
+    "benchmark_tasks_started": 0,
+    "requested_labels": [
+      "6.1 sol fast",
+      "6.1 sol astra ultrafast"
+    ],
+    "status": "blocked",
+    "cost_usd": null,
+    "cost_note": "No model turn requested; subscription marginal billing unavailable.",
+    "runtime": {
+      "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_probe; 0.1)",
+      "platformFamily": "unix",
+      "platformOs": "macos"
+    },
+    "account_type": "chatgpt",
+    "models": [
+      {
+        "id": "gpt-6.1-sol",
+        "model": "gpt-6.1-sol",
+        "supportedReasoningEfforts": [
+          {
+            "reasoningEffort": "low",
+            "description": "Fast responses with lighter reasoning"
+          },
+          {
+            "reasoningEffort": "medium",
+            "description": "Balances speed and reasoning depth for everyday tasks"
+          },
+          {
+            "reasoningEffort": "high",
+            "description": "Greater reasoning depth for complex problems"
+          },
+          {
+            "reasoningEffort": "xhigh",
+            "description": "Extra high reasoning depth for complex problems"
+          },
+          {
+            "reasoningEffort": "max",
+            "description": "Maximum reasoning depth for the hardest problems"
+          },
+          {
+            "reasoningEffort": "ultra",
+            "description": "Maximum reasoning with automatic task delegation"
+          }
+        ],
+        "defaultReasoningEffort": "low",
+        "serviceTiers": [
+          {
+            "id": "priority",
+            "name": "Fast",
+            "description": "2x speed, increased usage"
+          }
+        ],
+        "defaultServiceTier": null
+      },
+      {
+        "id": "gpt-6-astra",
+        "model": "gpt-6-astra",
+        "supportedReasoningEfforts": [
+          {
+            "reasoningEffort": "low",
+            "description": "Fast responses with lighter reasoning"
+          },
+          {
+            "reasoningEffort": "medium",
+            "description": "Balances speed and reasoning depth for everyday tasks"
+          },
+          {
+            "reasoningEffort": "high",
+            "description": "Greater reasoning depth for complex problems"
+          },
+          {
+            "reasoningEffort": "xhigh",
+            "description": "Extra high reasoning depth for complex problems"
+          },
+          {
+            "reasoningEffort": "max",
+            "description": "Maximum reasoning depth for the hardest problems"
+          },
+          {
+            "reasoningEffort": "ultra",
+            "description": "Maximum reasoning with automatic task delegation"
+          }
+        ],
+        "defaultReasoningEffort": "medium",
+        "serviceTiers": [
+          {
+            "id": "priority",
+            "name": "Fast",
+            "description": "2x speed, increased usage"
+          },
+          {
+            "id": "ultrafast",
+            "name": "Ultrafast",
+            "description": "The fastest available responses for latency-sensitive work."
+          }
+        ],
+        "defaultServiceTier": null
+      }
+    ],
+    "native_servers": [
+      {
+        "name": "cua_repl",
+        "tools": [
+          "js",
+          "js_reset",
+          "turn_ended"
+        ]
+      }
+    ],
+    "thread_configuration": {
+      "model": "gpt-6.1-sol",
+      "modelProvider": "openai",
+      "serviceTier": "priority",
+      "reasoningEffort": "low"
+    },
+    "blocker": "host_request_requires_human_or_supported_client"
+  },
+  "active_agent_probe": {
+    "requested_model": "gpt-6.1-sol",
+    "requested_service_tier": "priority",
+    "thread_model": "gpt-6.1-sol",
+    "thread_service_tier": "priority",
+    "thread_reasoning_effort": "low",
+    "events": [
+      {
+        "type": "userMessage",
+        "server": null,
+        "tool": null
+      },
+      {
+        "type": "agentMessage",
+        "server": null,
+        "tool": null
+      },
+      {
+        "type": "mcpToolCall",
+        "server": "cua_repl",
+        "tool": "js"
+      },
+      {
+        "type": "agentMessage",
+        "server": null,
+        "tool": null
+      }
+    ],
+    "usage": {
+      "total": {
+        "totalTokens": 52930,
+        "inputTokens": 52830,
+        "cachedInputTokens": 23296,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 100,
+        "reasoningOutputTokens": 0
+      },
+      "last": {
+        "totalTokens": 29331,
+        "inputTokens": 29295,
+        "cachedInputTokens": 23296,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 36,
+        "reasoningOutputTokens": 0
+      },
+      "modelContextWindow": 475000
+    },
+    "benchmark_task": false,
+    "status": "completed"
+  },
+  "billing": {
+    "auth_type": "chatgpt",
+    "paid_api_requests": 0,
+    "subscription_marginal_cost_usd": null,
+    "subscription_credit_debit": null,
+    "max_budget_usd_total": 5,
+    "further_model_requests_admitted": false,
+    "note": "One read-only Sol/Fast subscription probe consumed reported usage below. No billing receipt; unavailable does not mean zero cost. No API credentials or APIs used."
+  },
+  "official_sources": [
+    "https://learn.chatgpt.com/docs/computer-use",
+    "https://learn.chatgpt.com/docs/app-server",
+    "https://learn.chatgpt.com/docs/codex-sdk",
+    "https://learn.chatgpt.com/docs/models",
+    "https://learn.chatgpt.com/docs/agent-configuration/speed"
+  ],
+  "limitations": [
+    "No six-task measurements, comparison or variance exists.",
+    "Configured model/tier from thread/start is not an upstream per-response identity receipt.",
+    "Native desktop chat Calculator access worked; fresh app-server session required approval. This does not prove CLI native Computer Use is globally unsupported.",
+    "No dedicated noncompeting desktop interval established; observed Cua Driver CPU load, existing services left untouched.",
+    "Fixture compiled from unchanged source; no fixture UI/setup completion claimed.",
+    "Implementation-context source inspection exposed the fixture sentinel; no measured solver ran. Resume only in fresh solver contexts without source/verifier access.",
+    "A later read-only probe returned native_plugin_call_failed without persisting arbitrary error text; this additional failure is preserved, not replaced with a successful retry.",
+    "Final user choice is GPT-6.1 Sol Fast and GPT-6 Astra Ultrafast, both supported by the live model catalog. No substitute model was run."
+  ],
+  "acceptance": {
+    "same_tasks": "task IDs inspected; no completed task setup/run",
+    "traceable_numbers": "probe usage and identities only",
+    "focus": "unavailable; monitor not started",
+    "model_version_reasoning_pricing": "configuration and official sources recorded; execution identity and marginal pricing unavailable",
+    "timing_explanation": "unavailable; no performance result"
+  },
+  "local_gates": [
+    {
+      "command": "python3 -m unittest discover -v tests",
+      "exit_code": 0,
+      "tests": 56,
+      "result": "OK",
+      "local_log": "runs/benchmark-codex-runs/20261015-native-probe/tests-final.log"
+    },
+    {
+      "command": "shellcheck bin/agy-cua scripts/*.sh",
+      "exit_code": 0
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0
+    }
+  ],
+  "additional_probe": {
+    "timestamp_utc": "2026-10-15T17:04:24.167784+00:00",
+    "probe_kind": "metadata_and_read_only_plugin_call",
+    "model_turns_started": 0,
+    "benchmark_tasks_started": 0,
+    "requested_labels": [
+      "6.1 sol fast",
+      "6.1 sol astra ultrafast"
+    ],
+    "status": "blocked",
+    "cost_usd": null,
+    "cost_note": "No model turn requested; subscription marginal billing unavailable.",
+    "runtime": {
+      "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_probe; 0.1)",
+      "platformFamily": "unix",
+      "platformOs": "macos"
+    },
+    "account_type": "chatgpt",
+    "models": [
+      {
+        "id": "gpt-6.1-sol",
+        "model": "gpt-6.1-sol",
+        "supportedReasoningEfforts": [
+          {
+            "reasoningEffort": "low",
+            "description": "Fast responses with lighter reasoning"
+          },
+          {
+            "reasoningEffort": "medium",
+            "description": "Balances speed and reasoning depth for everyday tasks"
+          },
+          {
+            "reasoningEffort": "high",
+            "description": "Greater reasoning depth for complex problems"
+          },
+          {
+            "reasoningEffort": "xhigh",
+            "description": "Extra high reasoning depth for complex problems"
+          },
+          {
+            "reasoningEffort": "max",
+            "description": "Maximum reasoning depth for the hardest problems"
+          },
+          {
+            "reasoningEffort": "ultra",
+            "description": "Maximum reasoning with automatic task delegation"
+          }
+        ],
+        "defaultReasoningEffort": "low",
+        "serviceTiers": [
+          {
+            "id": "priority",
+            "name": "Fast",
+            "description": "2x speed, increased usage"
+          }
+        ],
+        "defaultServiceTier": null
+      },
+      {
+        "id": "gpt-6-astra",
+        "model": "gpt-6-astra",
+        "supportedReasoningEfforts": [
+          {
+            "reasoningEffort": "low",
+            "description": "Fast responses with lighter reasoning"
+          },
+          {
+            "reasoningEffort": "medium",
+            "description": "Balances speed and reasoning depth for everyday tasks"
+          },
+          {
+            "reasoningEffort": "high",
+            "description": "Greater reasoning depth for complex problems"
+          },
+          {
+            "reasoningEffort": "xhigh",
+            "description": "Extra high reasoning depth for complex problems"
+          },
+          {
+            "reasoningEffort": "max",
+            "description": "Maximum reasoning depth for the hardest problems"
+          },
+          {
+            "reasoningEffort": "ultra",
+            "description": "Maximum reasoning with automatic task delegation"
+          }
+        ],
+        "defaultReasoningEffort": "medium",
+        "serviceTiers": [
+          {
+            "id": "priority",
+            "name": "Fast",
+            "description": "2x speed, increased usage"
+          },
+          {
+            "id": "ultrafast",
+            "name": "Ultrafast",
+            "description": "The fastest available responses for latency-sensitive work."
+          }
+        ],
+        "defaultServiceTier": null
+      }
+    ],
+    "native_servers": [
+      {
+        "name": "cua_repl",
+        "tools": [
+          "js",
+          "js_reset",
+          "turn_ended"
+        ]
+      }
+    ],
+    "thread_configuration": {
+      "model": "gpt-6.1-sol",
+      "modelProvider": "openai",
+      "serviceTier": "priority",
+      "reasoningEffort": "low"
+    },
+    "plugin_is_error": true,
+    "blocker": "native_plugin_call_failed"
+  },
+  "native_approval_request": {
+    "method": "mcpServer/elicitation/request",
+    "serverName": "cua_repl",
+    "mode": "form",
+    "message": "Allow Computer Use to use \"Calculator\"?",
+    "requestedSchema": {
+      "type": "object",
+      "properties": {}
+    },
+    "response": "not_granted; explicit human app-access question pending in implementation chat"
+  },
+  "review": {
+    "reviewer": "GitHub Copilot Code Review",
+    "reviewed_head": "c19ab5bbae296e485c59870610f16340df3d955d",
+    "finding": "Translate queue.Empty to app_server_timeout",
+    "disposition": "accepted_and_fixed",
+    "authority": "scripts/probe_codex_native.py Probe.call",
+    "test": "test_silent_server_is_classified_as_timeout",
+    "pre_fix_discriminator": "Executed Probe.call from 9890be434f7f2a0c22ac42447f7a97664a524ee0: Queue.Empty reproduced; new TimeoutError assertion rejects that base.",
+    "exact_new_head_review": "pending"
+  }
+}

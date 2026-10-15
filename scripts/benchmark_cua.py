@@ -1410,6 +1410,11 @@ def launch_target_for_task(
     return int(proc.pid), wid, proc, state_file, "bench_fixture"
 
 
+def write_benchmark_summary(out_dir: Path, payload: dict[str, Any]) -> None:
+    """Shared checkpoint serialization for baseline and native Codex runners."""
+    (out_dir / "summary.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark AGY-CUA vs Upstream Google Computer Use API")
     parser.add_argument("--model", default="gemini-3.8-flash", help="Outer Gemini model (e.g. gemini-3.8-flash or gemini-4-argon)")
@@ -1483,7 +1488,7 @@ def main() -> int:
             "jev_output_tokens": spend.jev_output_tokens,
             "results": results,
         }
-        (out_dir / "summary.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        write_benchmark_summary(out_dir, payload)
 
     print(f"=== AGY-CUA Benchmark Suite ({stamp}) | Model: {args.model} | Thinking: {PLANNER_THINKING_LEVEL or f'budget={PLANNER_THINKING_BUDGET}'} | Budget Cap: ${args.max_budget_usd:.2f} ===", flush=True)
 
