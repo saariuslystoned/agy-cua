@@ -484,6 +484,7 @@ scoped_observation_ok = (
     and scoped_step.get("total_actionable_elements") == 1
     and isinstance(scoped_step.get("omitted_elements_count"), int)
     and isinstance(scoped_step.get("omitted_candidates_count"), int)
+    and scoped_step.get("pre_observation_truncated") is True
     and scoped_step.get("observation_truncated") is True
     and scoped_step.get("post_total_actionable_elements") == 1
     and isinstance(scoped_step.get("post_omitted_elements_count"), int)
@@ -568,6 +569,7 @@ result = {
         "total_actionable_elements": scoped_step.get("total_actionable_elements"),
         "omitted_elements_count": scoped_step.get("omitted_elements_count"),
         "omitted_candidates_count": scoped_step.get("omitted_candidates_count"),
+        "pre_observation_truncated": scoped_step.get("pre_observation_truncated"),
         "observation_truncated": scoped_step.get("observation_truncated"),
         "post_total_actionable_elements": scoped_step.get("post_total_actionable_elements"),
         "post_omitted_elements_count": scoped_step.get("post_omitted_elements_count"),
