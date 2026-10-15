@@ -143,14 +143,37 @@ class SpendTracker:
     def release_reservation(self, allowance_usd: float) -> None:
         self.reserved_usd = max(0.0, round(self.reserved_usd - allowance_usd, 6))
 
-    def record_gemini(self, resp: Any, *, had_screenshot: bool = False) -> tuple[int, int, int, float]:
+    def record_gemini(
+        self,
+        resp: Any,
+        *,
+        had_screenshot: bool = False,
+        reserved_allowance_usd: float = 0.0,
+    ) -> tuple[int, int, int, float]:
+        """Charge validated Gemini usage, then release its reservation.
+
+        Missing usage metadata or prompt/candidate counts means the (billed) call cannot be accounted: the
+        reservation is retained and the run aborts through main()'s checkpoint handler.
+        """
         self.gemini_calls += 1
         if had_screenshot:
             self.screenshots_sent += 1
         um = getattr(resp, "usage_metadata", None)
-        p_tok = int(getattr(um, "prompt_token_count", 0) or 0) if um else 0
-        c_tok = int(getattr(um, "candidates_token_count", 0) or 0) if um else 0
-        t_tok = int(getattr(um, "thoughts_token_count", 0) or 0) if um else 0
+
+        def _count(name: str, required: bool) -> int:
+            raw = getattr(um, name, None) if um is not None else None
+            if raw is None and not required:
+                return 0
+            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+                self.gemini_uncertain_failures += 1
+                raise RuntimeError(f"Gemini usage accounting unavailable or invalid ({name}={raw!r}); reservation retained")
+            return raw
+
+        p_tok = _count("prompt_token_count", required=True)
+        c_tok = _count("candidates_token_count", required=True)
+        t_tok = _count("thoughts_token_count", required=False)
+        if reserved_allowance_usd:
+            self.release_reservation(reserved_allowance_usd)
         self.gemini_input_tokens += p_tok
         self.gemini_output_tokens += c_tok
         self.gemini_thought_tokens += t_tok
@@ -538,8 +561,7 @@ def call_gemini_once(
         # Retain the conservative reservation: the attempt may have been billed.
         spend.gemini_uncertain_failures += 1
         raise
-    spend.release_reservation(GEMINI_RESERVE_ALLOWANCE_USD)
-    spend.record_gemini(resp, had_screenshot=had_screenshot)
+    spend.record_gemini(resp, had_screenshot=had_screenshot, reserved_allowance_usd=GEMINI_RESERVE_ALLOWANCE_USD)
     return resp
 
 
@@ -720,8 +742,10 @@ def run_arm_google_cua_bg(
                     result_msg = "Waited"
                 else:
                     result_msg = f"Unsupported action {name}"
-            except Exception as exc:
-                result_msg = f"Error: {exc}"
+            except Exception:
+                # A driver exception can mean the action ran but its receipt was lost. Never feed it back to
+                # the planner (which could repeat the uncertain action); abort so main() checkpoints it.
+                raise
             d_ms = round((time.perf_counter() - t_disp) * 1000, 2)
             dispatch_latencies_ms.append(d_ms)
 
@@ -981,8 +1005,15 @@ def run_arm_agy_cua_jev(
     budget_exc: list[RuntimeError] = []
 
     def raise_pending_budget_error() -> None:
+        """Abort on swallowed budget errors or any halted controller (provider failure / uncertain dispatch)."""
         if budget_exc:
             raise budget_exc[0]
+        acc = jev_server.accounting
+        if acc.halted:
+            raise RuntimeError(
+                f"Jev controller halted ({acc.halt_reason}); uncertain_side_effects={acc.uncertain_side_effects} "
+                f"uncertain_calls={acc.uncertain_calls}"
+            )
 
     def audited_http_post(req: Any, timeout_s: float) -> tuple[int, str]:
         nonlocal canary_leaked
