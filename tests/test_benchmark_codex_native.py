@@ -95,11 +95,14 @@ class FixtureAdmissionTests(unittest.TestCase):
                 return receipts[len(self.calls)-1]
         return Session()
 
-    def test_path_success_does_not_persist_ui_or_try_other_targets(self):
-        session = self.session([{"content": [{"type": "text", "text": 'Window: "AGYCuaBench-form" PRIVATE_UI_SENTINEL'}]}])
+    def test_same_title_other_worker_cannot_admit_or_persist_ui(self):
+        ui = {"content": [{"type": "text", "text": 'Window: "AGYCuaBench-form" PRIVATE_UI_SENTINEL'}]}
+        session = self.session([ui, {"isError": True}, ui,
+            {"content": [{"type": "text", "text": '[{"id":"other-worker","window_ids":[43]}]'}]}])
         result = runner.probe_fixture(session, "thread", Path("/fixture"), 42)
-        self.assertTrue(result["accessible"])
-        self.assertEqual(len(session.calls), 1)
+        self.assertFalse(result["accessible"])
+        self.assertFalse(result["window_identity_verified"])
+        self.assertEqual(len(session.calls), 4)
         self.assertNotIn("PRIVATE_UI_SENTINEL", str(result))
 
     def test_original_macos_failures_and_empty_inventory_block(self):
@@ -128,16 +131,25 @@ class FixtureAdmissionTests(unittest.TestCase):
         self.assertIsNone(result["inventory_matches"])
         self.assertNotIn("PRIVATE_ERROR", str(result))
 
-    def test_exact_inventory_app_id_must_itself_work(self):
-        for failed in (False, True):
+    def test_bound_window_requires_matching_native_inventory(self):
+        for native_id in (42, 43):
             session = self.session([
-                {"isError": True}, {"isError": True}, {"isError": True},
-                {"content": [{"type": "text", "text": '[{"id":"fixture-only"}]'}]},
-                {"isError": failed, "content": [{"type": "text", "text": 'Window: "AGYCuaBench-form"'}]},
+                {"isError": True},
+                {"content": [{"type": "text", "text": 'Window: "AGYCuaBench-form"'}]},
+                {"isError": True},
+                {"content": [{"type": "text", "text": '[{"id":"fixture-only","window_ids":[' + str(native_id) + ']}]'}]},
             ])
             result = runner.probe_fixture(session, "thread", Path("/fixture"), 42)
-            self.assertEqual(result["accessible"], not failed)
-            self.assertIn('cua.getApp("fixture-only")', session.calls[-1][1]["arguments"]["code"])
+            self.assertEqual(result["accessible"], native_id == 42)
+            self.assertEqual(result["window_identity_verified"], native_id == 42)
+
+    def test_inventory_error_cannot_supply_identity(self):
+        ui = {"content": [{"type": "text", "text": 'Window: "AGYCuaBench-form"'}]}
+        session = self.session([ui, ui, ui, {"isError": True, "content": [
+            {"type": "text", "text": '[{"id":"fixture-only","window_ids":[42]}]'}]}])
+        result = runner.probe_fixture(session, "thread", Path("/fixture"), 42)
+        self.assertFalse(result["accessible"])
+        self.assertIsNone(result["inventory_matches"])
 
     def test_empty_success_receipt_is_not_fixture_access(self):
         session = self.session([{}, {}, {}, {"content": [{"type": "text", "text": "[]"}]}])

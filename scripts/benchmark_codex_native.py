@@ -144,7 +144,8 @@ def probe_fixture(session, thread_id: str, fixture: Path, window_id: int) -> dic
     The form-mode fixture contains no canary. Arbitrary UI/error text never leaves
     memory; only the expected resolution failures and inventory count are saved.
     """
-    result = {"accessible": False, "attempts": []}
+    result = {"accessible": False, "attempts": [], "window_identity_verified": False}
+    bound_window_observed = False
     code = 'var fixtureApp = await cua.getApp(' + json.dumps(str(fixture)) + ');'
     probes = [("path", code), ("window_id", 'var fixtureApp = await cua.getApp({windowId:' + str(window_id) + '});'),
               ("display_name", 'var fixtureApp = await cua.getApp("bench_fixture");')]
@@ -170,12 +171,16 @@ def probe_fixture(session, thread_id: str, fixture: Path, window_id: int) -> dic
         if failed and not receipt.get("isError"):
             error = "missing_fixture_ui_evidence"
         result["attempts"].append({"target_kind": kind, "is_error": failed, "error": error if failed else None})
-        if not failed:
-            result.update(accessible=True, accepted_target_kind=kind)
-            return result
+        if kind == "window_id" and not failed:
+            bound_window_observed = True
+        # A same-title path/name result cannot identify the launched window.
     code = ('var inventory = await cua.listApps({emit:false}); nodeRepl.write(inventory.filter(a => '
-            'a.windows?.some(w => w.id === ' + str(window_id) + ')).map(a => ({id:a.id})));')
+            'a.windows?.some(w => w.id === ' + str(window_id) + ')).map(a => '
+            '({id:a.id, window_ids:a.windows.map(w=>w.id)})));')
     receipt = native(code)
+    if receipt.get("isError"):
+        result["inventory_matches"] = None
+        return result
     matches = None
     for content in receipt.get("content", []):
         if content.get("type") == "text":
@@ -185,11 +190,13 @@ def probe_fixture(session, thread_id: str, fixture: Path, window_id: int) -> dic
                 continue
             if isinstance(value, list):
                 matches = value
-    result["inventory_matches"] = len(matches) if matches is not None else None
-    if matches and len(matches) == 1 and isinstance(matches[0], dict) and isinstance(matches[0].get("id"), str):
-        receipt = native('var fixtureApp = await cua.getApp(' + json.dumps(matches[0]["id"]) + ');')
-        result["accessible"] = fixture_visible(receipt)
-        result["attempts"].append({"target_kind": "exact_window_inventory_app_id", "is_error": not result["accessible"]})
+    identities = [entry for entry in matches or [] if isinstance(entry, dict)
+                  and isinstance(entry.get("id"), str) and isinstance(entry.get("window_ids"), list)
+                  and any(type(value) is int and value == window_id for value in entry["window_ids"])]
+    result["inventory_matches"] = len(identities) if matches is not None else None
+    if bound_window_observed and len(identities) == 1:
+        result.update(accessible=True, window_identity_verified=True,
+                      accepted_target_kind="window_id", identity_source="native_window_binding_and_inventory")
     return result
 
 
