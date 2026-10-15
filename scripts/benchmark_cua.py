@@ -1126,6 +1126,8 @@ def run_arm_agy_cua_jev(
                         "pid": pid,
                         "window_id": window_id,
                         "chain_observations": True,
+                        # Controlled fixture: explicitly accept interstep drift so chaining is honoured.
+                        "allow_interstep_drift": True,
                         "steps": seq_steps,
                     })
                     sc = res.get("structuredContent") or {}

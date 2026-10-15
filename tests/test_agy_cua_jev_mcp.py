@@ -2402,7 +2402,19 @@ class StdioEndToEndTest(unittest.TestCase):
             mail_obs,
         )
         self.assertEqual(safe_cands[0]["arguments"]["path"], ["File", "Save"])
-        self.assertEqual(safe_cands[0]["arguments"]["delivery_mode"], "background")
+        # cua-driver invoke_menu is additionalProperties=false over {pid, window_id, path, session}
+        self.assertEqual(set(safe_cands[0]["arguments"]), {"pid", "window_id", "path"})
+        self.assertEqual(safe_cands[1]["arguments"]["delivery_mode"], "background")
+        with self.assertRaisesRegex(ValueError, "unsupported_menu_arguments"):
+            jev.build_bound_candidates(
+                [{"id": "m.idx", "description": "Menu on element", "tool": "invoke_menu", "path": ["File", "Save"], "element_index": 12}],
+                mail_obs,
+            )
+        with self.assertRaisesRegex(ValueError, "missing_or_invalid_menu_path"):
+            jev.build_bound_candidates(
+                [{"id": "m.long", "description": "Too deep", "tool": "invoke_menu", "path": ["x"] * 17}],
+                mail_obs,
+            )
         auth_menu = jev.authorize_candidate_dispatch(
             {"kind": "selected", "selected_id": "m.save", "pid": 501, "window_id": 2001, "snapshot_id": "s0000aaaa"},
             safe_cands,
@@ -2429,10 +2441,28 @@ class StdioEndToEndTest(unittest.TestCase):
                     "arguments": {
                         "pid": 501,
                         "window_id": 2001,
-                        "snapshot_id": "s0000aaaa",
                         "path": ["Message", "Send"],
-                        "delivery_mode": "background",
                     },
+                }],
+                expected_pid=501,
+                expected_window_id=2001,
+                current_snapshot_id="s0000aaaa",
+                valid_element_indices=mail_obs["indexed_element_ids"],
+                observation=mail_obs,
+            )
+
+        # Stage 4 also refuses a tampered invoke_menu carrying driver-incompatible arguments
+        with self.assertRaisesRegex(ValueError, "unsupported_menu_arguments"):
+            jev.authorize_candidate_dispatch(
+                {"kind": "selected", "selected_id": "tampered.save", "pid": 501, "window_id": 2001, "snapshot_id": "s0000aaaa"},
+                [{
+                    "id": "tampered.save",
+                    "description": "Invoke File > Save",
+                    "pid": 501,
+                    "window_id": 2001,
+                    "snapshot_id": "s0000aaaa",
+                    "tool": "invoke_menu",
+                    "arguments": {"pid": 501, "window_id": 2001, "path": ["File", "Save"], "delivery_mode": "background"},
                 }],
                 expected_pid=501,
                 expected_window_id=2001,
@@ -2516,7 +2546,10 @@ class StdioEndToEndTest(unittest.TestCase):
                                 recipient = str(args.get("value", ""))
                                 res = {{"content": [{{"type": "text", "text": "value set"}}], "structuredContent": {{"ok": True}}}}
                             elif name == "invoke_menu":
-                                if args.get("path") == ["File", "Save"] and args.get("delivery_mode") == "background":
+                                extra = sorted(set(args) - {{"pid", "window_id", "path", "session"}})
+                                if extra:
+                                    res = {{"content": [{{"type": "text", "text": "additionalProperties not allowed: " + ",".join(extra)}}], "isError": True}}
+                                elif args.get("path") == ["File", "Save"]:
                                     saved = "saved"
                                     res = {{"content": [{{"type": "text", "text": "menu invoked"}}], "structuredContent": {{"ok": True}}}}
                                 else:
@@ -2570,6 +2603,7 @@ class StdioEndToEndTest(unittest.TestCase):
                             "pid": 88,
                             "window_id": 900,
                             "chain_observations": True,
+                            "allow_interstep_drift": True,
                             "steps": [
                                 {
                                     "goal": "Fill the Recipient field",
@@ -2606,6 +2640,8 @@ class StdioEndToEndTest(unittest.TestCase):
             self.assertEqual(sc["completed_steps"][1]["pre_snapshot_id"], "s00000022")
             self.assertEqual(sc["completed_steps"][1]["post_snapshot_id"], "s00000023")
             self.assertEqual(sc["completed_steps"][1]["timings_ms"]["observe_ms"], 0.0)
+            self.assertTrue(sc["chain_observations_effective"])
+            self.assertEqual([s["observation_chained"] for s in sc["completed_steps"]], [False, True])
 
             with open(log_file, "r", encoding="utf-8") as lf:
                 logged = [json.loads(line) for line in lf if line.strip()]
@@ -2627,6 +2663,173 @@ class StdioEndToEndTest(unittest.TestCase):
             )
             self.assertEqual(logged[0]["args"]["session"], "jev-fast-sess")
             self.assertEqual(logged[1]["args"], {"session": "jev-fast-sess", "enabled": False})
+            menu_call = next(c for c in logged if c["name"] == "invoke_menu")
+            self.assertEqual(set(menu_call["args"]) - {"session"}, {"pid", "window_id", "path"})
+
+    def test_chain_observations_without_drift_opt_in_rereads_and_detects_external_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            driver_script = os.path.join(tmp, "cua-driver-drift")
+            log_file = os.path.join(tmp, "drift-calls.jsonl")
+            with open(driver_script, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent(f"""\
+                    #!/usr/bin/env python3
+                    import json, sys
+                    reads = 0
+                    recipient = ""
+                    log_path = {log_file!r}
+                    for line in sys.stdin:
+                        msg = json.loads(line)
+                        if "id" not in msg:
+                            continue
+                        method = msg.get("method")
+                        if method == "initialize":
+                            res = {{"protocolVersion": "2025-06-18", "capabilities": {{}}, "serverInfo": {{"name": "fake"}}}}
+                        elif method == "tools/call":
+                            params = msg.get("params", {{}})
+                            name = params.get("name")
+                            args = params.get("arguments", {{}})
+                            with open(log_path, "a", encoding="utf-8") as lf:
+                                lf.write(json.dumps({{"name": name}}) + "\\n")
+                            if name == "get_window_state":
+                                reads += 1
+                                # External drift lands after step 0's post-observation (read #2).
+                                banner = "external change" if reads >= 3 else "idle"
+                                snap = f"s0000{{reads:04d}}"
+                                md = f'- [0] AXWindow "Draft"\\n  - AXStaticText = "{{banner}}"\\n  - [3] AXTextField (Recipient) = "{{recipient}}"'
+                                res = {{
+                                    "content": [{{"type": "text", "text": md}}],
+                                    "structuredContent": {{
+                                        "pid": 88, "window_id": 900, "snapshot_id": snap, "tree_markdown": md,
+                                        "app_name": "BenchApp", "window_title": "Draft",
+                                        "elements": [
+                                            {{"element_index": 0, "role": "AXWindow", "label": "Draft"}},
+                                            {{"element_index": 1, "role": "AXStaticText", "label": banner, "value": banner, "parent_index": 0}},
+                                            {{"element_index": 3, "role": "AXTextField", "label": "Recipient", "value": recipient, "enabled": True, "parent_index": 0, "actions": ["AXPress"]}},
+                                        ],
+                                    }},
+                                }}
+                            elif name == "set_value":
+                                recipient = str(args.get("value", ""))
+                                res = {{"content": [{{"type": "text", "text": "value set"}}], "structuredContent": {{"ok": True}}}}
+                            else:
+                                res = {{"content": [{{"type": "text", "text": "ok"}}], "structuredContent": {{"ok": True}}}}
+                        else:
+                            res = {{}}
+                        print(json.dumps({{"jsonrpc": "2.0", "id": msg["id"], "result": res}}), flush=True)
+                """))
+            os.chmod(driver_script, os.stat(driver_script).st_mode | stat.S_IEXEC)
+
+            def fake_http(req, _t):
+                body = json.loads(req.data.decode("utf-8"))
+                opts = list(body.get("questions", {}).get("candidate", {}).get("criteria", {}).keys())
+                choice = opts[0]
+                return 200, json.dumps({
+                    "model": "jev-1.13.0",
+                    "answers": {"candidate": {"type": "choice", "choice": choice, "confidence": 0.99,
+                                              "probabilities": {o: (0.99 if o == choice else 0.01) for o in opts}}},
+                    "usage": {"input_tokens": 10, "output_tokens": 2},
+                })
+
+            server = jev.JevMcpServer(
+                env={"AGY_CUA_DRIVER": driver_script, "TYPESAFE_API_KEY": "test-key"},
+                keychain_reader=lambda _: None,
+                http_post=fake_http,
+            )
+            try:
+                resp = server.handle_message({
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "jev_sequence", "arguments": {
+                        "pid": 88, "window_id": 900,
+                        "steps": [
+                            {"goal": "Fill recipient", "value": "a@example.com",
+                             "expected_postcondition": {"element_value_equals": "a@example.com"}},
+                            {"goal": "Fill recipient again", "value": "b@example.com",
+                             "expected_postcondition": {"element_value_equals": "b@example.com"}},
+                        ],
+                    }},
+                })
+            finally:
+                server.close()
+
+            sc = resp["result"]["structuredContent"]
+            # jev_sequence defaults chain_observations=true, but drift protection stays on, so chaining is not honoured.
+            self.assertFalse(sc["chain_observations_effective"])
+            self.assertFalse(sc["verified"])
+            self.assertEqual(sc["completed_count"], 1)
+            self.assertEqual(sc["failed_step"]["status"], "stale_snapshot")
+            self.assertIn("interstep_state_drift", sc["failed_step"]["reason"])
+            self.assertFalse(sc["failed_step"]["observation_chained"])
+            with open(log_file, "r", encoding="utf-8") as lf:
+                names = [json.loads(line)["name"] for line in lf if line.strip()]
+            # Fresh pre-read for step 1 happened, and the second set_value was never dispatched.
+            self.assertEqual(names.count("get_window_state"), 3)
+            self.assertEqual(names.count("set_value"), 1)
+
+    def test_commit_gate_closes_modifier_activation_coordinate_and_messages_bypasses(self):
+        def obs(app, title, elements):
+            return jev.extract_window_observation(
+                {"structuredContent": {"pid": 7, "window_id": 70, "snapshot_id": "s0000bbbb",
+                                       "app_name": app, "window_title": title, "elements": elements},
+                 "content": []},
+                expected_pid=7, expected_window_id=70,
+            )
+
+        mail = obs("Mail", "New Message", [
+            {"element_index": 0, "role": "AXWindow", "label": "New Message"},
+            {"element_index": 10, "role": "AXButton", "label": "Send", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+            {"element_index": 20, "role": "AXTextArea", "label": "Body", "enabled": True, "parent_index": 0},
+            {"element_index": 30, "role": "AXButton", "label": "Inbox row", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+        ])
+        build = jev.build_bound_candidates
+
+        # press_key modifiers are a chord: cmd+shift+d / cmd+return / cmd+delete must be refused like hotkey.
+        for mods, key in ((["cmd", "shift"], "d"), (["command"], "return"), (["cmd"], "backspace")):
+            with self.assertRaisesRegex(ValueError, "commit_action_forbidden_by_safety_policy"):
+                build([{"id": "pk", "description": "Press key", "tool": "press_key", "key": key, "modifiers": mods}], mail)
+        # Activation key focused on the Send button presses it.
+        for tool, extra in (("press_key", {"key": "space"}), ("hotkey", {"keys": ["return"]})):
+            with self.assertRaisesRegex(ValueError, "mail_send_forbidden_by_safety_policy"):
+                build([{"id": "act", "description": "Press key", "tool": tool, "element_index": 10, **extra}], mail)
+        # Bare Delete outside a text input trashes the selection in Mail; inside the body it is text editing.
+        with self.assertRaisesRegex(ValueError, "commit_action_forbidden_by_safety_policy"):
+            build([{"id": "del", "description": "Press key", "tool": "press_key", "key": "delete", "element_index": 30}], mail)
+        with self.assertRaisesRegex(ValueError, "commit_action_forbidden_by_safety_policy"):
+            build([{"id": "del2", "description": "Press key", "tool": "press_key", "key": "delete"}], mail)
+        ok = build([{"id": "del3", "description": "Erase a char", "tool": "press_key", "key": "delete", "element_index": 20}], mail)
+        self.assertEqual(ok[0]["arguments"]["key"], "delete")
+        # Coordinate clicks cannot be label-gated in sensitive apps (caller description is not authority).
+        with self.assertRaisesRegex(ValueError, "cannot be label-gated"):
+            build([{"id": "xy", "description": "Click somewhere harmless", "tool": "click", "x": 10, "y": 10}], mail)
+        with self.assertRaisesRegex(ValueError, "cannot be label-gated"):
+            jev.authorize_candidate_dispatch(
+                {"kind": "selected", "selected_id": "xy", "pid": 7, "window_id": 70, "snapshot_id": "s0000bbbb"},
+                [{"id": "xy", "description": "Click", "pid": 7, "window_id": 70, "snapshot_id": "s0000bbbb", "tool": "click",
+                  "arguments": {"pid": 7, "window_id": 70, "x": 10, "y": 10}}],
+                expected_pid=7, expected_window_id=70, current_snapshot_id="s0000bbbb",
+                valid_element_indices=mail["indexed_element_ids"], observation=mail,
+            )
+        # Plain typing / tab in Mail stays allowed.
+        ok = build([{"id": "tab", "description": "Next field", "tool": "press_key", "key": "tab", "element_index": 20}], mail)
+        self.assertEqual(ok[0]["tool"], "press_key")
+
+        messages = obs("Messages", "Alex", [
+            {"element_index": 0, "role": "AXWindow", "label": "Alex"},
+            {"element_index": 5, "role": "AXTextField", "label": "iMessage", "enabled": True, "parent_index": 0},
+        ])
+        with self.assertRaisesRegex(ValueError, "mail_send_forbidden_by_safety_policy"):
+            build([{"id": "ret", "description": "Press key", "tool": "press_key", "key": "return", "element_index": 5}], messages)
+        with self.assertRaisesRegex(ValueError, "mail_send_forbidden_by_safety_policy"):
+            build([{"id": "nl", "description": "Type", "tool": "type_text", "text": "hi\n", "element_index": 5}], messages)
+        ok = build([{"id": "tt", "description": "Type", "tool": "type_text", "text": "hi", "element_index": 5}], messages)
+        self.assertEqual(ok[0]["tool"], "type_text")
+
+        # Non-sensitive apps keep coordinate clicks and plain return.
+        calc = obs("Calculator", "Calculator", [{"element_index": 0, "role": "AXWindow", "label": "Calculator"}])
+        ok = build([
+            {"id": "xy", "description": "Click", "tool": "click", "x": 5, "y": 5},
+            {"id": "ret", "description": "Equals", "tool": "press_key", "key": "return"},
+        ], calc)
+        self.assertEqual([c["id"] for c in ok], ["xy", "ret"])
 
 
 if __name__ == "__main__":

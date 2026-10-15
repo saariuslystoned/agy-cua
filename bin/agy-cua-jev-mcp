@@ -928,6 +928,43 @@ EXPLICIT_TARGET_CONTAINER_ROLES = frozenset({
 })
 
 
+# cua-driver invoke_menu schema: {pid, window_id, path[1..16], session}, additionalProperties=false.
+INVOKE_MENU_ARG_KEYS = frozenset({"pid", "window_id", "path", "session"})
+INVOKE_MENU_MAX_PATH = 16
+
+_KEY_ALIASES = {
+    "command": "cmd",
+    "meta": "cmd",
+    "super": "cmd",
+    "backspace": "delete",
+    "forwarddelete": "delete",
+    "forward_delete": "delete",
+    "opt": "option",
+    "alt": "option",
+    "control": "ctrl",
+    "kp_enter": "enter",
+    "keypad_enter": "enter",
+}
+# Keys that activate a focused button/control (AXPress equivalent) when delivered to an element.
+_ACTIVATION_KEYS = frozenset({"return", "enter", "space"})
+
+
+def _target_role(observation: Mapping[str, Any] | None, args: Mapping[str, Any]) -> str | None:
+    """Resolve the AX role addressed by args.element_index / element_token in observation, if any."""
+    idx = args.get("element_index")
+    if idx is None:
+        tok = args.get("element_token")
+        if isinstance(tok, str) and ":" in tok and tok.rsplit(":", 1)[1].isdigit():
+            idx = int(tok.rsplit(":", 1)[1])
+    if not isinstance(idx, int) or isinstance(idx, bool) or not observation:
+        return None
+    for key in ("all_elements", "elements"):
+        for el in observation.get(key) or []:
+            if isinstance(el, Mapping) and el.get("element_index") == idx:
+                return str(el.get("role") or "") or None
+    return None
+
+
 def _check_commit_safety_gate(
     observation: Mapping[str, Any] | None,
     label_or_desc: str,
@@ -938,6 +975,7 @@ def _check_commit_safety_gate(
     app_name = str((observation or {}).get("app_name") or "").lower()
     win_title = str((observation or {}).get("window_title") or "").lower()
     is_mail_ctx = "mail" in app_name or "mail" in win_title
+    is_messages_ctx = app_name == "messages" or (not app_name and "messages" in win_title)
     is_destructive_app_ctx = is_mail_ctx or any(
         k in app_name or k in win_title for k in ("finder", "1password", "messages")
     )
@@ -963,12 +1001,47 @@ def _check_commit_safety_gate(
                     f"invoke_menu path {raw_path!r} attempts destructive delete/trash without WAITING_FOR_HUMAN confirmation"
                 )
 
-    if tool == "hotkey":
-        raw_keys = [str(k).strip().lower() for k in (args.get("keys") or [])]
-        norm_keys = {
-            ("cmd" if k == "command" else "delete" if k == "backspace" else "option" if k == "opt" else k)
-            for k in raw_keys
-        }
+    is_element_addressed = "element_index" in args or "element_token" in args
+
+    if tool in {"hotkey", "press_key"}:
+        if tool == "hotkey":
+            raw_key_list = args.get("keys") or []
+        else:
+            # press_key accepts `modifiers` (and legacy `modifier`) alongside `key`; treat the
+            # combined chord exactly like a hotkey so modifiers cannot bypass the gate.
+            raw_mods = args.get("modifiers")
+            if raw_mods is None:
+                raw_mods = args.get("modifier")
+            if isinstance(raw_mods, str):
+                raw_mods = [raw_mods]
+            raw_key_list = list(raw_mods or []) + [args.get("key")]
+        if not isinstance(raw_key_list, (list, tuple)):
+            raw_key_list = [raw_key_list]
+        raw_keys = [str(k).strip().lower() for k in raw_key_list if k is not None]
+        norm_keys = {_KEY_ALIASES.get(k, k) for k in raw_keys}
+        if (
+            is_element_addressed
+            and norm_keys & _ACTIVATION_KEYS
+            and "draft" not in norm_desc
+            and (
+                (is_mail_ctx and re.search(r"\bsend\b", norm_desc))
+                or re.search(r"\bsend\s+(?:message|email|mail)(?:\s+now)?\b", norm_desc)
+            )
+        ):
+            return (
+                "commit_action_forbidden_by_safety_policy (mail_send_forbidden_by_safety_policy): "
+                f"{tool} activation key on {label_or_desc!r} targets Send control without WAITING_FOR_HUMAN confirmation"
+            )
+        if (
+            is_element_addressed
+            and norm_keys & _ACTIVATION_KEYS
+            and is_destructive_app_ctx
+            and re.search(r"\b(?:delete|empty\s+trash|erase|move\s+to\s+trash)\b", norm_desc)
+        ):
+            return (
+                "commit_action_forbidden_by_safety_policy: "
+                f"{tool} activation key on {label_or_desc!r} targets destructive delete/trash control without WAITING_FOR_HUMAN confirmation"
+            )
         if "cmd" in norm_keys and "shift" in norm_keys and "d" in norm_keys:
             return (
                 "commit_action_forbidden_by_safety_policy (mail_send_forbidden_by_safety_policy): "
@@ -988,8 +1061,38 @@ def _check_commit_safety_gate(
                 "commit_action_forbidden_by_safety_policy: "
                 "hotkey cmd+delete / cmd+shift+delete attempts destructive delete/trash without WAITING_FOR_HUMAN confirmation"
             )
+        if is_messages_ctx and norm_keys & {"return", "enter"}:
+            return (
+                "commit_action_forbidden_by_safety_policy (mail_send_forbidden_by_safety_policy): "
+                f"{tool} return/enter in Messages sends the conversation without WAITING_FOR_HUMAN confirmation"
+            )
+        if (
+            is_destructive_app_ctx
+            and "delete" in norm_keys
+            and _target_role(observation, args) not in TEXT_INPUT_AX_ROLES
+        ):
+            return (
+                "commit_action_forbidden_by_safety_policy: "
+                f"{tool} delete key outside a text input in {app_name or win_title!r} may trash the selection "
+                "without WAITING_FOR_HUMAN confirmation"
+            )
+
+    if tool == "type_text" and is_messages_ctx:
+        text_val = args.get("text")
+        if isinstance(text_val, str) and ("\n" in text_val or "\r" in text_val):
+            return (
+                "commit_action_forbidden_by_safety_policy (mail_send_forbidden_by_safety_policy): "
+                "type_text newline in Messages sends the conversation without WAITING_FOR_HUMAN confirmation"
+            )
 
     if tool in {"click", "double_click"}:
+        if is_destructive_app_ctx and not is_element_addressed:
+            # Coordinate clicks have no AX label to gate on; the caller-supplied description is not
+            # authority, so refuse them where Send/Delete controls may sit under the pointer.
+            return (
+                "commit_action_forbidden_by_safety_policy: "
+                f"coordinate {tool} in {app_name or win_title!r} cannot be label-gated; use an element_index target"
+            )
         if "draft" not in norm_desc:
             if (
                 is_mail_ctx and re.search(r"\bsend(?:\s+(?:message|email|mail)(?:\s+now)?)?\b", norm_desc)
@@ -1159,7 +1262,9 @@ def extract_window_observation(
         if not compact_el.get("can_auto_click", compact_el.get("can_click", True)):
             continue
         display_label = compact_el["label"]
-        if _check_commit_safety_gate(obs_context, display_label, "click", {}) is not None:
+        if _check_commit_safety_gate(
+            obs_context, display_label, "click", {"element_index": compact_el["element_index"]}
+        ) is not None:
             continue
         total_click_candidates += 1
         if len(auto_candidates) >= MAX_AUTO_CANDIDATES:
@@ -1405,7 +1510,7 @@ def build_bound_candidates(
 
         args_dict["pid"] = pid
         args_dict["window_id"] = window_id
-        if tool in {"click", "double_click", "right_click", "type_text", "press_key", "hotkey", "scroll", "invoke_menu"}:
+        if tool in {"click", "double_click", "right_click", "type_text", "press_key", "hotkey", "scroll"}:
             args_dict.setdefault("delivery_mode", "background")
 
         if tool == "invoke_menu":
@@ -1413,10 +1518,21 @@ def build_bound_candidates(
             if (
                 not isinstance(menu_path, list)
                 or len(menu_path) < 1
+                or len(menu_path) > INVOKE_MENU_MAX_PATH
                 or not all(isinstance(p, str) and p.strip() for p in menu_path)
             ):
                 raise ValueError(
                     f"missing_or_invalid_menu_path: candidate {cid!r} for invoke_menu requires a non-empty path list of strings"
+                )
+            # cua-driver invoke_menu accepts only {pid, window_id, path, session} (additionalProperties=false)
+            # and is always window-scoped AX menu resolution; drop the validated background defaults and
+            # refuse element / coordinate targets that the driver would reject.
+            args_dict.pop("delivery_mode", None)
+            args_dict.pop("scope", None)
+            extra = sorted(set(args_dict) - INVOKE_MENU_ARG_KEYS)
+            if extra:
+                raise ValueError(
+                    f"unsupported_menu_arguments: candidate {cid!r} for invoke_menu cannot pass {extra!r}"
                 )
             args_dict["path"] = [p.strip() for p in menu_path]
 
@@ -1543,10 +1659,16 @@ def authorize_candidate_dispatch(
         if (
             not isinstance(menu_path, list)
             or len(menu_path) < 1
+            or len(menu_path) > INVOKE_MENU_MAX_PATH
             or not all(isinstance(p, str) and p.strip() for p in menu_path)
         ):
             raise ValueError(
                 f"missing_or_invalid_menu_path: candidate {selected_id!r} for invoke_menu requires a non-empty path list of strings"
+            )
+        extra = sorted(set(args) - INVOKE_MENU_ARG_KEYS)
+        if extra:
+            raise ValueError(
+                f"unsupported_menu_arguments: candidate {selected_id!r} for invoke_menu cannot pass {extra!r}"
             )
     if "element_index" in args:
         if args.get("snapshot_id") != current_snapshot_id:
@@ -2439,7 +2561,8 @@ TOOLS = [
                         "If true, when step k achieves verification_outcome='goal_verified' and step k+1 uses the "
                         "same (query, max_depth) scope without requiring a pixel screenshot anchor, step k's verified "
                         "post-observation is reused as step k+1's pre-observation while binding a fresh element_token "
-                        "to step k's post_snapshot_id."
+                        "to step k's post_snapshot_id. Only honoured together with allow_interstep_drift=true, because a "
+                        "reused observation cannot detect external drift; otherwise each step takes a fresh read."
                     ),
                 },
                 "steps": {
@@ -3747,6 +3870,7 @@ class JevMcpServer:
         batch_deadline = time.monotonic() + (batch_timeout_ms / 1000.0)
         allow_drift = bool(args.get("allow_interstep_drift", False))
         chain_obs = bool(args.get("chain_observations", False))
+        chain_effective = chain_obs and allow_drift
 
         completed_steps: list[dict[str, Any]] = []
         failed_step: dict[str, Any] | None = None
@@ -3804,11 +3928,15 @@ class JevMcpServer:
             )
             out_sig: list[tuple[Any, ...]] = []
             out_obs: list[dict[str, Any]] = []
+            # A chained pre-observation IS step k's post-observation, so comparing its signature to
+            # prev_post_sig is vacuous. Only reuse it when the caller has explicitly accepted interstep
+            # drift; with drift protection on, take a fresh read so external changes are detected.
             use_chained_obs = (
                 prev_post_obs
-                if (chain_obs and prev_post_obs is not None and prev_obs_scope == curr_obs_scope)
+                if (chain_effective and prev_post_obs is not None and prev_obs_scope == curr_obs_scope)
                 else None
             )
+            summary_chained = use_chained_obs is not None
             step_res = self.handle_step(
                 step_args,
                 _deadline_monotonic=batch_deadline,
@@ -3848,6 +3976,7 @@ class JevMcpServer:
                 "returned_model": step_sc.get("returned_model"),
                 "sdk_identity": step_sc.get("sdk_identity"),
                 "confidence": step_sc.get("confidence"),
+                "observation_chained": summary_chained,
                 "timings_ms": t_ms,
             }
 
@@ -3908,6 +4037,7 @@ class JevMcpServer:
             "verified": all_verified,
             "all_verified": all_verified,
             "goal_verified": all_verified,
+            "chain_observations_effective": chain_effective,
             "uncertain_side_effect": uncertain,
             "pid": pid,
             "window_id": window_id,
@@ -4004,9 +4134,7 @@ class JevMcpServer:
             if name in {"jev_batch", "jev_run_steps"}:
                 return reply(self.handle_batch(arguments))
             if name == "jev_sequence":
-                seq_args = dict(arguments)
-                seq_args.setdefault("chain_observations", True)
-                return reply(self.handle_batch(seq_args))
+                return reply(self.handle_sequence(arguments))
             return fail(-32602, f"Unknown tool: {name}")
         if isinstance(method, str) and method.startswith("notifications/"):
             return None
