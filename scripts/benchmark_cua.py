@@ -63,6 +63,23 @@ GEMINI_RESERVE_ALLOWANCE_USD = 0.025
 JEV_RESERVE_ALLOWANCE_USD = 0.002
 # Shared planner thinking budget for every arm (benchmark condition, reported in summary.json).
 PLANNER_THINKING_BUDGET = 512
+# Optional shared thinking level (low|medium|high) replacing the budget for models that use levels
+# (e.g. gemini-4-argon, which cannot disable thinking). Set from --thinking-level in main().
+PLANNER_THINKING_LEVEL: str | None = None
+
+# Paid-tier standard pricing (USD per 1M tokens; output includes thinking tokens).
+# gemini-4-argon: introductory price through 2026-11-30 (ai.google.dev/gemini-api/docs/pricing).
+MODEL_PRICING_USD_PER_1M = {
+    "gemini-3.8-flash": (0.50, 3.00),
+    "gemini-4-argon": (2.00, 10.00),
+}
+
+
+def planner_thinking_config() -> types.ThinkingConfig:
+    """Identical planner reasoning configuration for every arm in a run."""
+    if PLANNER_THINKING_LEVEL:
+        return types.ThinkingConfig(include_thoughts=True, thinking_level=types.ThinkingLevel[PLANNER_THINKING_LEVEL.upper()])
+    return types.ThinkingConfig(include_thoughts=True, thinking_budget=PLANNER_THINKING_BUDGET)
 
 CUA_KEY_MAP = {
     "enter": "return",
@@ -535,6 +552,11 @@ def _verify_1password(sf: Path | None, canary_leaked: bool) -> tuple[bool, str, 
     ), st
 
 
+class ArmActionError(RuntimeError):
+    """An arm-local failed/uncertain action outcome. The arm is recorded as FAIL and no call is retried;
+    the next arm starts from a freshly launched target. Budget/provider errors are NOT this type and stop the run."""
+
+
 def checked_call(driver: Any, tool: str, args: dict[str, Any]) -> dict[str, Any]:
     """Dispatch a mutating driver tool and fail closed on `isError` receipts.
 
@@ -544,9 +566,11 @@ def checked_call(driver: Any, tool: str, args: dict[str, Any]) -> dict[str, Any]
     res = driver.call_tool(tool, args)
     if isinstance(res, Mapping) and res.get("isError"):
         detail = "".join(c.get("text", "") for c in (res.get("content") or []) if isinstance(c, Mapping))[:300]
-        if tool in {"type_text", "set_value"}:
-            detail = "<redacted>"
-        raise RuntimeError(f"driver {tool} returned isError: {detail}")
+        for key in ("text", "value"):
+            secret = args.get(key)
+            if isinstance(secret, str) and secret:
+                detail = detail.replace(secret, "<redacted>")
+        raise ArmActionError(f"driver {tool} returned isError: {detail}")
     return res
 
 
@@ -679,7 +703,7 @@ def run_arm_google_cua_bg(
             )
         ],
         # Same planner reasoning budget as the AGY arms so the comparison isolates the controller.
-        thinking_config=types.ThinkingConfig(include_thoughts=True, thinking_budget=PLANNER_THINKING_BUDGET),
+        thinking_config=planner_thinking_config(),
     )
 
     outer_turns = 0
@@ -931,7 +955,7 @@ def run_arm_agy_cua_direct(
         temperature=0.0,
         max_output_tokens=8192,
         tools=[direct_tools],
-        thinking_config=types.ThinkingConfig(include_thoughts=True, thinking_budget=PLANNER_THINKING_BUDGET),
+        thinking_config=planner_thinking_config(),
     )
 
     outer_turns = 0
@@ -1051,7 +1075,7 @@ def run_arm_agy_cua_jev(
             raise budget_exc[0]
         acc = jev_server.accounting
         if acc.halted:
-            raise RuntimeError(
+            raise ArmActionError(
                 f"Jev controller halted ({acc.halt_reason}); uncertain_side_effects={acc.uncertain_side_effects} "
                 f"uncertain_calls={acc.uncertain_calls}"
             )
@@ -1206,7 +1230,7 @@ def run_arm_agy_cua_jev(
             temperature=0.0,
             max_output_tokens=8192,
             tools=[types.Tool(function_declarations=fn_decls)],
-            thinking_config=types.ThinkingConfig(include_thoughts=True, thinking_budget=PLANNER_THINKING_BUDGET),
+            thinking_config=planner_thinking_config(),
         )
 
         outer_turns = 0
@@ -1401,7 +1425,19 @@ def main() -> int:
     )
     parser.add_argument("--tasks", default="all", help="Comma-separated task IDs or 'all'")
     parser.add_argument("--max-budget-usd", type=float, default=5.0, help="Hard USD spend ceiling for this run")
+    parser.add_argument(
+        "--thinking-level",
+        choices=["low", "medium", "high"],
+        default=None,
+        help="Shared planner thinking_level for every arm (replaces the default thinking_budget=512)",
+    )
     args = parser.parse_args()
+    global PLANNER_THINKING_LEVEL, PRICE_PER_1M_INPUT_USD, PRICE_PER_1M_OUTPUT_USD
+    PLANNER_THINKING_LEVEL = args.thinking_level
+    if args.model not in MODEL_PRICING_USD_PER_1M:
+        sys.stderr.write(f"ERROR: no pricing entry for model {args.model!r}; add it to MODEL_PRICING_USD_PER_1M\n")
+        return 2
+    PRICE_PER_1M_INPUT_USD, PRICE_PER_1M_OUTPUT_USD = MODEL_PRICING_USD_PER_1M[args.model]
 
     if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
         sys.stderr.write("ERROR: GEMINI_API_KEY not found in environment or swarm-intercom/.env\n")
@@ -1438,7 +1474,9 @@ def main() -> int:
             "error": error,
             "model": args.model,
             "arms": arms,
-            "planner_thinking_budget": PLANNER_THINKING_BUDGET,
+            "planner_thinking_budget": None if PLANNER_THINKING_LEVEL else PLANNER_THINKING_BUDGET,
+            "planner_thinking_level": PLANNER_THINKING_LEVEL,
+            "price_per_1m_usd": {"input": PRICE_PER_1M_INPUT_USD, "output": PRICE_PER_1M_OUTPUT_USD},
             "total_spend_usd": spend.total_usd,
             "reserved_usd": spend.reserved_usd,
             "gemini_uncertain_failures": spend.gemini_uncertain_failures,
@@ -1452,7 +1490,7 @@ def main() -> int:
         }
         write_benchmark_summary(out_dir, payload)
 
-    print(f"=== AGY-CUA Benchmark Suite ({stamp}) | Model: {args.model} | Budget Cap: ${args.max_budget_usd:.2f} ===", flush=True)
+    print(f"=== AGY-CUA Benchmark Suite ({stamp}) | Model: {args.model} | Thinking: {PLANNER_THINKING_LEVEL or f'budget={PLANNER_THINKING_BUDGET}'} | Budget Cap: ${args.max_budget_usd:.2f} ===", flush=True)
 
     try:
         for task in tasks:
@@ -1557,6 +1595,12 @@ def main() -> int:
                         "cost_usd": round(spend.total_usd - pre_usd, 5),
                         "reserved_usd": spend.reserved_usd,
                     })
+                    if isinstance(exc, ArmActionError):
+                        # Arm-local failure: recorded as FAIL; continue with the next arm (fresh target), no retry.
+                        results[-1]["arm_failed"] = True
+                        write_summary("running")
+                        print(f"  [{arm_id:15s}] FAIL (arm aborted) | {err_text}", flush=True)
+                        continue
                     write_summary("aborted", err_text)
                     print(f"  [{arm_id:15s}] ABORTED | {err_text}", flush=True)
                     raise
