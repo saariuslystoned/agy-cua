@@ -1613,6 +1613,107 @@ class StdioEndToEndTest(unittest.TestCase):
             self.assertIn("jev-client-a", end_sessions)
             self.assertIn("jev-client-b", end_sessions)
 
+            # Cross-process target conflict via shared target state file (alive external PID vs dead PID)
+            state_file = os.path.join(tmp, "targets.json")
+            sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            try:
+                with open(state_file, "w", encoding="utf-8") as sf:
+                    json.dump(
+                        {
+                            "42:100": {
+                                "session_id": "jev-external-live",
+                                "server_pid": sleeper.pid,
+                                "last_snapshot_id": "s00000010",
+                            },
+                            "42:300": {
+                                "session_id": "jev-external-dead",
+                                "server_pid": 999_999_999,
+                                "last_snapshot_id": "s00000009",
+                            },
+                        },
+                        sf,
+                    )
+                server_c = jev.JevMcpServer(
+                    env={
+                        "AGY_CUA_DRIVER": session_driver,
+                        "TYPESAFE_API_KEY": "test-key",
+                        "AGY_CUA_SESSION_ID": "jev-client-c",
+                        "AGY_CUA_TARGET_STATE_FILE": state_file,
+                    },
+                    keychain_reader=lambda _: None,
+                    http_post=fake_http,
+                )
+                try:
+                    ext_conflict = server_c.handle_message({
+                        "jsonrpc": "2.0",
+                        "id": 10,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "jev_step",
+                            "arguments": {
+                                "goal": "Click 7",
+                                "pid": 42,
+                                "window_id": 100,
+                                "expected_postcondition": {"static_text_equals": "7"},
+                            },
+                        },
+                    })
+                    self.assertTrue(ext_conflict["result"]["isError"])
+                    self.assertEqual(ext_conflict["result"]["structuredContent"]["status"], "target_conflict")
+                    self.assertIn("jev-external-live", ext_conflict["result"]["structuredContent"]["reason"])
+
+                    # Dead external PID on (42, 300) is pruned and acquired cleanly
+                    dead_reclaim = server_c.handle_message({
+                        "jsonrpc": "2.0",
+                        "id": 11,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "jev_step",
+                            "arguments": {
+                                "goal": "Click 7",
+                                "pid": 42,
+                                "window_id": 300,
+                                "expected_postcondition": {"static_text_equals": "7"},
+                            },
+                        },
+                    })
+                    self.assertEqual(dead_reclaim["result"]["structuredContent"]["status"], "verified")
+
+                    # Mixed element + non-element candidates without explicit element_index in expected_postcondition are refused
+                    mixed_refused = server_c.handle_message({
+                        "jsonrpc": "2.0",
+                        "id": 12,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "jev_batch",
+                            "arguments": {
+                                "pid": 42,
+                                "window_id": 300,
+                                "steps": [
+                                    {
+                                        "goal": "Submit form",
+                                        "candidates": [
+                                            {"id": "c_el", "description": "Click field", "tool": "click", "element_index": 5},
+                                            {"id": "c_key", "description": "Press Return", "tool": "press_key", "key": "return"},
+                                        ],
+                                        "expected_postcondition": {"element_value_equals": "done"},
+                                    }
+                                ],
+                            },
+                        },
+                    })
+                    self.assertTrue(mixed_refused["result"]["isError"])
+                    self.assertEqual(mixed_refused["result"]["structuredContent"]["status"], "refused")
+                    self.assertIn("unbound_element_postcondition", mixed_refused["result"]["structuredContent"]["reason"])
+                finally:
+                    server_c.close()
+            finally:
+                sleeper.terminate()
+                sleeper.wait(timeout=2)
+
+            self.assertEqual(jev.clamp_batch_timeout_ms(25), jev.MIN_BATCH_TIMEOUT_MS)
+            self.assertEqual(jev.clamp_batch_timeout_ms(0), jev.DEFAULT_BATCH_TIMEOUT_MS)
+
 
 if __name__ == "__main__":
     unittest.main()

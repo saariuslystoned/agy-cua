@@ -139,6 +139,60 @@ class StreamMetadataTest(unittest.TestCase):
         self.assertEqual(entry["post_static_texts"], ["4,320"])
         self.assertNotIn("PRIVATE_SENTINEL", json.dumps(result))
 
+    def test_extracts_sanitized_jev_batch_entry(self):
+        batch_payload = {
+            "schema": "agy_cua.jev_batch_v1",
+            "status": "verified",
+            "verification_outcome": "goal_verified",
+            "verified": True,
+            "returned_model": "jev-1.13.0",
+            "sdk_identity": "agy-cua-jev-stdlib/0.2.0",
+            "selected_ids": ["ax.2.all-clear", "ax.5.7"],
+            "completed_count": 2,
+            "total_steps": 2,
+            "post_static_texts": ["7"],
+            "completed_steps": [
+                {
+                    "step_index": 0,
+                    "goal": "PRIVATE_SENTINEL",
+                    "status": "verified",
+                    "verification_outcome": "goal_verified",
+                    "verified": True,
+                    "selected_id": "ax.2.all-clear",
+                    "returned_model": "jev-1.13.0",
+                    "sdk_identity": "agy-cua-jev-stdlib/0.2.0",
+                    "post_static_texts": ["0"],
+                    "timings_ms": {"observe_ms": 5.0, "provider_ms": 100.0, "dispatch_ms": 10.0, "verify_ms": 5.0},
+                }
+            ],
+            "accounting": {"halted": False, "uncertain_calls": 0, "uncertain_side_effects": 0},
+            "timings_ms": {"observe_ms": 10.0, "provider_ms": 100.0, "dispatch_ms": 20.0, "verify_ms": 10.0},
+        }
+        events = [
+            {
+                "event": "step_update",
+                "step_update": {
+                    "step_type": "tool",
+                    "step_index": 11,
+                    "state": "DONE",
+                    "tool_name": "call_mcp_tool",
+                    "tool_info": {
+                        "parameters": {"ServerName": "agy-cua-jev", "ToolName": "jev_batch"},
+                        "output": "Result:\n" + json.dumps(batch_payload),
+                    },
+                },
+            }
+        ]
+        result = metadata.summarize(map(json.dumps, events))
+        self.assertEqual(len(result["jev_entries"]), 1)
+        entry = result["jev_entries"][0]
+        self.assertEqual(entry["schema"], "agy_cua.jev_batch_v1")
+        self.assertEqual(entry["returned_model"], "jev-1.13.0")
+        self.assertEqual(entry["selected_ids"], ["ax.2.all-clear", "ax.5.7"])
+        self.assertEqual(len(entry["completed_steps"]), 1)
+        self.assertEqual(entry["completed_steps"][0]["selected_id"], "ax.2.all-clear")
+        self.assertNotIn("PRIVATE_SENTINEL", json.dumps(result))
+
 
 if __name__ == "__main__":
     unittest.main()

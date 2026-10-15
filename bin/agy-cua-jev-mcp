@@ -13,6 +13,7 @@ CLI modes:
   bin/agy-cua-jev-mcp --check   print non-secret route readiness JSON (no network)
   bin/agy-cua-jev-mcp --probe   run one tiny bounded boolean/choice probe against configured route
 """
+import fcntl
 import json
 import math
 import os
@@ -21,6 +22,7 @@ import selectors
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -228,13 +230,15 @@ def clamp_max_calls(raw: Any) -> int:
 
 
 def clamp_batch_timeout_ms(raw: Any) -> int:
+    if isinstance(raw, bool):
+        return DEFAULT_BATCH_TIMEOUT_MS
     try:
         val = int(raw)
     except (TypeError, ValueError):
         return DEFAULT_BATCH_TIMEOUT_MS
-    if val < MIN_BATCH_TIMEOUT_MS:
+    if val <= 0:
         return DEFAULT_BATCH_TIMEOUT_MS
-    return min(val, MAX_BATCH_TIMEOUT_MS)
+    return max(MIN_BATCH_TIMEOUT_MS, min(val, MAX_BATCH_TIMEOUT_MS))
 
 
 def resolve_session_id(env: Mapping[str, str] = os.environ) -> str:
@@ -1359,6 +1363,67 @@ _TARGET_LOCK = threading.Lock()
 _ACTIVE_TARGETS: dict[tuple[int, int], dict[str, Any]] = {}
 
 
+def _pid_is_alive(pid: Any) -> bool:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _default_target_state_path(env: Mapping[str, str] = os.environ) -> str:
+    raw = (env.get("AGY_CUA_TARGET_STATE_FILE") or "").strip()
+    if raw:
+        return raw
+    return os.path.join(tempfile.gettempdir(), f"agy-cua-jev-targets-{os.getuid()}.json")
+
+
+def _mutate_target_state_file(state_path: str, mutator: Callable[[dict[str, Any]], tuple[Any, bool]]) -> Any:
+    try:
+        parent = os.path.dirname(os.path.abspath(state_path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        fd = os.open(state_path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        dummy: dict[str, Any] = {}
+        res, _ = mutator(dummy)
+        return res
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        raw_bytes = b""
+        os.lseek(fd, 0, os.SEEK_SET)
+        while chunk := os.read(fd, 65_536):
+            raw_bytes += chunk
+        try:
+            data = json.loads(raw_bytes.decode("utf-8")) if raw_bytes.strip() else {}
+            if not isinstance(data, dict):
+                data = {}
+        except ValueError:
+            data = {}
+        result, dirty = mutator(data)
+        if dirty:
+            encoded = (json.dumps(data, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, encoded)
+        return result
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 class DriverClient:
     """Persistent stdio JSON-RPC client to `cua-driver mcp` for `jev_step` and `jev_batch`."""
 
@@ -1431,7 +1496,7 @@ class DriverClient:
                 raise RuntimeError(f"cua-driver mcp stdin closed during {method}")
             sent += written
 
-    def _ensure_started(self) -> subprocess.Popen[bytes]:
+    def _ensure_started(self, max_timeout_s: float | None = None) -> subprocess.Popen[bytes]:
         if self._proc is not None and self._proc.poll() is None:
             return self._proc
         self._reset_unlocked()
@@ -1451,15 +1516,22 @@ class DriverClient:
         os.set_blocking(proc.stdout.fileno(), False)
         self._proc = proc
         self._next_id = 0
+        init_timeout = max(1.0, self.timeout_ms / 1000.0)
+        if max_timeout_s is not None:
+            init_timeout = min(init_timeout, max_timeout_s)
+        startup_deadline = time.monotonic() + max(0.001, init_timeout)
         try:
-            self._request_unlocked("initialize", {
-                "protocolVersion": DEFAULT_PROTOCOL,
-                "capabilities": {},
-                "clientInfo": SERVER_INFO,
-            })
+            self._request_unlocked(
+                "initialize",
+                {
+                    "protocolVersion": DEFAULT_PROTOCOL,
+                    "capabilities": {},
+                    "clientInfo": SERVER_INFO,
+                },
+                timeout_s=max(0.001, startup_deadline - time.monotonic()),
+            )
             init_notif = (json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n").encode("utf-8")
-            deadline = time.monotonic() + (self.timeout_ms / 1000.0)
-            self._write_all_unlocked(proc.stdin.fileno(), init_notif, deadline, "notifications/initialized")
+            self._write_all_unlocked(proc.stdin.fileno(), init_notif, startup_deadline, "notifications/initialized")
         except Exception:
             self._reset_unlocked()
             raise
@@ -1529,14 +1601,33 @@ class DriverClient:
                     raise RuntimeError(f"cua-driver mcp returned non-object result for {method}")
                 return res
 
-    def call_tool(self, name: str, arguments: Mapping[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
+    def call_tool(
+        self,
+        name: str,
+        arguments: Mapping[str, Any],
+        timeout_s: float | None = None,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
-            self._ensure_started()
+            max_init_s: float | None = None
+            if deadline_monotonic is not None:
+                rem = deadline_monotonic - time.monotonic()
+                if rem <= 0:
+                    raise TimeoutError("batch deadline exceeded")
+                max_init_s = rem
+            self._ensure_started(max_timeout_s=max_init_s)
             call_args = dict(arguments)
             if self.session_id and name in SESSION_SCOPED_DRIVER_TOOLS:
                 call_args.setdefault("session", self.session_id)
                 self._session_active = True
-            return self._request_unlocked("tools/call", {"name": name, "arguments": call_args}, timeout_s=timeout_s)
+            eff_timeout = timeout_s
+            if deadline_monotonic is not None:
+                rem = deadline_monotonic - time.monotonic()
+                if rem <= 0:
+                    raise TimeoutError("batch deadline exceeded")
+                eff_timeout = min(eff_timeout, rem) if eff_timeout is not None else rem
+            return self._request_unlocked("tools/call", {"name": name, "arguments": call_args}, timeout_s=eff_timeout)
 
     def close(self) -> None:
         with self._lock:
@@ -1824,9 +1915,22 @@ class JevMcpServer:
         )
         return self._driver_client
 
+    def _target_state_path(self) -> str:
+        return _default_target_state_path(self.env)
+
     def _acquire_target(self, pid: int, window_id: int) -> str | None:
         key = (pid, window_id)
+        str_key = f"{pid}:{window_id}"
+        state_path = self._target_state_path()
+        current_pid = os.getpid()
         with _TARGET_LOCK:
+            for k in [
+                tk
+                for tk, tv in _ACTIVE_TARGETS.items()
+                if tv.get("owner_ref") is None or tv["owner_ref"]() is None or tv["owner_ref"]()._closed
+            ]:
+                _ACTIVE_TARGETS.pop(k, None)
+
             existing = _ACTIVE_TARGETS.get(key)
             if existing is not None:
                 owner = existing["owner_ref"]() if existing.get("owner_ref") is not None else None
@@ -1836,22 +1940,108 @@ class JevMcpServer:
                         f"target_conflict: target (pid={pid}, window_id={window_id}) is actively "
                         f"owned by concurrent session {owner_sess!r}"
                     )
+
+            live_local_sessions = {
+                v.get("session_id")
+                for v in _ACTIVE_TARGETS.values()
+                if isinstance(v.get("session_id"), str)
+            }
+            live_local_sessions.add(self.session_id)
+
+            def _mutate(data: dict[str, Any]) -> tuple[str | None, bool]:
+                dirty = False
+                for fk, fval in list(data.items()):
+                    if not isinstance(fval, dict):
+                        data.pop(fk, None)
+                        dirty = True
+                        continue
+                    srv_pid = fval.get("server_pid")
+                    f_sess = fval.get("session_id")
+                    if srv_pid == current_pid:
+                        if f_sess not in live_local_sessions:
+                            data.pop(fk, None)
+                            dirty = True
+                    elif not _pid_is_alive(srv_pid):
+                        data.pop(fk, None)
+                        dirty = True
+
+                f_existing = data.get(str_key)
+                if isinstance(f_existing, dict):
+                    f_sess = f_existing.get("session_id")
+                    if isinstance(f_sess, str) and f_sess != self.session_id:
+                        return (
+                            f"target_conflict: target (pid={pid}, window_id={window_id}) is actively "
+                            f"owned by concurrent session {f_sess!r}",
+                            dirty,
+                        )
+
+                prev_snap = (
+                    existing.get("last_snapshot_id")
+                    if existing and existing.get("session_id") == self.session_id
+                    else (f_existing.get("last_snapshot_id") if isinstance(f_existing, dict) else None)
+                )
+                data[str_key] = {
+                    "session_id": self.session_id,
+                    "server_pid": current_pid,
+                    "last_snapshot_id": prev_snap,
+                }
+                return None, True
+
+            file_conflict = _mutate_target_state_file(state_path, _mutate)
+            if file_conflict is not None:
+                return file_conflict
+
             _ACTIVE_TARGETS[key] = {
                 "session_id": self.session_id,
                 "owner_ref": weakref.ref(self),
-                "last_snapshot_id": existing.get("last_snapshot_id") if existing and existing.get("session_id") == self.session_id else None,
+                "last_snapshot_id": (
+                    existing.get("last_snapshot_id")
+                    if existing and existing.get("session_id") == self.session_id
+                    else None
+                ),
             }
             self._owned_targets.add(key)
         return None
 
+    def _release_single_target(self, pid: int, window_id: int) -> None:
+        key = (pid, window_id)
+        str_key = f"{pid}:{window_id}"
+        state_path = self._target_state_path()
+        with _TARGET_LOCK:
+            entry = _ACTIVE_TARGETS.get(key)
+            if entry is not None and entry.get("session_id") == self.session_id:
+                _ACTIVE_TARGETS.pop(key, None)
+            self._owned_targets.discard(key)
+
+            def _mutate(data: dict[str, Any]) -> tuple[None, bool]:
+                f_entry = data.get(str_key)
+                if isinstance(f_entry, dict) and f_entry.get("session_id") == self.session_id:
+                    data.pop(str_key, None)
+                    return None, True
+                return None, False
+
+            _mutate_target_state_file(state_path, _mutate)
+
     def _update_target_snapshot(self, pid: int, window_id: int, snapshot_id: str) -> None:
         key = (pid, window_id)
+        str_key = f"{pid}:{window_id}"
+        state_path = self._target_state_path()
         with _TARGET_LOCK:
             entry = _ACTIVE_TARGETS.get(key)
             if entry is not None and entry.get("session_id") == self.session_id:
                 entry["last_snapshot_id"] = snapshot_id
 
+            def _mutate(data: dict[str, Any]) -> tuple[None, bool]:
+                f_entry = data.get(str_key)
+                if isinstance(f_entry, dict) and f_entry.get("session_id") == self.session_id:
+                    f_entry["last_snapshot_id"] = snapshot_id
+                    return None, True
+                return None, False
+
+            _mutate_target_state_file(state_path, _mutate)
+
     def _release_targets(self) -> None:
+        state_path = self._target_state_path()
         with _TARGET_LOCK:
             stale_keys = [
                 k
@@ -1864,6 +2054,16 @@ class JevMcpServer:
             for k in stale_keys:
                 _ACTIVE_TARGETS.pop(k, None)
             self._owned_targets.clear()
+
+            def _mutate(data: dict[str, Any]) -> tuple[None, bool]:
+                dirty = False
+                for fk, fval in list(data.items()):
+                    if not isinstance(fval, dict) or fval.get("session_id") == self.session_id:
+                        data.pop(fk, None)
+                        dirty = True
+                return None, dirty
+
+            _mutate_target_state_file(state_path, _mutate)
 
     def _record_trace(self, entry: Mapping[str, Any]) -> None:
         self.accounting.history_log.append(dict(entry))
@@ -1952,6 +2152,7 @@ class JevMcpServer:
                     is_error=True,
                 )
 
+        was_owned = (pid, window_id) in self._owned_targets
         conflict = self._acquire_target(pid, window_id)
         if conflict is not None:
             payload = {
@@ -1993,12 +2194,15 @@ class JevMcpServer:
                 "get_window_state",
                 {"pid": pid, "window_id": window_id, "include_screenshot": needs_pixel_anchor, "tree_format": "both"},
                 timeout_s=remaining_timeout_s(driver.timeout_ms / 1000.0),
+                deadline_monotonic=_deadline_monotonic,
             )
             if raw_pre.get("isError"):
                 err_txt = "".join(c.get("text", "") for c in (raw_pre.get("content") or []) if isinstance(c, Mapping))
                 raise RuntimeError(err_txt or "get_window_state returned isError=true")
             pre_obs = extract_window_observation(raw_pre, expected_pid=pid, expected_window_id=window_id)
         except Exception as exc:
+            if not was_owned:
+                self._release_single_target(pid, window_id)
             obs_ms = round((time.perf_counter() - obs_started) * 1000, 2)
             payload = {
                 "schema": "agy_cua.jev_step_v1",
@@ -2277,6 +2481,7 @@ class JevMcpServer:
                 authorized["tool"],
                 driver_args,
                 timeout_s=remaining_timeout_s(driver.timeout_ms / 1000.0),
+                deadline_monotonic=_deadline_monotonic,
             )
             dispatch_text = "".join(
                 c.get("text", "") for c in (dispatch_res.get("content") or []) if isinstance(c, Mapping)
@@ -2328,6 +2533,7 @@ class JevMcpServer:
                 "get_window_state",
                 {"pid": pid, "window_id": window_id, "include_screenshot": False, "tree_format": "both"},
                 timeout_s=remaining_timeout_s(driver.timeout_ms / 1000.0),
+                deadline_monotonic=_deadline_monotonic,
             )
             if raw_post.get("isError"):
                 err_txt = "".join(c.get("text", "") for c in (raw_post.get("content") or []) if isinstance(c, Mapping))
@@ -2571,6 +2777,21 @@ class JevMcpServer:
                     is_error=True,
                 )
             s_cands = step_spec.get("candidates")
+            if s_cands is not None and (
+                not isinstance(s_cands, list) or len(s_cands) == 0 or len(s_cands) > MAX_AUTO_CANDIDATES
+            ):
+                return _format_tool_result(
+                    {
+                        "schema": "agy_cua.jev_batch_v1",
+                        "status": "refused",
+                        "verification_outcome": "not_executed",
+                        "reason": f"step[{idx}] candidates must be a non-empty list of at most {MAX_AUTO_CANDIDATES} items",
+                        "pid": pid,
+                        "window_id": window_id,
+                        "session_id": self.session_id,
+                    },
+                    is_error=True,
+                )
             if s_mode == "deterministic" and (not isinstance(s_cands, list) or len(s_cands) != 1):
                 return _format_tool_result(
                     {
@@ -2584,13 +2805,16 @@ class JevMcpServer:
                     is_error=True,
                 )
             has_el_cand = True
-            if isinstance(s_cands, list) and s_cands:
-                has_el_cand = any(
+            if isinstance(s_cands, list):
+                has_el_cand = bool(s_cands) and all(
                     isinstance(c, Mapping)
                     and (
                         "element_index" in c
                         or "element_token" in c
-                        or (isinstance(c.get("arguments"), Mapping) and ("element_index" in c["arguments"] or "element_token" in c["arguments"]))
+                        or (
+                            isinstance(c.get("arguments"), Mapping)
+                            and ("element_index" in c["arguments"] or "element_token" in c["arguments"])
+                        )
                     )
                     for c in s_cands
                 )
@@ -2617,6 +2841,7 @@ class JevMcpServer:
                     is_error=True,
                 )
 
+        was_owned = (pid, window_id) in self._owned_targets
         conflict = self._acquire_target(pid, window_id)
         if conflict is not None:
             payload = {
@@ -2639,7 +2864,12 @@ class JevMcpServer:
             self._record_trace(payload)
             return _format_tool_result(payload, is_error=True)
 
-        batch_timeout_ms = clamp_batch_timeout_ms(args.get("timeout_ms") or self.env.get("AGY_CUA_BATCH_TIMEOUT_MS"))
+        raw_timeout = (
+            args["timeout_ms"]
+            if "timeout_ms" in args and args["timeout_ms"] is not None
+            else self.env.get("AGY_CUA_BATCH_TIMEOUT_MS")
+        )
+        batch_timeout_ms = clamp_batch_timeout_ms(raw_timeout)
         batch_deadline = time.monotonic() + (batch_timeout_ms / 1000.0)
         allow_drift = bool(args.get("allow_interstep_drift", False))
 
@@ -2715,6 +2945,10 @@ class JevMcpServer:
                 "selected_id": step_sc.get("selected_id"),
                 "dispatched_tool": step_sc.get("dispatched_tool"),
                 "dispatched_arguments": step_sc.get("dispatched_arguments"),
+                "requested_model": step_sc.get("requested_model"),
+                "returned_model": step_sc.get("returned_model"),
+                "sdk_identity": step_sc.get("sdk_identity"),
+                "confidence": step_sc.get("confidence"),
                 "timings_ms": t_ms,
             }
 
@@ -2726,6 +2960,9 @@ class JevMcpServer:
                 remaining_steps = format_remaining(idx + 1)
                 break
 
+        if not was_owned and not completed_steps and (failed_step or {}).get("status") == "observation_failed":
+            self._release_single_target(pid, window_id)
+
         all_verified = failed_step is None and len(completed_steps) == len(raw_steps)
         uncertain = bool(failed_step and failed_step.get("uncertain_side_effect"))
         batch_status = "verified" if all_verified else str((failed_step or {}).get("status") or "batch_failed")
@@ -2734,6 +2971,30 @@ class JevMcpServer:
             if all_verified
             else str((failed_step or {}).get("verification_outcome") or "not_executed")
         )
+        first_pre_snap = (
+            completed_steps[0].get("pre_snapshot_id")
+            if completed_steps
+            else (failed_step or {}).get("pre_snapshot_id")
+        )
+        last_post_snap = (
+            completed_steps[-1].get("post_snapshot_id")
+            if all_verified and completed_steps
+            else (failed_step or {}).get("post_snapshot_id")
+        )
+        last_post_texts = (
+            completed_steps[-1].get("post_static_texts")
+            if all_verified and completed_steps
+            else (
+                (failed_step or {}).get("post_static_texts")
+                or (completed_steps[-1].get("post_static_texts") if completed_steps else [])
+            )
+        )
+        step_models = [
+            s.get("returned_model")
+            for s in (completed_steps + ([failed_step] if failed_step else []))
+            if isinstance(s.get("returned_model"), str)
+        ]
+        batch_model = PINNED_JEV_MODEL if PINNED_JEV_MODEL in step_models else (step_models[-1] if step_models else None)
 
         batch_payload = {
             "schema": "agy_cua.jev_batch_v1",
@@ -2744,6 +3005,12 @@ class JevMcpServer:
             "pid": pid,
             "window_id": window_id,
             "session_id": self.session_id,
+            "pre_snapshot_id": first_pre_snap,
+            "post_snapshot_id": last_post_snap,
+            "post_static_texts": list(last_post_texts or []),
+            "selected_ids": [s["selected_id"] for s in completed_steps if isinstance(s.get("selected_id"), str)],
+            "returned_model": batch_model,
+            "sdk_identity": CLIENT_IDENTITY,
             "total_steps": len(raw_steps),
             "completed_count": len(completed_steps),
             "completed_steps": completed_steps,
