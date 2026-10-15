@@ -61,6 +61,8 @@ PRICE_PER_1M_OUTPUT_USD = 3.00
 JEV_PRICE_PER_1M_USD = 0.20
 GEMINI_RESERVE_ALLOWANCE_USD = 0.025
 JEV_RESERVE_ALLOWANCE_USD = 0.002
+# Shared planner thinking budget for every arm (benchmark condition, reported in summary.json).
+PLANNER_THINKING_BUDGET = 512
 
 CUA_KEY_MAP = {
     "enter": "return",
@@ -160,27 +162,36 @@ class SpendTracker:
             raise RuntimeError(f"Budget ceiling exceeded: ${self.total_usd:.4f} > ${self.max_budget_usd:.2f}")
         return p_tok, c_tok, t_tok, call_usd
 
-    def record_jev_incremental(
-        self,
-        acc: Any,
-        prev_in: int,
-        prev_out: int,
-        prev_calls: int,
-        *,
-        reserved_allowance_usd: float,
-        uncertain_failure: bool = False,
-    ) -> tuple[int, int, int]:
-        delta_in = max(0, int(acc.input_tokens) - prev_in)
-        delta_out = max(0, int(acc.output_tokens) - prev_out)
-        delta_calls = max(0, int(acc.calls_used) - prev_calls)
-        self.jev_input_tokens += delta_in
-        self.jev_output_tokens += delta_out
-        self.jev_calls += delta_calls
-        if not uncertain_failure or (delta_in + delta_out) > 0:
+    def settle_jev_request(self, status: int, text: str, *, reserved_allowance_usd: float) -> bool:
+        """Settle ONE completed Jev HTTP request against ITS reservation, then check the ceiling.
+
+        Known usage (2xx JSON with integer usage.input_tokens/output_tokens) is charged and that request's
+        reservation released together. Anything else (non-2xx, invalid JSON, missing usage) is treated as a
+        potentially billed but unaccounted attempt: the reservation is retained. Returns True if accounted.
+        """
+        self.jev_calls += 1
+        in_tok = out_tok = None
+        if 200 <= int(status) < 300:
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                parsed = None
+            usage = parsed.get("usage") if isinstance(parsed, Mapping) else None
+            if isinstance(usage, Mapping):
+                cand_in, cand_out = usage.get("input_tokens"), usage.get("output_tokens")
+                if all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in (cand_in, cand_out)):
+                    in_tok, out_tok = cand_in, cand_out
+        if in_tok is None or out_tok is None:
+            self.jev_uncertain_failures += 1
+            accounted = False
+        else:
+            self.jev_input_tokens += in_tok
+            self.jev_output_tokens += out_tok
             self.release_reservation(reserved_allowance_usd)
+            accounted = True
         if self.total_usd > self.max_budget_usd:
             raise RuntimeError(f"Budget ceiling exceeded after Jev call: ${self.total_usd:.4f} > ${self.max_budget_usd:.2f}")
-        return int(acc.input_tokens), int(acc.output_tokens), int(acc.calls_used)
+        return accounted
 
 
 @dataclass
@@ -606,7 +617,8 @@ def run_arm_google_cua_bg(
                 )
             )
         ],
-        thinking_config=types.ThinkingConfig(include_thoughts=True),
+        # Same planner reasoning budget as the AGY arms so the comparison isolates the controller.
+        thinking_config=types.ThinkingConfig(include_thoughts=True, thinking_budget=PLANNER_THINKING_BUDGET),
     )
 
     outer_turns = 0
@@ -856,7 +868,7 @@ def run_arm_agy_cua_direct(
         temperature=0.0,
         max_output_tokens=8192,
         tools=[direct_tools],
-        thinking_config=types.ThinkingConfig(include_thoughts=True, thinking_budget=512),
+        thinking_config=types.ThinkingConfig(include_thoughts=True, thinking_budget=PLANNER_THINKING_BUDGET),
     )
 
     outer_turns = 0
@@ -959,47 +971,46 @@ def run_arm_agy_cua_jev(
         env.pop("AGY_CUA_JEV_LEGACY_CURSOR", None)
 
     canary_leaked = False
-    jev_prev_in = 0
-    jev_prev_out = 0
-    jev_prev_calls = 0
 
     jev_server = jev_mod.JevMcpServer(env=env)
     # Selection calls evaluate_jev_choice(..., self.http_post): wrap that real transport so every outgoing
     # Jev request is audited for canary leakage and reserved against the budget before it is sent.
     orig_http_post = jev_server.http_post
-    completed_jev_requests = 0
+    # evaluate_jev_choice converts transport exceptions into an uncertain step result, so a budget-ceiling
+    # error raised in here would be swallowed; remember it and re-raise once the controller call returns.
+    budget_exc: list[RuntimeError] = []
+
+    def raise_pending_budget_error() -> None:
+        if budget_exc:
+            raise budget_exc[0]
 
     def audited_http_post(req: Any, timeout_s: float) -> tuple[int, str]:
-        nonlocal canary_leaked, completed_jev_requests
+        nonlocal canary_leaked
         raw = getattr(req, "data", None) or b""
         body = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
         if contains_secret_canary(body):
             canary_leaked = True
-        spend.reserve_before_call(JEV_RESERVE_ALLOWANCE_USD)
         try:
-            result = orig_http_post(req, timeout_s)
+            spend.reserve_before_call(JEV_RESERVE_ALLOWANCE_USD)
+        except RuntimeError as exc:
+            budget_exc.append(exc)
+            raise
+        try:
+            status, text = orig_http_post(req, timeout_s)
         except Exception:
             # Uncertain transport failure: keep the reservation (it may have been billed).
+            spend.jev_calls += 1
             spend.jev_uncertain_failures += 1
             raise
-        completed_jev_requests += 1
-        return result
+        # Settle this request's own usage against its own reservation before Jev parses it.
+        try:
+            spend.settle_jev_request(status, text, reserved_allowance_usd=JEV_RESERVE_ALLOWANCE_USD)
+        except RuntimeError as exc:
+            budget_exc.append(exc)
+            raise
+        return status, text
 
     jev_server.http_post = audited_http_post
-
-    def reconcile_jev_spend() -> None:
-        """After selection completes, charge accounted usage and release one reservation per completed request."""
-        nonlocal jev_prev_in, jev_prev_out, jev_prev_calls, completed_jev_requests
-        while completed_jev_requests > 0:
-            completed_jev_requests -= 1
-            jev_prev_in, jev_prev_out, jev_prev_calls = spend.record_jev_incremental(
-                jev_server.accounting,
-                jev_prev_in,
-                jev_prev_out,
-                jev_prev_calls,
-                reserved_allowance_usd=JEV_RESERVE_ALLOWANCE_USD,
-                uncertain_failure=False,
-            )
 
     try:
         postcond_schema = types.Schema(
@@ -1118,7 +1129,7 @@ def run_arm_agy_cua_jev(
             temperature=0.0,
             max_output_tokens=8192,
             tools=[types.Tool(function_declarations=fn_decls)],
-            thinking_config=types.ThinkingConfig(include_thoughts=True, thinking_budget=512),
+            thinking_config=types.ThinkingConfig(include_thoughts=True, thinking_budget=PLANNER_THINKING_BUDGET),
         )
 
         outer_turns = 0
@@ -1154,17 +1165,15 @@ def run_arm_agy_cua_jev(
                 raw_args = dict(fc.args or {})
                 if name in {"jev_batch", "jev_sequence"} and hillclimbed_v1:
                     seq_steps = raw_args.get("steps") or []
-                    try:
-                        res = jev_server.handle_batch({
-                            "pid": pid,
-                            "window_id": window_id,
-                            "chain_observations": True,
-                            # Controlled fixture: explicitly accept interstep drift so chaining is honoured.
-                            "allow_interstep_drift": True,
-                            "steps": seq_steps,
-                        })
-                    finally:
-                        reconcile_jev_spend()
+                    res = jev_server.handle_batch({
+                        "pid": pid,
+                        "window_id": window_id,
+                        "chain_observations": True,
+                        # Controlled fixture: explicitly accept interstep drift so chaining is honoured.
+                        "allow_interstep_drift": True,
+                        "steps": seq_steps,
+                    })
+                    raise_pending_budget_error()
                     sc = res.get("structuredContent") or {}
                     if contains_secret_canary(json.dumps(sc, ensure_ascii=False)):
                         canary_leaked = True
@@ -1211,10 +1220,8 @@ def run_arm_agy_cua_jev(
                         step_call["value"] = raw_args["value"]
                     if "expected_postcondition" in raw_args and raw_args["expected_postcondition"]:
                         step_call["expected_postcondition"] = raw_args["expected_postcondition"]
-                    try:
-                        res = jev_server.handle_step(step_call)
-                    finally:
-                        reconcile_jev_spend()
+                    res = jev_server.handle_step(step_call)
+                    raise_pending_budget_error()
                     sc = res.get("structuredContent") or {}
                     if contains_secret_canary(json.dumps(sc, ensure_ascii=False)):
                         canary_leaked = True
@@ -1344,6 +1351,29 @@ def main() -> int:
     harness_driver = jev_mod.DriverClient(driver_bin)
 
     results: list[dict[str, Any]] = []
+
+    def write_summary(run_status: str, error: str | None = None) -> None:
+        """Checkpoint results and current accounting (including retained uncertain-spend reservations)."""
+        payload = {
+            "timestamp_utc": stamp,
+            "run_status": run_status,
+            "error": error,
+            "model": args.model,
+            "arms": arms,
+            "planner_thinking_budget": PLANNER_THINKING_BUDGET,
+            "total_spend_usd": spend.total_usd,
+            "reserved_usd": spend.reserved_usd,
+            "gemini_uncertain_failures": spend.gemini_uncertain_failures,
+            "jev_uncertain_failures": spend.jev_uncertain_failures,
+            "gemini_input_tokens": spend.gemini_input_tokens,
+            "gemini_output_tokens": spend.gemini_output_tokens,
+            "gemini_thought_tokens": spend.gemini_thought_tokens,
+            "jev_input_tokens": spend.jev_input_tokens,
+            "jev_output_tokens": spend.jev_output_tokens,
+            "results": results,
+        }
+        (out_dir / "summary.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
     print(f"=== AGY-CUA Benchmark Suite ({stamp}) | Model: {args.model} | Budget Cap: ${args.max_budget_usd:.2f} ===", flush=True)
 
     try:
@@ -1427,19 +1457,31 @@ def main() -> int:
                         f"pngs={delta_shots:2d} | in_tok={delta_gem_in:5d} | cost=${delta_usd:.4f} | {verify_summary}",
                         flush=True,
                     )
-                    checkpoint_payload = {
-                        "timestamp_utc": stamp,
+                    write_summary("running")
+                except Exception as exc:
+                    # Persist the failed attempt and its (possibly retained) spend, then stop: no provider retry.
+                    err_text = f"{type(exc).__name__}: {str(exc)[:500]}"
+                    if contains_secret_canary(err_text):
+                        err_text = f"{type(exc).__name__}: <redacted>"
+                    results.append({
+                        "task_id": task.task_id,
+                        "tier": task.tier,
+                        "title": task.title,
+                        "arm": arm_id,
                         "model": args.model,
-                        "arms": arms,
-                        "total_spend_usd": spend.total_usd,
-                        "gemini_input_tokens": spend.gemini_input_tokens,
-                        "gemini_output_tokens": spend.gemini_output_tokens,
-                        "gemini_thought_tokens": spend.gemini_thought_tokens,
-                        "jev_input_tokens": spend.jev_input_tokens,
-                        "jev_output_tokens": spend.jev_output_tokens,
-                        "results": results,
-                    }
-                    (out_dir / "summary.json").write_text(json.dumps(checkpoint_payload, indent=2), encoding="utf-8")
+                        "passed": False,
+                        "verify_summary": f"aborted: {err_text}",
+                        "error": err_text,
+                        "screenshots_sent": spend.screenshots_sent - pre_shots,
+                        "gemini_input_tokens": spend.gemini_input_tokens - pre_gem_in,
+                        "gemini_output_tokens": (spend.gemini_output_tokens + spend.gemini_thought_tokens) - pre_gem_out,
+                        "jev_tokens": (spend.jev_input_tokens + spend.jev_output_tokens) - pre_jev_tok,
+                        "cost_usd": round(spend.total_usd - pre_usd, 5),
+                        "reserved_usd": spend.reserved_usd,
+                    })
+                    write_summary("aborted", err_text)
+                    print(f"  [{arm_id:15s}] ABORTED | {err_text}", flush=True)
+                    raise
                 finally:
                     if proc is not None:
                         proc.terminate()
@@ -1450,6 +1492,7 @@ def main() -> int:
     finally:
         harness_driver.close()
 
+    write_summary("completed")
     print(f"\nSaved full benchmark results to {out_dir / 'summary.json'} (Total spend: ${spend.total_usd:.4f})", flush=True)
     return 0
 

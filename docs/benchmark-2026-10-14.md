@@ -8,6 +8,9 @@
 - **Driver Runtime:** `cua-driver 0.35.4` (background window-scoped delivery, `focus_violations = 0`)
 - **Total API Spend Across All Calibration & Full Benchmark Runs:** **`$0.2896`** (out of `$5.00` run cap)
 
+> [!WARNING]
+> **Benchmark condition disclosure:** the numbers below were measured with the `google-cua-bg` planner on the model's **default** thinking budget, while the three AGY arms used `thinking_budget=512`. That difference affects planner latency, tokens, and cost independently of the controller, so the speedup/cost ratios do not isolate controller gains. The harness now applies one shared `PLANNER_THINKING_BUDGET` (512) to every arm and records it in `summary.json`; these results must be re-run under that parity condition before the ratios are cited.
+
 ---
 
 ## 1. Executive Summary
