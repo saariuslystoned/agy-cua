@@ -413,10 +413,10 @@ with open(os.path.join(out_dir, "steps-output.json"), "w", encoding="utf-8") as 
 PY
 PY_EXIT=$?
 DURATION=$(( $(date +%s) - START ))
+"$ROOT/scripts/probe-focus.sh" > "$OUT/focus-after.json"
 cleanup
 SAMPLER=""
 FIXTURE_PID=""
-"$ROOT/scripts/probe-focus.sh" > "$OUT/focus-after.json"
 
 python3 - "$OUT" "$PY_EXIT" "$DURATION" "$FIXTURE_BUNDLE_ID" "$REQUIRE_JEV" <<'PY'
 import json
