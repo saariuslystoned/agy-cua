@@ -118,8 +118,10 @@ Standard Tier, and Pending status. The fresh form correctly failed the final
 submission oracle. The native plugin then returned:
 
 - Exact original executable path: **Invalid app**.
+- Process display name `bench_fixture`: **Invalid app**.
 - Actual fixture window ID: **macOS getApp requires an app name, path, or bundle ID.**
 - Native app inventory filtered to that exact window: **zero matching app entries**.
+  A separate name/path inventory filter also returned no fixture app entries.
 
 Thus, native control of the required fixture is unavailable through these
 supported target forms in this session. The same targeting problem blocks a
@@ -147,7 +149,7 @@ and state files stay in ignored private evidence.
 
 Frozen benchmark base: PR #11 OPEN at
 `154edf54e6223b4c61543d78206247535b3e2b89`. Executed adapter source:
-`4a61be8853fb85f3258193a0d895b4a9c480fe33`, branch
+`1c1ff24ea4b1df572e0c2eb62f353fbfdc33f29a`, branch
 `codex/issue-12-codex-cu`, worktree
 `/Users/bobbybones/Developer/side-quests/agy-cua-worktrees/issue-12-codex-cu`.
 The evidence binds the source, fixture binary and fixture source hashes.

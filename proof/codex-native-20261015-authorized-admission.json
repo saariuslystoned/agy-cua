@@ -1,5 +1,5 @@
 {
-  "timestamp_utc": "20261015T172825Z",
+  "timestamp_utc": "20261015T173145Z",
   "run_status": "blocked",
   "results": [],
   "arms": [
@@ -31,10 +31,10 @@
     "cost_usd": "ChatGPT subscription marginal billing unavailable; API prices are not applied."
   },
   "base_sha": "154edf54e6223b4c61543d78206247535b3e2b89",
-  "runner_head": "4a61be8853fb85f3258193a0d895b4a9c480fe33",
-  "runner_source_sha256": "e920a7edfa7b8f3c98b3fbbd40e35fab6607c2b834a9981e43d59c22f95a3798",
+  "runner_head": "1c1ff24ea4b1df572e0c2eb62f353fbfdc33f29a",
+  "runner_source_sha256": "2489fbafb89b3994b9b66d3b7ee05794dfd468e7bcce8d275edeac24a7e5666c",
   "fixture_source_sha256": "cab5753af003a01ba2051cc3f6074a3d4ced30101ac8c13971a5b7d549441483",
-  "peer_fixture_count_before_setup": 1,
+  "peer_fixture_count_before_setup": 0,
   "cost_note": "No model request made; subscription marginal pricing unavailable, not zero.",
   "fixture_sha256": "1b5972f1a1e1400527a66286341a8bfe0f56a57aec0438680e3a63fd913eb768",
   "task_ids": [
@@ -46,7 +46,7 @@
     "T5b_1password_vault_item"
   ],
   "initial_form_oracle_passed": false,
-  "private_fixture_screenshot_sha256": "004c2c22a972c2176818b3e0e3aa04dc6e6faa2271113a9eb2dd475a7bddf957",
+  "private_fixture_screenshot_sha256": "8bf18d7f3acf75da34f4e2a3a95f248b99fb2c9d353456b71718e409c5a99517",
   "runtime": {
     "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
     "platformFamily": "unix",
@@ -76,6 +76,11 @@
         "target_kind": "window_id",
         "is_error": true,
         "error": "macos_requires_app_identity"
+      },
+      {
+        "target_kind": "display_name",
+        "is_error": true,
+        "error": "invalid_original_fixture_name"
       }
     ],
     "inventory_matches": 0
@@ -569,5 +574,15 @@
     "https://learn.chatgpt.com/docs/app-server",
     "https://learn.chatgpt.com/docs/agent-configuration/speed",
     "https://learn.chatgpt.com/docs/pricing"
-  ]
+  ],
+  "display_name_inventory_control": {
+    "model_turns": 0,
+    "task_completed": false,
+    "name_is_error": true,
+    "name_error_first_line": "Invalid app: bench_fixture",
+    "fixture_inventory_texts": [
+      "[]"
+    ],
+    "inventory_is_error": false
+  }
 }
