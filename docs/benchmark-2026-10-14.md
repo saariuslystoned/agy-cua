@@ -89,7 +89,7 @@ failures nor completed repetitions. The existing baseline above is unchanged.
 | Requested arm (preserved verbatim) | Model resolution | Speed resolution | Repetitions completed | Pass rate | Wall time | Turns | Images sent | Input/output tokens | Cost | Focus violations / probe errors |
 | :--- | :--- | :--- | ---: | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `6.1 sol fast` | Live catalog: `gpt-6.1-sol` | Live catalog: Fast = `priority` | 0 / 12 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
-| `6.1 sol astra ultrafast` | Bobby clarified `gpt-6.1-sol` + Ultrafast | This live Sol catalog exposes `priority` only; Ultrafast unavailable through its advertised controls | 0 / 12 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+| `6.1 sol astra ultrafast` | Bobby's final choice: `gpt-6-astra` | Live catalog: Ultrafast = `ultrafast` | 0 / 12 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
 
 **Method and identity.** PR #11 was fetched and rechecked OPEN at immutable base
 `154edf54e6223b4c61543d78206247535b3e2b89`. Work used repo `saariuslystoned/agy-cua`,
@@ -104,7 +104,10 @@ to use Calculator.” This is configuration provenance, not an upstream
 per-response model/service identity receipt. It is not a task timing result.
 
 With `approvalPolicy=on-request`, the native tool instead required
-`mcpServer/elicitation/request`. The probe stops at that boundary without
+`mcpServer/elicitation/request`: **Allow Computer Use to use "Calculator"?**
+The form has an empty object schema. Bobby has been asked to approve native
+access to Calculator and the unchanged benchmark fixture for these test runs.
+The probe stops at that boundary without
 granting approval or manufacturing a host response. Calculator access succeeded
 from this existing desktop chat, so the evidence does **not** establish that
 native Computer Use is globally unscriptable. The unresolved part is approval
@@ -152,9 +155,10 @@ describes supported JSON-RPC integration.
 There are no per-repetition results or variance estimates, and no causal speed
 explanation is supported. A noncompeting desktop interval was not established;
 existing Cua Driver load and other operator services were left untouched.
-Official docs describe Sol Ultrafast support, but the session's live catalog
-does not expose that tier for Sol. No Astra substitution or unsupported-speed
-probe was made. After native app approval and Sol Ultrafast availability are resolved, run the six original IDs
+Bobby's latest instruction selects Sol Fast and Astra Ultrafast, superseding an
+earlier Sol Ultrafast reply. Both final choices are advertised by the live
+catalog; neither was silently substituted or run at default speed.
+After native app approval is resolved, run the six original IDs
 twice per arm, sequentially, preserving every failure. In either a scripted or
 manual run, include first-call overhead from prompt submission through agent
 completion, then run the original independent verifier; disclose any timing
