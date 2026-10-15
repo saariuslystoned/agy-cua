@@ -431,23 +431,35 @@ require_jev = require_jev_str == "1"
 steps_path = os.path.join(out_dir, "steps-output.json")
 data = json.load(open(steps_path, encoding="utf-8")) if os.path.exists(steps_path) else {}
 
-focus_rows = []
+boundary_rows = []
 for fname in ("focus-before.json", "focus-after.json"):
     fpath = os.path.join(out_dir, fname)
     if os.path.exists(fpath):
-        focus_rows.append(json.load(open(fpath, encoding="utf-8")))
+        boundary_rows.append(json.load(open(fpath, encoding="utf-8")))
+trace_rows = []
 trace_path = os.path.join(out_dir, "focus-trace.jsonl")
 if os.path.exists(trace_path):
     for line in open(trace_path, encoding="utf-8"):
         if line.strip():
-            focus_rows.append(json.loads(line))
+            trace_rows.append(json.loads(line))
+focus_rows = boundary_rows + trace_rows
+
+def is_valid_focus_sample(row: dict) -> bool:
+    f_pid = row.get("front_pid")
+    f_bundle = row.get("front_bundle")
+    valid_pid = not isinstance(f_pid, bool) and isinstance(f_pid, int) and f_pid > 0
+    valid_bundle = isinstance(f_bundle, str) and bool(f_bundle.strip())
+    return valid_pid and valid_bundle
+
+unidentified_focus_samples = sum(1 for r in focus_rows if not is_valid_focus_sample(r))
 
 final_state = data.get("final_fixture_state") or {}
 target_pid = final_state.get("pid")
+target_pid_valid = not isinstance(target_pid, bool) and isinstance(target_pid, int) and target_pid > 0
 focus_violations = sum(
     1
     for r in focus_rows
-    if (target_pid and r.get("front_pid") == target_pid) or r.get("front_bundle") == fixture_bundle
+    if (target_pid_valid and r.get("front_pid") == target_pid) or r.get("front_bundle") == fixture_bundle
 )
 
 bad_max_el = data.get("bad_max_elements") or {}
@@ -528,7 +540,10 @@ verdict = "PASS" if (
     and batch_ok
     and fixture_state_ok
     and commit_gate_ok
-    and bool(focus_rows)
+    and len(boundary_rows) == 2
+    and len(trace_rows) >= 1
+    and target_pid_valid
+    and unidentified_focus_samples == 0
     and focus_violations == 0
 ) else "FAIL"
 
@@ -539,6 +554,8 @@ result = {
     "duration_s": duration,
     "py_exit": py_exit,
     "focus_samples": len(focus_rows),
+    "in_run_focus_samples": len(trace_rows),
+    "unidentified_focus_samples": unidentified_focus_samples,
     "focus_violations": focus_violations,
     "checks": {
         "budget_validation_ok": budget_validation_ok,
