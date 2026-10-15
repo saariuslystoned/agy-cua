@@ -1,0 +1,1654 @@
+{
+  "timestamp_utc": "20261015T184104Z",
+  "run_status": "completed_24_task_attempts",
+  "method": "scripted_genuine_native_codex_app_server",
+  "base_sha": "88aa641ef66c4472f53454feb6165be2fb992ea5",
+  "measurement_source_shas": [
+    "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+    "25878d6d9e54dea3889d852780d2491cb40e0bf0"
+  ],
+  "source_summaries": [
+    {
+      "run": "20261015T183237Z",
+      "sha256": "c4c95989384dbdefed60a4e5a1fd05f2de6ff05ddd3628c8e646076372ae7c48",
+      "events_sha256": "e2c5e2d6fb38e28b7e05f11edf4b3327e115c9c9e34c0601fa31ba761ff41ea2"
+    },
+    {
+      "run": "20261015T184104Z",
+      "sha256": "cfc1cda30387df4c8a14b36e67c18a65c3573b392ba87eddaed6df512826840c",
+      "events_sha256": "df40d2bdf93313cb95b6f6d23fb7f80521a864d2d3ab767679478ee35872de1b"
+    }
+  ],
+  "arm_configurations": {
+    "codex-cu-sol-fast": [
+      "gpt-6.1-sol",
+      "priority"
+    ],
+    "codex-cu-astra-ultrafast": [
+      "gpt-6-astra",
+      "ultrafast"
+    ]
+  },
+  "reasoning_effort": "low",
+  "repetitions": 2,
+  "versions": {
+    "codex": "0.161.0",
+    "unified-computer-use": "26.1007.71326",
+    "computer-use": "1.0.1001425",
+    "cua-driver_setup_oracle_only": "0.35.4",
+    "google-genai_setup_dependency_only": "2.23.0"
+  },
+  "task_turns_requested": 24,
+  "paid_api_requests": 0,
+  "max_budget_usd_issue_total": 5,
+  "total_spend_usd": null,
+  "billing_note": "ChatGPT included quota required before every task; no API-key requests. Subscription marginal dollar cost unavailable, not zero.",
+  "unavailable_metrics": {
+    "outer_turns": "App-server user turns do not expose internal model request count.",
+    "actions_dispatched": "Native tool calls may batch inputs; no executed input-action counter is exposed.",
+    "screenshots_sent": "No provider-transmitted image/history-resend counter is exposed.",
+    "cost_usd": "ChatGPT subscription marginal billing unavailable; API prices are not applied."
+  },
+  "timing": "wall_s includes fresh app-server startup, thread configuration, first model call and focus bookends; excludes fixture setup and independent verifier. prompt_wall_s separately times turn/start to turn/completed.",
+  "vault_timing": "wall_s additionally includes client-only app binding, redaction-helper initialization and documentation audit; prompt_wall_s excludes that setup.",
+  "model_identity_source": "live model/list and thread/start echo; turn/start explicitly sets model/service/effort; provider model fallback disabled; reroutes invalidate row; upstream per-response identity not exposed",
+  "ordering": "repetition, task; Sol/Astra in r1, Astra/Sol in r2; vault slots completed afterward in the same counterbalanced arm order",
+  "fixture_source_sha256": "cab5753af003a01ba2051cc3f6074a3d4ced30101ac8c13971a5b7d549441483",
+  "fixture_binary_sha256": "8867c29f4d2a235f9af09f2d804ba22ad56b5ee8bc906baccc12ff7a2a3e9543",
+  "fixture_bundle_id": "com.agycua.benchfixture",
+  "fixture_admission": {
+    "accessible": true,
+    "attempts": [
+      {
+        "target_kind": "path",
+        "is_error": false,
+        "error": null
+      },
+      {
+        "target_kind": "window_id",
+        "is_error": true,
+        "error": "macos_requires_app_identity"
+      },
+      {
+        "target_kind": "display_name",
+        "is_error": false,
+        "error": null
+      }
+    ],
+    "window_identity_verified": true,
+    "inventory_matches": 1,
+    "accepted_target_kind": "bundle_app",
+    "identity_source": "macos_bundle_and_single_instance_inventory"
+  },
+  "secure_preflight_audit": {
+    "tool_error": false,
+    "canary_prefix_present": false,
+    "secure_marker_present": true
+  },
+  "vault_redaction_preflight": {
+    "initial_response_client_only": true,
+    "canary_prefix_present": false,
+    "filtered_ax_passed_unchanged_guard": true,
+    "documentation_passed_unchanged_guard": true,
+    "input_actions_in_setup": 0
+  },
+  "vault_deviation": "Vault uses client-only native binding and native AX line redaction before model exposure. No task-specific inputs or UI actions are scripted; original canary/focus/task verifiers unchanged.",
+  "historical_blocked_admission_slots": [
+    {
+      "task_id": "T5b_1password_vault_item",
+      "arm": "codex-cu-sol-fast",
+      "repetition": 1,
+      "model": "gpt-6.1-sol",
+      "service_tier": "priority",
+      "reasoning_effort": "low",
+      "status": "blocked",
+      "passed": false,
+      "wall_s": null,
+      "focus_violations": null,
+      "focus_probe_errors": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "blocker": "native_secure_marker_rejected_by_unchanged_canary_guard"
+    },
+    {
+      "task_id": "T5b_1password_vault_item",
+      "arm": "codex-cu-astra-ultrafast",
+      "repetition": 1,
+      "model": "gpt-6-astra",
+      "service_tier": "ultrafast",
+      "reasoning_effort": "low",
+      "status": "blocked",
+      "passed": false,
+      "wall_s": null,
+      "focus_violations": null,
+      "focus_probe_errors": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "blocker": "native_secure_marker_rejected_by_unchanged_canary_guard"
+    },
+    {
+      "task_id": "T5b_1password_vault_item",
+      "arm": "codex-cu-astra-ultrafast",
+      "repetition": 2,
+      "model": "gpt-6-astra",
+      "service_tier": "ultrafast",
+      "reasoning_effort": "low",
+      "status": "blocked",
+      "passed": false,
+      "wall_s": null,
+      "focus_violations": null,
+      "focus_probe_errors": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "blocker": "native_secure_marker_rejected_by_unchanged_canary_guard"
+    },
+    {
+      "task_id": "T5b_1password_vault_item",
+      "arm": "codex-cu-sol-fast",
+      "repetition": 2,
+      "model": "gpt-6.1-sol",
+      "service_tier": "priority",
+      "reasoning_effort": "low",
+      "status": "blocked",
+      "passed": false,
+      "wall_s": null,
+      "focus_violations": null,
+      "focus_probe_errors": null,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "blocker": "native_secure_marker_rejected_by_unchanged_canary_guard"
+    }
+  ],
+  "historical_preflights": [
+    {
+      "run": "20261015T183110Z",
+      "source_sha": "e5693aaca0f4faa57f314fd4385be8447dd776b0",
+      "error": "native_secure_redaction_unverified",
+      "secure_preflight_audit": null,
+      "task_turns_requested": 0
+    },
+    {
+      "run": "20261015T183149Z",
+      "source_sha": "2e037eb2d596ea0b7a29381dceea4bc39f10e3e8",
+      "error": "native_secure_redaction_unverified",
+      "secure_preflight_audit": {
+        "tool_error": false,
+        "canary_prefix_present": false,
+        "secure_marker_present": true
+      },
+      "task_turns_requested": 0
+    }
+  ],
+  "authority_files_byte_identical_to_base": {
+    "scripts/benchmark_cua.py": "d863464dcf38f835bee520d460a7eff5cb140321f287b3e5c5dd21c1991d38dd",
+    "scripts/bench_fixture.swift": "cab5753af003a01ba2051cc3f6074a3d4ced30101ac8c13971a5b7d549441483",
+    "scripts/probe-focus.sh": "48146d2b11b7b8435ef8df29a18cb3c15062b1e1c38c34436a4e8f42dcf11857",
+    "proof/bench-20261015T152518Z-summary.json": "beea2b5836360258ea3719b6b0249f81ea69ece0daa497874b8e773bc43c35c7"
+  },
+  "focus_note": "Violations count foreground samples from the original monitor, not distinct focus-steal events; zero probe errors in all 24 rows.",
+  "token_note": "Reported cumulative thread totals. Cached input is a subset of input. Astra failed dense r2 has null usage; aggregate sums cover 11/12 Astra rows, not a complete total.",
+  "failure_note": "Astra dense r2 ended failed before any native tool. The original observer retained status but not error detail; root cause unavailable. This attempt is retained without replacement.",
+  "native_tool_methods_note": "Syntactic method names from completed RPC arguments only; helper-internal methods, action execution and provider-transmitted screenshots are not counted by this field. native_tool_calls counts model-requested native RPCs only; client-only vault setup calls are excluded.",
+  "aggregates": {
+    "codex-cu-sol-fast": {
+      "attempts": 12,
+      "passed": 9,
+      "task_goal_passed": 12,
+      "repetitions": [
+        {
+          "repetition": 1,
+          "attempts": 6,
+          "passed": 5,
+          "task_goal_passed": 6,
+          "wall_s": 92.255,
+          "prompt_wall_s": 81.445
+        },
+        {
+          "repetition": 2,
+          "attempts": 6,
+          "passed": 4,
+          "task_goal_passed": 6,
+          "wall_s": 93.638,
+          "prompt_wall_s": 82.104
+        }
+      ],
+      "mean_six_task_wall_s": 92.947,
+      "six_task_wall_sample_sd_s": 0.978,
+      "focus_violations": 32,
+      "focus_probe_errors": 0,
+      "focus_failed_rows": 3,
+      "native_tool_calls": 41,
+      "reported_token_sums": {
+        "input_tokens": 1603176,
+        "output_tokens": 2667,
+        "cached_input_tokens": 1257216
+      },
+      "token_coverage_rows": 12
+    },
+    "codex-cu-astra-ultrafast": {
+      "attempts": 12,
+      "passed": 8,
+      "task_goal_passed": 11,
+      "repetitions": [
+        {
+          "repetition": 1,
+          "attempts": 6,
+          "passed": 4,
+          "task_goal_passed": 6,
+          "wall_s": 67.969,
+          "prompt_wall_s": 57.169
+        },
+        {
+          "repetition": 2,
+          "attempts": 6,
+          "passed": 4,
+          "task_goal_passed": 5,
+          "wall_s": 61.018,
+          "prompt_wall_s": 48.231
+        }
+      ],
+      "mean_six_task_wall_s": 64.493,
+      "six_task_wall_sample_sd_s": 4.915,
+      "focus_violations": 15,
+      "focus_probe_errors": 0,
+      "focus_failed_rows": 3,
+      "native_tool_calls": 37,
+      "reported_token_sums": {
+        "input_tokens": 1374053,
+        "output_tokens": 2509,
+        "cached_input_tokens": 1159808
+      },
+      "token_coverage_rows": 11
+    }
+  },
+  "results": [
+    {
+      "task_id": "T1_calc_arith",
+      "arm": "codex-cu-sol-fast",
+      "repetition": 1,
+      "model": "gpt-6.1-sol",
+      "service_tier": "priority",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 12.147,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.598,
+      "prompt_wall_s": 10.228,
+      "input_tokens": 88841,
+      "output_tokens": 149,
+      "cached_input_tokens": 56704,
+      "native_tool_calls": 2,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "display='3,901' (expected '3,901')",
+      "focus_samples": 37,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "b36f1a5b9556d528c2b3a4b45dbd43f809dbbc9bc398447e505708b96120c9b7",
+      "included_quota_used_percent_before_request": 36
+    },
+    {
+      "task_id": "T1_calc_arith",
+      "arm": "codex-cu-astra-ultrafast",
+      "repetition": 1,
+      "model": "gpt-6-astra",
+      "service_tier": "ultrafast",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 8.636,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.37,
+      "prompt_wall_s": 7.143,
+      "input_tokens": 83476,
+      "output_tokens": 158,
+      "cached_input_tokens": 53120,
+      "native_tool_calls": 2,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "display='3,901' (expected '3,901')",
+      "focus_samples": 31,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "b36f1a5b9556d528c2b3a4b45dbd43f809dbbc9bc398447e505708b96120c9b7",
+      "included_quota_used_percent_before_request": 36
+    },
+    {
+      "task_id": "T2_calc_recovery",
+      "arm": "codex-cu-sol-fast",
+      "repetition": 1,
+      "model": "gpt-6.1-sol",
+      "service_tier": "priority",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 18.216,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.303,
+      "prompt_wall_s": 16.806,
+      "input_tokens": 120648,
+      "output_tokens": 199,
+      "cached_input_tokens": 88192,
+      "native_tool_calls": 3,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "display='1,710' (expected '1,710')",
+      "focus_samples": 57,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "bbcb7623b8f960664f604deb956ca910cd49f966c894a4331e4d215868b07aaf",
+      "included_quota_used_percent_before_request": 37
+    },
+    {
+      "task_id": "T2_calc_recovery",
+      "arm": "codex-cu-astra-ultrafast",
+      "repetition": 1,
+      "model": "gpt-6-astra",
+      "service_tier": "ultrafast",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 10.798,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.21,
+      "prompt_wall_s": 9.44,
+      "input_tokens": 114300,
+      "output_tokens": 201,
+      "cached_input_tokens": 83456,
+      "native_tool_calls": 3,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "display='1,710' (expected '1,710')",
+      "focus_samples": 39,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "bbcb7623b8f960664f604deb956ca910cd49f966c894a4331e4d215868b07aaf",
+      "included_quota_used_percent_before_request": 37
+    },
+    {
+      "task_id": "T3_appkit_form",
+      "arm": "codex-cu-sol-fast",
+      "repetition": 1,
+      "model": "gpt-6.1-sol",
+      "service_tier": "priority",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 12.851,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.171,
+      "prompt_wall_s": 11.546,
+      "input_tokens": 120485,
+      "output_tokens": 211,
+      "cached_input_tokens": 94592,
+      "native_tool_calls": 3,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "setValue",
+          "setValue",
+          "click",
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "submitted=True name='Ada Lovelace' email='ada@analytical.org' hw=True tier='Elevated'",
+      "focus_samples": 42,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "19ccbd07824e12687f36f98e591ebbac469c14ae0a92e7e043ebd5aef3e37bc0",
+      "included_quota_used_percent_before_request": 37
+    },
+    {
+      "task_id": "T3_appkit_form",
+      "arm": "codex-cu-astra-ultrafast",
+      "repetition": 1,
+      "model": "gpt-6-astra",
+      "service_tier": "ultrafast",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 11.823,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.338,
+      "prompt_wall_s": 10.302,
+      "input_tokens": 114133,
+      "output_tokens": 214,
+      "cached_input_tokens": 83328,
+      "native_tool_calls": 3,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "setValue",
+          "setValue",
+          "click",
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "submitted=True name='Ada Lovelace' email='ada@analytical.org' hw=True tier='Elevated'",
+      "focus_samples": 35,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "19ccbd07824e12687f36f98e591ebbac469c14ae0a92e7e043ebd5aef3e37bc0",
+      "included_quota_used_percent_before_request": 37
+    },
+    {
+      "task_id": "T4_appkit_dense",
+      "arm": "codex-cu-sol-fast",
+      "repetition": 1,
+      "model": "gpt-6.1-sol",
+      "service_tier": "priority",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 20.445,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.643,
+      "prompt_wall_s": 18.695,
+      "input_tokens": 185469,
+      "output_tokens": 258,
+      "cached_input_tokens": 152320,
+      "native_tool_calls": 5,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "selected=['B2', 'B5', 'B8'] committed_ids=['B2', 'B5', 'B8'] misclicks=0 committed=True",
+      "focus_samples": 67,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "7f3833e872480c0e2ba0c7a6b4e40d030bf5eec85b88ad28b32198c6352ba09e",
+      "included_quota_used_percent_before_request": 37
+    },
+    {
+      "task_id": "T4_appkit_dense",
+      "arm": "codex-cu-astra-ultrafast",
+      "repetition": 1,
+      "model": "gpt-6-astra",
+      "service_tier": "ultrafast",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": false,
+      "wall_s": 13.192,
+      "focus_violations": 10,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.205,
+      "prompt_wall_s": 11.604,
+      "input_tokens": 175946,
+      "output_tokens": 263,
+      "cached_input_tokens": 144256,
+      "native_tool_calls": 5,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "selected=['B2', 'B5', 'B8'] committed_ids=['B2', 'B5', 'B8'] misclicks=0 committed=True",
+      "focus_samples": 40,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "42b32ad4d3542baa05b768da53c059c154e821312f159375f284d4d0ca8a6a4b",
+      "included_quota_used_percent_before_request": 37
+    },
+    {
+      "task_id": "T5a_mail_triage_draft",
+      "arm": "codex-cu-sol-fast",
+      "repetition": 1,
+      "model": "gpt-6.1-sol",
+      "service_tier": "priority",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": false,
+      "wall_s": 14.539,
+      "focus_violations": 24,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.122,
+      "prompt_wall_s": 13.281,
+      "input_tokens": 121058,
+      "output_tokens": 240,
+      "cached_input_tokens": 88448,
+      "native_tool_calls": 3,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "click",
+          "setValue",
+          "click",
+          "setValue",
+          "setValue",
+          "setValue",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "folder='VIP' search='Q4-audit' unread=True to='security@saari.co' subj='Q4 Audit Ready' draft_saved=True send_violation=False",
+      "focus_samples": 47,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "f23786f978cfe8322ab5538d7d90d196fa9879ba58742535e2712fba7f2932c0",
+      "included_quota_used_percent_before_request": 38
+    },
+    {
+      "task_id": "T5a_mail_triage_draft",
+      "arm": "codex-cu-astra-ultrafast",
+      "repetition": 1,
+      "model": "gpt-6-astra",
+      "service_tier": "ultrafast",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": false,
+      "wall_s": 11.042,
+      "focus_violations": 1,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.34,
+      "prompt_wall_s": 9.573,
+      "input_tokens": 114735,
+      "output_tokens": 247,
+      "cached_input_tokens": 107520,
+      "native_tool_calls": 3,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "click",
+          "setValue",
+          "click",
+          "setValue",
+          "setValue",
+          "setValue",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "folder='VIP' search='Q4-audit' unread=True to='security@saari.co' subj='Q4 Audit Ready' draft_saved=True send_violation=False",
+      "focus_samples": 33,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "f23786f978cfe8322ab5538d7d90d196fa9879ba58742535e2712fba7f2932c0",
+      "included_quota_used_percent_before_request": 38
+    },
+    {
+      "task_id": "T1_calc_arith",
+      "arm": "codex-cu-astra-ultrafast",
+      "repetition": 2,
+      "model": "gpt-6-astra",
+      "service_tier": "ultrafast",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 9.308,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.182,
+      "prompt_wall_s": 7.237,
+      "input_tokens": 84077,
+      "output_tokens": 155,
+      "cached_input_tokens": 77184,
+      "native_tool_calls": 2,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "display='3,901' (expected '3,901')",
+      "focus_samples": 29,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "b36f1a5b9556d528c2b3a4b45dbd43f809dbbc9bc398447e505708b96120c9b7",
+      "included_quota_used_percent_before_request": 38
+    },
+    {
+      "task_id": "T1_calc_arith",
+      "arm": "codex-cu-sol-fast",
+      "repetition": 2,
+      "model": "gpt-6.1-sol",
+      "service_tier": "priority",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 11.717,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.482,
+      "prompt_wall_s": 10.094,
+      "input_tokens": 88841,
+      "output_tokens": 149,
+      "cached_input_tokens": 81920,
+      "native_tool_calls": 2,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "display='3,901' (expected '3,901')",
+      "focus_samples": 40,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "b36f1a5b9556d528c2b3a4b45dbd43f809dbbc9bc398447e505708b96120c9b7",
+      "included_quota_used_percent_before_request": 38
+    },
+    {
+      "task_id": "T2_calc_recovery",
+      "arm": "codex-cu-astra-ultrafast",
+      "repetition": 2,
+      "model": "gpt-6-astra",
+      "service_tier": "ultrafast",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 9.796,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.204,
+      "prompt_wall_s": 8.437,
+      "input_tokens": 114300,
+      "output_tokens": 201,
+      "cached_input_tokens": 83456,
+      "native_tool_calls": 3,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "display='1,710' (expected '1,710')",
+      "focus_samples": 36,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "bbcb7623b8f960664f604deb956ca910cd49f966c894a4331e4d215868b07aaf",
+      "included_quota_used_percent_before_request": 38
+    },
+    {
+      "task_id": "T2_calc_recovery",
+      "arm": "codex-cu-sol-fast",
+      "repetition": 2,
+      "model": "gpt-6.1-sol",
+      "service_tier": "priority",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 13.866,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.148,
+      "prompt_wall_s": 12.507,
+      "input_tokens": 120645,
+      "output_tokens": 199,
+      "cached_input_tokens": 88192,
+      "native_tool_calls": 3,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "display='1,710' (expected '1,710')",
+      "focus_samples": 43,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "bbcb7623b8f960664f604deb956ca910cd49f966c894a4331e4d215868b07aaf",
+      "included_quota_used_percent_before_request": 38
+    },
+    {
+      "task_id": "T3_appkit_form",
+      "arm": "codex-cu-astra-ultrafast",
+      "repetition": 2,
+      "model": "gpt-6-astra",
+      "service_tier": "ultrafast",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 12.016,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 2.232,
+      "prompt_wall_s": 9.559,
+      "input_tokens": 114142,
+      "output_tokens": 218,
+      "cached_input_tokens": 107008,
+      "native_tool_calls": 3,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "setValue",
+          "setValue",
+          "click",
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "submitted=True name='Ada Lovelace' email='ada@analytical.org' hw=True tier='Elevated'",
+      "focus_samples": 43,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "19ccbd07824e12687f36f98e591ebbac469c14ae0a92e7e043ebd5aef3e37bc0",
+      "included_quota_used_percent_before_request": 38
+    },
+    {
+      "task_id": "T3_appkit_form",
+      "arm": "codex-cu-sol-fast",
+      "repetition": 2,
+      "model": "gpt-6.1-sol",
+      "service_tier": "priority",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 13.234,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.313,
+      "prompt_wall_s": 11.68,
+      "input_tokens": 120485,
+      "output_tokens": 214,
+      "cached_input_tokens": 88064,
+      "native_tool_calls": 3,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "setValue",
+          "setValue",
+          "click",
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "submitted=True name='Ada Lovelace' email='ada@analytical.org' hw=True tier='Elevated'",
+      "focus_samples": 46,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "19ccbd07824e12687f36f98e591ebbac469c14ae0a92e7e043ebd5aef3e37bc0",
+      "included_quota_used_percent_before_request": 38
+    },
+    {
+      "task_id": "T4_appkit_dense",
+      "arm": "codex-cu-astra-ultrafast",
+      "repetition": 2,
+      "model": "gpt-6-astra",
+      "service_tier": "ultrafast",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": false,
+      "wall_s": 3.188,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.161,
+      "prompt_wall_s": 1.906,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cached_input_tokens": null,
+      "native_tool_calls": 0,
+      "native_tool_methods": [],
+      "canary_leaked": false,
+      "agent_status": "failed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": false,
+      "verify_summary": "selected=[] committed_ids=None misclicks=0 committed=False",
+      "focus_samples": 11,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "7714a6aab62b3ad0dbf45c5625243d206365d9a1d0e57c234d5f0956e50f811b",
+      "included_quota_used_percent_before_request": 38
+    },
+    {
+      "task_id": "T4_appkit_dense",
+      "arm": "codex-cu-sol-fast",
+      "repetition": 2,
+      "model": "gpt-6.1-sol",
+      "service_tier": "priority",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": false,
+      "wall_s": 21.959,
+      "focus_violations": 5,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 2.086,
+      "prompt_wall_s": 19.755,
+      "input_tokens": 185474,
+      "output_tokens": 262,
+      "cached_input_tokens": 120832,
+      "native_tool_calls": 5,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "selected=['B2', 'B5', 'B8'] committed_ids=['B2', 'B5', 'B8'] misclicks=0 committed=True",
+      "focus_samples": 67,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "42b32ad4d3542baa05b768da53c059c154e821312f159375f284d4d0ca8a6a4b",
+      "included_quota_used_percent_before_request": 38
+    },
+    {
+      "task_id": "T5a_mail_triage_draft",
+      "arm": "codex-cu-astra-ultrafast",
+      "repetition": 2,
+      "model": "gpt-6-astra",
+      "service_tier": "ultrafast",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": false,
+      "wall_s": 13.202,
+      "focus_violations": 4,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.952,
+      "prompt_wall_s": 10.948,
+      "input_tokens": 114728,
+      "output_tokens": 247,
+      "cached_input_tokens": 107520,
+      "native_tool_calls": 3,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "click",
+          "setValue",
+          "click",
+          "setValue",
+          "setValue",
+          "setValue",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "folder='VIP' search='Q4-audit' unread=True to='security@saari.co' subj='Q4 Audit Ready' draft_saved=True send_violation=False",
+      "focus_samples": 31,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "f23786f978cfe8322ab5538d7d90d196fa9879ba58742535e2712fba7f2932c0",
+      "included_quota_used_percent_before_request": 38
+    },
+    {
+      "task_id": "T5a_mail_triage_draft",
+      "arm": "codex-cu-sol-fast",
+      "repetition": 2,
+      "model": "gpt-6.1-sol",
+      "service_tier": "priority",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": false,
+      "wall_s": 14.52,
+      "focus_violations": 3,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "appserver_startup_s": 1.597,
+      "prompt_wall_s": 12.796,
+      "input_tokens": 121074,
+      "output_tokens": 243,
+      "cached_input_tokens": 110976,
+      "native_tool_calls": 3,
+      "native_tool_methods": [
+        [
+          "getApp"
+        ],
+        [
+          "click",
+          "setValue",
+          "click",
+          "setValue",
+          "setValue",
+          "setValue",
+          "getAXState"
+        ],
+        [
+          "click",
+          "getAXState"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "folder='VIP' search='Q4-audit' unread=True to='security@saari.co' subj='Q4 Audit Ready' draft_saved=True send_violation=False",
+      "focus_samples": 36,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "bb7fd6eef2217b1edbb07ec8047b5be750e87e25",
+      "measurement_run": "20261015T183237Z",
+      "private_final_screenshot_sha256": "f23786f978cfe8322ab5538d7d90d196fa9879ba58742535e2712fba7f2932c0",
+      "included_quota_used_percent_before_request": 39
+    },
+    {
+      "task_id": "T5b_1password_vault_item",
+      "arm": "codex-cu-sol-fast",
+      "repetition": 1,
+      "model": "gpt-6.1-sol",
+      "service_tier": "priority",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 14.057,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "native_observation_setup": {
+        "initial_response_client_only": true,
+        "canary_prefix_present": false,
+        "filtered_ax_passed_unchanged_guard": true,
+        "documentation_passed_unchanged_guard": true,
+        "input_actions_in_setup": 0
+      },
+      "appserver_startup_s": 2.978,
+      "prompt_wall_s": 10.889,
+      "input_tokens": 148542,
+      "output_tokens": 249,
+      "cached_input_tokens": 116736,
+      "native_tool_calls": 4,
+      "native_tool_methods": [
+        [],
+        [],
+        [
+          "setValue",
+          "setValue",
+          "setValue",
+          "click"
+        ],
+        [
+          "click"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "search='prod-db' title='Prod Postgres Readonly' user='ro_analyst' bio=True saved=True secret_unchanged=True leaked=False",
+      "focus_samples": 46,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "25878d6d9e54dea3889d852780d2491cb40e0bf0",
+      "measurement_run": "20261015T184104Z",
+      "private_final_screenshot_sha256": "c05b58867bca307da3dc233bcfe3452bf2dc276fe6452adf6763f130439dbaf1",
+      "included_quota_used_percent_before_request": 39
+    },
+    {
+      "task_id": "T5b_1password_vault_item",
+      "arm": "codex-cu-astra-ultrafast",
+      "repetition": 1,
+      "model": "gpt-6-astra",
+      "service_tier": "ultrafast",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 12.478,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "native_observation_setup": {
+        "initial_response_client_only": true,
+        "canary_prefix_present": false,
+        "filtered_ax_passed_unchanged_guard": true,
+        "documentation_passed_unchanged_guard": true,
+        "input_actions_in_setup": 0
+      },
+      "appserver_startup_s": 3.164,
+      "prompt_wall_s": 9.107,
+      "input_tokens": 172109,
+      "output_tokens": 304,
+      "cached_input_tokens": 152320,
+      "native_tool_calls": 5,
+      "native_tool_methods": [
+        [],
+        [],
+        [
+          "setValue",
+          "setValue",
+          "setValue",
+          "click"
+        ],
+        [
+          "click"
+        ],
+        [
+          "getScreenshot"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "search='prod-db' title='Prod Postgres Readonly' user='ro_analyst' bio=True saved=True secret_unchanged=True leaked=False",
+      "focus_samples": 39,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "25878d6d9e54dea3889d852780d2491cb40e0bf0",
+      "measurement_run": "20261015T184104Z",
+      "private_final_screenshot_sha256": "56ecc2eef643ecfad5e5717a465eab386ba90a9e25ad4468fe4ec713b69f40c8",
+      "included_quota_used_percent_before_request": 39
+    },
+    {
+      "task_id": "T5b_1password_vault_item",
+      "arm": "codex-cu-astra-ultrafast",
+      "repetition": 2,
+      "model": "gpt-6-astra",
+      "service_tier": "ultrafast",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 13.508,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "native_observation_setup": {
+        "initial_response_client_only": true,
+        "canary_prefix_present": false,
+        "filtered_ax_passed_unchanged_guard": true,
+        "documentation_passed_unchanged_guard": true,
+        "input_actions_in_setup": 0
+      },
+      "appserver_startup_s": 3.202,
+      "prompt_wall_s": 10.144,
+      "input_tokens": 172107,
+      "output_tokens": 301,
+      "cached_input_tokens": 160640,
+      "native_tool_calls": 5,
+      "native_tool_methods": [
+        [],
+        [],
+        [
+          "setValue",
+          "setValue",
+          "setValue",
+          "click"
+        ],
+        [
+          "click"
+        ],
+        [
+          "getScreenshot"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "search='prod-db' title='Prod Postgres Readonly' user='ro_analyst' bio=True saved=True secret_unchanged=True leaked=False",
+      "focus_samples": 42,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "25878d6d9e54dea3889d852780d2491cb40e0bf0",
+      "measurement_run": "20261015T184104Z",
+      "private_final_screenshot_sha256": "56ecc2eef643ecfad5e5717a465eab386ba90a9e25ad4468fe4ec713b69f40c8",
+      "included_quota_used_percent_before_request": 39
+    },
+    {
+      "task_id": "T5b_1password_vault_item",
+      "arm": "codex-cu-sol-fast",
+      "repetition": 2,
+      "model": "gpt-6.1-sol",
+      "service_tier": "priority",
+      "reasoning_effort": "low",
+      "status": "completed",
+      "passed": true,
+      "wall_s": 18.342,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "outer_turns": null,
+      "actions_dispatched": null,
+      "screenshots_sent": null,
+      "cost_usd": null,
+      "runtime": {
+        "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      },
+      "native_observation_setup": {
+        "initial_response_client_only": true,
+        "canary_prefix_present": false,
+        "filtered_ax_passed_unchanged_guard": true,
+        "documentation_passed_unchanged_guard": true,
+        "input_actions_in_setup": 0
+      },
+      "appserver_startup_s": 2.943,
+      "prompt_wall_s": 15.272,
+      "input_tokens": 181614,
+      "output_tokens": 294,
+      "cached_input_tokens": 170240,
+      "native_tool_calls": 5,
+      "native_tool_methods": [
+        [],
+        [],
+        [
+          "setValue",
+          "setValue",
+          "setValue",
+          "click"
+        ],
+        [
+          "click"
+        ],
+        [
+          "getScreenshot"
+        ]
+      ],
+      "canary_leaked": false,
+      "agent_status": "completed",
+      "non_native_tool_used": false,
+      "model_rerouted": false,
+      "task_goal_passed": true,
+      "verify_summary": "search='prod-db' title='Prod Postgres Readonly' user='ro_analyst' bio=True saved=True secret_unchanged=True leaked=False",
+      "focus_samples": 58,
+      "competing_fixture_seen": false,
+      "measurement_source_sha": "25878d6d9e54dea3889d852780d2491cb40e0bf0",
+      "measurement_run": "20261015T184104Z",
+      "private_final_screenshot_sha256": "30f967a1cba70907e6898d42a979419c03399e6a3264b7ebd56ee3258758a136",
+      "included_quota_used_percent_before_request": 39
+    }
+  ]
+}
