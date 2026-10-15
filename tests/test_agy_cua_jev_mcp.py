@@ -870,7 +870,7 @@ class StdioEndToEndTest(unittest.TestCase):
             server = jev.JevMcpServer(
                 env={
                     "AGY_CUA_DRIVER": hang_dispatch_driver,
-                    "AGY_CUA_DRIVER_TIMEOUT_MS": "400",
+                    "AGY_CUA_DRIVER_TIMEOUT_MS": "800",
                     "TYPESAFE_API_KEY": "test-key",
                 },
                 keychain_reader=lambda _: None,
@@ -2215,6 +2215,623 @@ class StdioEndToEndTest(unittest.TestCase):
                 self.assertEqual(call_args.get("query"), "Search")
                 self.assertEqual(call_args.get("max_depth"), 2)
 
+    def test_value_auto_candidates_secure_field_refusal_and_label_continuity(self):
+        obs = jev.extract_window_observation(
+            {
+                "structuredContent": {
+                    "pid": 77,
+                    "window_id": 500,
+                    "snapshot_id": "s00001234",
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "BenchApp — Form"},
+                        {"element_index": 3, "role": "AXTextField", "label": "Recipient", "value": "", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                        {"element_index": 4, "role": "AXTextField", "label": "Subject", "value": "", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                        # NSSecureTextField masked with \uf79a bullets without explicit secure subrole
+                        {"element_index": 5, "role": "AXTextField", "label": "API Token", "value": "\uf79a\uf79a\uf79a\uf79a", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                        {"element_index": 6, "role": "AXSecureTextField", "label": "Passcode", "value": "topsecret", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                        {"element_index": 7, "role": "AXButton", "label": "Apply", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                    ],
+                },
+                "content": [{"type": "text", "text": '- [0] AXWindow "BenchApp — Form"'}],
+            },
+            expected_pid=77,
+            expected_window_id=500,
+        )
+
+        # Root AXWindow fallback populates window_title when top-level window_title is omitted
+        self.assertEqual(obs["window_title"], "BenchApp — Form")
+        # Both [5] (\uf79a bullet mask) and [6] (AXSecureTextField) are marked secure and excluded from auto_candidates
+        self.assertEqual(obs["secure_element_ids"], {5, 6})
+        el_by_id = {e["element_index"]: e for e in obs["all_elements"]}
+        self.assertEqual(el_by_id[5]["state"], "enabled (secure)")
+        self.assertNotIn("value", el_by_id[5])
+        self.assertEqual(el_by_id[6]["state"], "enabled (secure)")
+        self.assertNotIn("value", el_by_id[6])
+
+        # Passing action_value generates sv.<idx>.<slug> set_value candidates for non-secure editable fields without leaking value in description
+        secret_like_val = "ops-quarterly-sync@example.com"
+        cands = jev.build_bound_candidates(None, obs, action_value=secret_like_val)
+        cand_by_id = {c["id"]: c for c in cands}
+        self.assertIn("sv.3.recipient", cand_by_id)
+        self.assertIn("sv.4.subject", cand_by_id)
+        self.assertNotIn("sv.5.api-token", cand_by_id)
+        self.assertNotIn("sv.6.passcode", cand_by_id)
+        self.assertNotIn("ax.5.api-token", cand_by_id)
+        self.assertNotIn("ax.6.passcode", cand_by_id)
+        self.assertEqual(cand_by_id["sv.3.recipient"]["tool"], "set_value")
+        self.assertEqual(cand_by_id["sv.3.recipient"]["arguments"]["value"], secret_like_val)
+        self.assertEqual(cand_by_id["sv.3.recipient"]["arguments"]["element_token"], "s00001234:3")
+        self.assertNotIn(secret_like_val, cand_by_id["sv.3.recipient"]["description"])
+
+        # Explicit candidate targeting a secure element is refused with secure_element_refused at Stage 2 and Stage 4
+        with self.assertRaisesRegex(ValueError, "secure_element_refused"):
+            jev.build_bound_candidates(
+                [{"id": "set.sec", "description": "Set API Token", "tool": "set_value", "element_index": 5, "value": "x"}],
+                obs,
+            )
+        with self.assertRaisesRegex(ValueError, "secure_element_refused"):
+            jev.authorize_candidate_dispatch(
+                {"kind": "selected", "selected_id": "tampered.sec", "pid": 77, "window_id": 500, "snapshot_id": "s00001234"},
+                [{
+                    "id": "tampered.sec",
+                    "description": "Click API Token",
+                    "pid": 77,
+                    "window_id": 500,
+                    "snapshot_id": "s00001234",
+                    "tool": "click",
+                    "arguments": {
+                        "pid": 77,
+                        "window_id": 500,
+                        "snapshot_id": "s00001234",
+                        "element_index": 5,
+                        "element_token": "s00001234:5",
+                        "delivery_mode": "background",
+                    },
+                }],
+                expected_pid=77,
+                expected_window_id=500,
+                current_snapshot_id="s00001234",
+                valid_element_indices=obs["indexed_element_ids"],
+                observation=obs,
+            )
+
+        # Cross-snapshot element_index re-indexing guard: if element [3] was "Recipient" pre-action but re-indexed to "Subject" post-action, reject with target_element_label_mismatch
+        reindexed_post = jev.extract_window_observation(
+            {
+                "structuredContent": {
+                    "pid": 77,
+                    "window_id": 500,
+                    "snapshot_id": "s00001235",
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "BenchApp — Form"},
+                        {"element_index": 3, "role": "AXTextField", "label": "Subject", "value": secret_like_val, "enabled": True, "parent_index": 0},
+                    ],
+                },
+                "content": [],
+            },
+            expected_pid=77,
+            expected_window_id=500,
+        )
+        changed, met, reason = jev.check_postcondition(
+            {"element_value_equals": secret_like_val},
+            obs,
+            reindexed_post,
+            target_element_index=3,
+        )
+        self.assertTrue(changed)
+        self.assertFalse(met)
+        self.assertIn("target_element_label_mismatch", reason)
+
+    def test_invoke_menu_and_consequential_commit_gate_across_actuators(self):
+        mail_obs = jev.extract_window_observation(
+            {
+                "structuredContent": {
+                    "pid": 501,
+                    "window_id": 2001,
+                    "snapshot_id": "s0000aaaa",
+                    "app_name": "Mail",
+                    "window_title": "New Message",
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "New Message"},
+                        {"element_index": 10, "role": "AXButton", "label": "Send", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                        {"element_index": 11, "role": "AXButton", "label": "Delete", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                        {"element_index": 12, "role": "AXButton", "label": "Save Draft", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                    ],
+                },
+                "content": [{"type": "text", "text": '- [0] AXWindow "New Message"'}],
+            },
+            expected_pid=501,
+            expected_window_id=2001,
+        )
+        # Auto-candidates must filter out Send [10] and Delete [11] while keeping Save Draft [12]
+        auto_cands = jev.build_bound_candidates(None, mail_obs)
+        self.assertEqual([c["id"] for c in auto_cands], ["ax.12.save-draft"])
+
+        # Explicit click on Send -> mail_send_forbidden_by_safety_policy
+        with self.assertRaisesRegex(ValueError, "mail_send_forbidden_by_safety_policy"):
+            jev.build_bound_candidates(
+                [{"id": "c.send", "description": "Click Send", "tool": "click", "element_index": 10}],
+                mail_obs,
+            )
+        # Explicit click on Delete -> commit_action_forbidden_by_safety_policy
+        with self.assertRaisesRegex(ValueError, "commit_action_forbidden_by_safety_policy"):
+            jev.build_bound_candidates(
+                [{"id": "c.del", "description": "Click Delete", "tool": "click", "element_index": 11}],
+                mail_obs,
+            )
+        # Hotkey cmd+shift+d (Mail Send) and cmd+delete -> refused by commit gate
+        with self.assertRaisesRegex(ValueError, "mail_send_forbidden_by_safety_policy"):
+            jev.build_bound_candidates(
+                [{"id": "hk.send", "description": "Press Send shortcut", "tool": "hotkey", "keys": ["cmd", "shift", "d"]}],
+                mail_obs,
+            )
+        with self.assertRaisesRegex(ValueError, "commit_action_forbidden_by_safety_policy"):
+            jev.build_bound_candidates(
+                [{"id": "hk.del", "description": "Delete message shortcut", "tool": "hotkey", "keys": ["cmd", "delete"]}],
+                mail_obs,
+            )
+        # invoke_menu high-risk paths (Message > Send, Mailbox > Erase Deleted Items, Finder > Empty Trash) -> refused
+        with self.assertRaisesRegex(ValueError, "mail_send_forbidden_by_safety_policy"):
+            jev.build_bound_candidates(
+                [{"id": "m.send", "description": "Invoke Message > Send", "tool": "invoke_menu", "path": ["Message", "Send"]}],
+                mail_obs,
+            )
+        with self.assertRaisesRegex(ValueError, "commit_action_forbidden_by_safety_policy"):
+            jev.build_bound_candidates(
+                [{"id": "m.erase", "description": "Erase deleted items", "tool": "invoke_menu", "path": ["Mailbox", "Erase Deleted Items"]}],
+                mail_obs,
+            )
+        with self.assertRaisesRegex(ValueError, "commit_action_forbidden_by_safety_policy"):
+            jev.build_bound_candidates(
+                [{"id": "m.trash", "description": "Empty Trash", "tool": "invoke_menu", "path": ["Finder", "Empty Trash"]}],
+                mail_obs,
+            )
+        # invoke_menu invalid path validation
+        with self.assertRaisesRegex(ValueError, "missing_or_invalid_menu_path"):
+            jev.build_bound_candidates(
+                [{"id": "m.empty", "description": "Empty path", "tool": "invoke_menu", "path": []}],
+                mail_obs,
+            )
+
+        # Safe draft preparation (File > Save via invoke_menu and cmd+s via hotkey) is allowed and authorized in background
+        safe_cands = jev.build_bound_candidates(
+            [
+                {"id": "m.save", "description": "Invoke File > Save", "tool": "invoke_menu", "path": ["File", "Save"]},
+                {"id": "hk.save", "description": "Save draft shortcut", "tool": "hotkey", "keys": ["cmd", "s"]},
+            ],
+            mail_obs,
+        )
+        self.assertEqual(safe_cands[0]["arguments"]["path"], ["File", "Save"])
+        # cua-driver invoke_menu is additionalProperties=false over {pid, window_id, path, session}
+        self.assertEqual(set(safe_cands[0]["arguments"]), {"pid", "window_id", "path"})
+        self.assertEqual(safe_cands[1]["arguments"]["delivery_mode"], "background")
+        with self.assertRaisesRegex(ValueError, "unsupported_menu_arguments"):
+            jev.build_bound_candidates(
+                [{"id": "m.idx", "description": "Menu on element", "tool": "invoke_menu", "path": ["File", "Save"], "element_index": 12}],
+                mail_obs,
+            )
+        with self.assertRaisesRegex(ValueError, "missing_or_invalid_menu_path"):
+            jev.build_bound_candidates(
+                [{"id": "m.long", "description": "Too deep", "tool": "invoke_menu", "path": ["x"] * 17}],
+                mail_obs,
+            )
+        auth_menu = jev.authorize_candidate_dispatch(
+            {"kind": "selected", "selected_id": "m.save", "pid": 501, "window_id": 2001, "snapshot_id": "s0000aaaa"},
+            safe_cands,
+            expected_pid=501,
+            expected_window_id=2001,
+            current_snapshot_id="s0000aaaa",
+            valid_element_indices=mail_obs["indexed_element_ids"],
+            observation=mail_obs,
+        )
+        self.assertEqual(auth_menu["tool"], "invoke_menu")
+        self.assertEqual(auth_menu["arguments"]["path"], ["File", "Save"])
+
+        # Action-time (Stage 4) commit gate also catches a tampered candidate bypassing Stage 2
+        with self.assertRaisesRegex(ValueError, "mail_send_forbidden_by_safety_policy"):
+            jev.authorize_candidate_dispatch(
+                {"kind": "selected", "selected_id": "tampered.send", "pid": 501, "window_id": 2001, "snapshot_id": "s0000aaaa"},
+                [{
+                    "id": "tampered.send",
+                    "description": "Invoke Message > Send",
+                    "pid": 501,
+                    "window_id": 2001,
+                    "snapshot_id": "s0000aaaa",
+                    "tool": "invoke_menu",
+                    "arguments": {
+                        "pid": 501,
+                        "window_id": 2001,
+                        "path": ["Message", "Send"],
+                    },
+                }],
+                expected_pid=501,
+                expected_window_id=2001,
+                current_snapshot_id="s0000aaaa",
+                valid_element_indices=mail_obs["indexed_element_ids"],
+                observation=mail_obs,
+            )
+
+        # Stage 4 also refuses a tampered invoke_menu carrying driver-incompatible arguments
+        with self.assertRaisesRegex(ValueError, "unsupported_menu_arguments"):
+            jev.authorize_candidate_dispatch(
+                {"kind": "selected", "selected_id": "tampered.save", "pid": 501, "window_id": 2001, "snapshot_id": "s0000aaaa"},
+                [{
+                    "id": "tampered.save",
+                    "description": "Invoke File > Save",
+                    "pid": 501,
+                    "window_id": 2001,
+                    "snapshot_id": "s0000aaaa",
+                    "tool": "invoke_menu",
+                    "arguments": {"pid": 501, "window_id": 2001, "path": ["File", "Save"], "delivery_mode": "background"},
+                }],
+                expected_pid=501,
+                expected_window_id=2001,
+                current_snapshot_id="s0000aaaa",
+                valid_element_indices=mail_obs["indexed_element_ids"],
+                observation=mail_obs,
+            )
+
+        # Calculator Delete / Clear buttons must NOT be blocked by the commit gate
+        calc_obs = jev.extract_window_observation(
+            {
+                "structuredContent": {
+                    "pid": 42,
+                    "window_id": 100,
+                    "snapshot_id": "s0000ca1c",
+                    "app_name": "Calculator",
+                    "window_title": "Calculator",
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "Calculator"},
+                        {"element_index": 2, "role": "AXButton", "label": "Delete", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                        {"element_index": 3, "role": "AXButton", "label": "Clear", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                    ],
+                },
+                "content": [],
+            },
+            expected_pid=42,
+            expected_window_id=100,
+        )
+        calc_cands = jev.build_bound_candidates(None, calc_obs)
+        self.assertEqual([c["id"] for c in calc_cands], ["ax.2.delete", "ax.3.clear"])
+
+    def test_fast_session_cursor_init_and_chained_jev_batch_with_invoke_menu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            driver_script = os.path.join(tmp, "cua-driver-fast")
+            log_file = os.path.join(tmp, "fast-calls.jsonl")
+            with open(driver_script, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent(f"""\
+                    #!/usr/bin/env python3
+                    import json, sys
+                    snap_seq = 20
+                    recipient = ""
+                    saved = "unsaved"
+                    log_path = {log_file!r}
+                    for line in sys.stdin:
+                        msg = json.loads(line)
+                        if "id" not in msg:
+                            continue
+                        method = msg.get("method")
+                        if method == "initialize":
+                            # Advertise serverInfo.name == "cua-driver" to trigger fast session cursor init
+                            res = {{"protocolVersion": "2025-06-18", "capabilities": {{}}, "serverInfo": {{"name": "cua-driver"}}}}
+                        elif method == "tools/call":
+                            params = msg.get("params", {{}})
+                            name = params.get("name")
+                            args = params.get("arguments", {{}})
+                            with open(log_path, "a", encoding="utf-8") as lf:
+                                lf.write(json.dumps({{"name": name, "args": args}}) + "\\n")
+                            if name in ("start_session", "set_agent_cursor_enabled", "end_session"):
+                                res = {{"content": [{{"type": "text", "text": "ok"}}], "structuredContent": {{"ok": True}}}}
+                            elif name == "get_window_state":
+                                snap_seq += 1
+                                snap = f"s000000{{snap_seq}}"
+                                md = f'- [0] AXWindow "Draft"\\n  - AXStaticText = "{{saved}}"\\n  - [3] AXTextField (Recipient) = "{{recipient}}"'
+                                res = {{
+                                    "content": [{{"type": "text", "text": md}}],
+                                    "structuredContent": {{
+                                        "pid": args.get("pid", 88),
+                                        "window_id": args.get("window_id", 900),
+                                        "snapshot_id": snap,
+                                        "app_name": "BenchApp",
+                                        "window_title": "Draft",
+                                        "tree_markdown": md,
+                                        "elements": [
+                                            {{"element_index": 0, "role": "AXWindow", "label": "Draft"}},
+                                            {{"element_index": 1, "role": "AXStaticText", "label": saved, "value": saved, "parent_index": 0}},
+                                            {{"element_index": 3, "role": "AXTextField", "label": "Recipient", "value": recipient, "enabled": True, "parent_index": 0, "actions": ["AXPress"]}},
+                                        ],
+                                    }},
+                                }}
+                            elif name == "set_value":
+                                recipient = str(args.get("value", ""))
+                                res = {{"content": [{{"type": "text", "text": "value set"}}], "structuredContent": {{"ok": True}}}}
+                            elif name == "invoke_menu":
+                                extra = sorted(set(args) - {{"pid", "window_id", "path", "session"}})
+                                if extra:
+                                    res = {{"content": [{{"type": "text", "text": "additionalProperties not allowed: " + ",".join(extra)}}], "isError": True}}
+                                elif args.get("path") == ["File", "Save"]:
+                                    saved = "saved"
+                                    res = {{"content": [{{"type": "text", "text": "menu invoked"}}], "structuredContent": {{"ok": True}}}}
+                                else:
+                                    res = {{"content": [{{"type": "text", "text": "bad menu"}}], "isError": True}}
+                            else:
+                                res = {{"content": [{{"type": "text", "text": "ok"}}], "structuredContent": {{"ok": True}}}}
+                        else:
+                            res = {{}}
+                        print(json.dumps({{"jsonrpc": "2.0", "id": msg["id"], "result": res}}), flush=True)
+                """))
+            os.chmod(driver_script, os.stat(driver_script).st_mode | stat.S_IEXEC)
+
+            def fake_http(req, _t):
+                body = json.loads(req.data.decode("utf-8"))
+                opts = list(body.get("questions", {}).get("candidate", {}).get("criteria", {}).keys())
+                choice = "sv.3.recipient" if "sv.3.recipient" in opts else "menu.save"
+                rem_opts = [o for o in opts if o != choice]
+                probs = {choice: 0.97}
+                for o in rem_opts:
+                    probs[o] = round(0.03 / max(1, len(rem_opts)), 4)
+                return 200, json.dumps({
+                    "model": "jev-1.13.0",
+                    "answers": {
+                        "candidate": {
+                            "type": "choice",
+                            "choice": choice,
+                            "confidence": 0.97,
+                            "probabilities": probs,
+                        }
+                    },
+                    "usage": {"input_tokens": 40, "output_tokens": 6},
+                })
+
+            server = jev.JevMcpServer(
+                env={
+                    "AGY_CUA_DRIVER": driver_script,
+                    "TYPESAFE_API_KEY": "test-key",
+                    "AGY_CUA_SESSION_ID": "jev-fast-sess",
+                },
+                keychain_reader=lambda _: None,
+                http_post=fake_http,
+            )
+            try:
+                resp = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_batch",
+                        "arguments": {
+                            "pid": 88,
+                            "window_id": 900,
+                            "chain_observations": True,
+                            "allow_interstep_drift": True,
+                            "steps": [
+                                {
+                                    "goal": "Fill the Recipient field",
+                                    "value": "team@example.com",
+                                    "expected_postcondition": {"element_value_equals": "team@example.com"},
+                                },
+                                {
+                                    "goal": "Save draft via File > Save menu",
+                                    "candidates": [
+                                        {
+                                            "id": "menu.save",
+                                            "description": 'Invoke menu ["File", "Save"]',
+                                            "tool": "invoke_menu",
+                                            "path": ["File", "Save"],
+                                        }
+                                    ],
+                                    "expected_postcondition": {"static_text_equals": "saved"},
+                                },
+                            ],
+                        },
+                    },
+                })
+            finally:
+                server.close()
+
+            sc = resp["result"]["structuredContent"]
+            self.assertEqual(sc["status"], "verified")
+            self.assertTrue(sc["verified"])
+            self.assertTrue(sc["all_verified"])
+            self.assertEqual(sc["completed_count"], 2)
+            # Step 0 observed s00000021 -> post s00000022; Step 1 reused chained s00000022 -> post s00000023
+            self.assertEqual(sc["completed_steps"][0]["pre_snapshot_id"], "s00000021")
+            self.assertEqual(sc["completed_steps"][0]["post_snapshot_id"], "s00000022")
+            self.assertEqual(sc["completed_steps"][1]["pre_snapshot_id"], "s00000022")
+            self.assertEqual(sc["completed_steps"][1]["post_snapshot_id"], "s00000023")
+            self.assertEqual(sc["completed_steps"][1]["timings_ms"]["observe_ms"], 0.0)
+            self.assertTrue(sc["chain_observations_effective"])
+            self.assertEqual([s["observation_chained"] for s in sc["completed_steps"]], [False, True])
+
+            with open(log_file, "r", encoding="utf-8") as lf:
+                logged = [json.loads(line) for line in lf if line.strip()]
+            names = [c["name"] for c in logged]
+            # Fast session init called start_session and set_agent_cursor_enabled(enabled=False) on jev-fast-sess,
+            # and chain_observations=True reduced get_window_state calls for 2 steps from 4 to 3 (N+1).
+            self.assertEqual(
+                names,
+                [
+                    "start_session",
+                    "set_agent_cursor_enabled",
+                    "get_window_state",
+                    "set_value",
+                    "get_window_state",
+                    "invoke_menu",
+                    "get_window_state",
+                    "end_session",
+                ],
+            )
+            self.assertEqual(logged[0]["args"]["session"], "jev-fast-sess")
+            self.assertEqual(logged[1]["args"], {"session": "jev-fast-sess", "enabled": False})
+            menu_call = next(c for c in logged if c["name"] == "invoke_menu")
+            self.assertEqual(set(menu_call["args"]) - {"session"}, {"pid", "window_id", "path"})
+
+    def test_chain_observations_without_drift_opt_in_rereads_and_detects_external_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            driver_script = os.path.join(tmp, "cua-driver-drift")
+            log_file = os.path.join(tmp, "drift-calls.jsonl")
+            with open(driver_script, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent(f"""\
+                    #!/usr/bin/env python3
+                    import json, sys
+                    reads = 0
+                    recipient = ""
+                    log_path = {log_file!r}
+                    for line in sys.stdin:
+                        msg = json.loads(line)
+                        if "id" not in msg:
+                            continue
+                        method = msg.get("method")
+                        if method == "initialize":
+                            res = {{"protocolVersion": "2025-06-18", "capabilities": {{}}, "serverInfo": {{"name": "fake"}}}}
+                        elif method == "tools/call":
+                            params = msg.get("params", {{}})
+                            name = params.get("name")
+                            args = params.get("arguments", {{}})
+                            with open(log_path, "a", encoding="utf-8") as lf:
+                                lf.write(json.dumps({{"name": name}}) + "\\n")
+                            if name == "get_window_state":
+                                reads += 1
+                                # External drift lands after step 0's post-observation (read #2).
+                                banner = "external change" if reads >= 3 else "idle"
+                                snap = f"s0000{{reads:04d}}"
+                                md = f'- [0] AXWindow "Draft"\\n  - AXStaticText = "{{banner}}"\\n  - [3] AXTextField (Recipient) = "{{recipient}}"'
+                                res = {{
+                                    "content": [{{"type": "text", "text": md}}],
+                                    "structuredContent": {{
+                                        "pid": 88, "window_id": 900, "snapshot_id": snap, "tree_markdown": md,
+                                        "app_name": "BenchApp", "window_title": "Draft",
+                                        "elements": [
+                                            {{"element_index": 0, "role": "AXWindow", "label": "Draft"}},
+                                            {{"element_index": 1, "role": "AXStaticText", "label": banner, "value": banner, "parent_index": 0}},
+                                            {{"element_index": 3, "role": "AXTextField", "label": "Recipient", "value": recipient, "enabled": True, "parent_index": 0, "actions": ["AXPress"]}},
+                                        ],
+                                    }},
+                                }}
+                            elif name == "set_value":
+                                recipient = str(args.get("value", ""))
+                                res = {{"content": [{{"type": "text", "text": "value set"}}], "structuredContent": {{"ok": True}}}}
+                            else:
+                                res = {{"content": [{{"type": "text", "text": "ok"}}], "structuredContent": {{"ok": True}}}}
+                        else:
+                            res = {{}}
+                        print(json.dumps({{"jsonrpc": "2.0", "id": msg["id"], "result": res}}), flush=True)
+                """))
+            os.chmod(driver_script, os.stat(driver_script).st_mode | stat.S_IEXEC)
+
+            def fake_http(req, _t):
+                body = json.loads(req.data.decode("utf-8"))
+                opts = list(body.get("questions", {}).get("candidate", {}).get("criteria", {}).keys())
+                choice = opts[0]
+                return 200, json.dumps({
+                    "model": "jev-1.13.0",
+                    "answers": {"candidate": {"type": "choice", "choice": choice, "confidence": 0.99,
+                                              "probabilities": {o: (0.99 if o == choice else 0.01) for o in opts}}},
+                    "usage": {"input_tokens": 10, "output_tokens": 2},
+                })
+
+            server = jev.JevMcpServer(
+                env={"AGY_CUA_DRIVER": driver_script, "TYPESAFE_API_KEY": "test-key"},
+                keychain_reader=lambda _: None,
+                http_post=fake_http,
+            )
+            try:
+                resp = server.handle_message({
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "jev_sequence", "arguments": {
+                        "pid": 88, "window_id": 900,
+                        "steps": [
+                            {"goal": "Fill recipient", "value": "a@example.com",
+                             "expected_postcondition": {"element_value_equals": "a@example.com"}},
+                            {"goal": "Fill recipient again", "value": "b@example.com",
+                             "expected_postcondition": {"element_value_equals": "b@example.com"}},
+                        ],
+                    }},
+                })
+            finally:
+                server.close()
+
+            sc = resp["result"]["structuredContent"]
+            # jev_sequence defaults chain_observations=true, but drift protection stays on, so chaining is not honoured.
+            self.assertFalse(sc["chain_observations_effective"])
+            self.assertFalse(sc["verified"])
+            self.assertEqual(sc["completed_count"], 1)
+            self.assertEqual(sc["failed_step"]["status"], "stale_snapshot")
+            self.assertIn("interstep_state_drift", sc["failed_step"]["reason"])
+            self.assertFalse(sc["failed_step"]["observation_chained"])
+            with open(log_file, "r", encoding="utf-8") as lf:
+                names = [json.loads(line)["name"] for line in lf if line.strip()]
+            # Fresh pre-read for step 1 happened, and the second set_value was never dispatched.
+            self.assertEqual(names.count("get_window_state"), 3)
+            self.assertEqual(names.count("set_value"), 1)
+
+    def test_commit_gate_closes_modifier_activation_coordinate_and_messages_bypasses(self):
+        def obs(app, title, elements):
+            return jev.extract_window_observation(
+                {"structuredContent": {"pid": 7, "window_id": 70, "snapshot_id": "s0000bbbb",
+                                       "app_name": app, "window_title": title, "elements": elements},
+                 "content": []},
+                expected_pid=7, expected_window_id=70,
+            )
+
+        mail = obs("Mail", "New Message", [
+            {"element_index": 0, "role": "AXWindow", "label": "New Message"},
+            {"element_index": 10, "role": "AXButton", "label": "Send", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+            {"element_index": 20, "role": "AXTextArea", "label": "Body", "enabled": True, "parent_index": 0},
+            {"element_index": 30, "role": "AXButton", "label": "Inbox row", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+        ])
+        build = jev.build_bound_candidates
+
+        # press_key modifiers are a chord: cmd+shift+d / cmd+return / cmd+delete must be refused like hotkey.
+        for mods, key in ((["cmd", "shift"], "d"), (["command"], "return"), (["cmd"], "backspace")):
+            with self.assertRaisesRegex(ValueError, "commit_action_forbidden_by_safety_policy"):
+                build([{"id": "pk", "description": "Press key", "tool": "press_key", "key": key, "modifiers": mods}], mail)
+        # Activation key focused on the Send button presses it.
+        for tool, extra in (("press_key", {"key": "space"}), ("hotkey", {"keys": ["return"]})):
+            with self.assertRaisesRegex(ValueError, "mail_send_forbidden_by_safety_policy"):
+                build([{"id": "act", "description": "Press key", "tool": tool, "element_index": 10, **extra}], mail)
+        # Bare Delete outside a text input trashes the selection in Mail; inside the body it is text editing.
+        with self.assertRaisesRegex(ValueError, "commit_action_forbidden_by_safety_policy"):
+            build([{"id": "del", "description": "Press key", "tool": "press_key", "key": "delete", "element_index": 30}], mail)
+        with self.assertRaisesRegex(ValueError, "commit_action_forbidden_by_safety_policy"):
+            build([{"id": "del2", "description": "Press key", "tool": "press_key", "key": "delete"}], mail)
+        ok = build([{"id": "del3", "description": "Erase a char", "tool": "press_key", "key": "delete", "element_index": 20}], mail)
+        self.assertEqual(ok[0]["arguments"]["key"], "delete")
+        # Coordinate clicks cannot be label-gated in sensitive apps (caller description is not authority).
+        with self.assertRaisesRegex(ValueError, "cannot be label-gated"):
+            build([{"id": "xy", "description": "Click somewhere harmless", "tool": "click", "x": 10, "y": 10}], mail)
+        with self.assertRaisesRegex(ValueError, "cannot be label-gated"):
+            jev.authorize_candidate_dispatch(
+                {"kind": "selected", "selected_id": "xy", "pid": 7, "window_id": 70, "snapshot_id": "s0000bbbb"},
+                [{"id": "xy", "description": "Click", "pid": 7, "window_id": 70, "snapshot_id": "s0000bbbb", "tool": "click",
+                  "arguments": {"pid": 7, "window_id": 70, "x": 10, "y": 10}}],
+                expected_pid=7, expected_window_id=70, current_snapshot_id="s0000bbbb",
+                valid_element_indices=mail["indexed_element_ids"], observation=mail,
+            )
+        # Plain typing / tab in Mail stays allowed.
+        ok = build([{"id": "tab", "description": "Next field", "tool": "press_key", "key": "tab", "element_index": 20}], mail)
+        self.assertEqual(ok[0]["tool"], "press_key")
+
+        messages = obs("Messages", "Alex", [
+            {"element_index": 0, "role": "AXWindow", "label": "Alex"},
+            {"element_index": 5, "role": "AXTextField", "label": "iMessage", "enabled": True, "parent_index": 0},
+        ])
+        with self.assertRaisesRegex(ValueError, "mail_send_forbidden_by_safety_policy"):
+            build([{"id": "ret", "description": "Press key", "tool": "press_key", "key": "return", "element_index": 5}], messages)
+        with self.assertRaisesRegex(ValueError, "mail_send_forbidden_by_safety_policy"):
+            build([{"id": "nl", "description": "Type", "tool": "type_text", "text": "hi\n", "element_index": 5}], messages)
+        ok = build([{"id": "tt", "description": "Type", "tool": "type_text", "text": "hi", "element_index": 5}], messages)
+        self.assertEqual(ok[0]["tool"], "type_text")
+
+        # Non-sensitive apps keep coordinate clicks and plain return.
+        calc = obs("Calculator", "Calculator", [{"element_index": 0, "role": "AXWindow", "label": "Calculator"}])
+        ok = build([
+            {"id": "xy", "description": "Click", "tool": "click", "x": 5, "y": 5},
+            {"id": "ret", "description": "Equals", "tool": "press_key", "key": "return"},
+        ], calc)
+        self.assertEqual([c["id"] for c in ok], ["xy", "ret"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -80,6 +80,7 @@ ALLOWED_BACKGROUND_TOOLS = frozenset({
     "hotkey",
     "set_value",
     "scroll",
+    "invoke_menu",
 })
 
 FORBIDDEN_TOOLS = frozenset({
@@ -105,6 +106,7 @@ ACTIONABLE_AX_ROLES = frozenset({
     "AXCheckBox",
     "AXPopUpButton",
     "AXTextField",
+    "AXSecureTextField",
     "AXTextArea",
     "AXSearchField",
     "AXComboBox",
@@ -926,6 +928,205 @@ EXPLICIT_TARGET_CONTAINER_ROLES = frozenset({
 })
 
 
+# cua-driver invoke_menu schema: {pid, window_id, path[1..16], session}, additionalProperties=false.
+INVOKE_MENU_ARG_KEYS = frozenset({"pid", "window_id", "path", "session"})
+INVOKE_MENU_MAX_PATH = 16
+
+_KEY_ALIASES = {
+    "command": "cmd",
+    "meta": "cmd",
+    "super": "cmd",
+    "backspace": "delete",
+    "forwarddelete": "delete",
+    "forward_delete": "delete",
+    "opt": "option",
+    "alt": "option",
+    "control": "ctrl",
+    "kp_enter": "enter",
+    "keypad_enter": "enter",
+}
+# Keys that activate a focused button/control (AXPress equivalent) when delivered to an element.
+_ACTIVATION_KEYS = frozenset({"return", "enter", "space"})
+
+
+def _target_role(observation: Mapping[str, Any] | None, args: Mapping[str, Any]) -> str | None:
+    """Resolve the AX role addressed by args.element_index / element_token in observation, if any."""
+    idx = args.get("element_index")
+    if idx is None:
+        tok = args.get("element_token")
+        if isinstance(tok, str) and ":" in tok and tok.rsplit(":", 1)[1].isdigit():
+            idx = int(tok.rsplit(":", 1)[1])
+    if not isinstance(idx, int) or isinstance(idx, bool) or not observation:
+        return None
+    for key in ("all_elements", "elements"):
+        for el in observation.get(key) or []:
+            if isinstance(el, Mapping) and el.get("element_index") == idx:
+                return str(el.get("role") or "") or None
+    return None
+
+
+def _check_commit_safety_gate(
+    observation: Mapping[str, Any] | None,
+    label_or_desc: str,
+    tool: str,
+    args: Mapping[str, Any],
+) -> str | None:
+    """Return refusal reason if an action attempts a consequential commit (Send, Delete, Empty Trash) without human gate."""
+    app_name = str((observation or {}).get("app_name") or "").lower()
+    win_title = str((observation or {}).get("window_title") or "").lower()
+    is_mail_ctx = "mail" in app_name or "mail" in win_title
+    is_messages_ctx = app_name == "messages" or (not app_name and "messages" in win_title)
+    is_destructive_app_ctx = is_mail_ctx or any(
+        k in app_name or k in win_title for k in ("finder", "1password", "messages")
+    )
+    norm_desc = label_or_desc.strip().lower()
+
+    if tool == "invoke_menu":
+        raw_path = args.get("path")
+        if isinstance(raw_path, list):
+            segments = [str(p).strip().lower() for p in raw_path if isinstance(p, str)]
+            joined = " > ".join(segments)
+            for seg in segments:
+                if re.search(r"\bsend(?:\s+(?:message|email|mail|again|now))?\b", seg) and "draft" not in seg:
+                    return (
+                        "commit_action_forbidden_by_safety_policy (mail_send_forbidden_by_safety_policy): "
+                        f"invoke_menu path {raw_path!r} attempts Send without WAITING_FOR_HUMAN confirmation"
+                    )
+            if re.search(
+                r"\b(?:delete|erase\s+deleted|empty\s+trash|move\s+to\s+trash)\b",
+                joined,
+            ):
+                return (
+                    "commit_action_forbidden_by_safety_policy: "
+                    f"invoke_menu path {raw_path!r} attempts destructive delete/trash without WAITING_FOR_HUMAN confirmation"
+                )
+
+    is_element_addressed = "element_index" in args or "element_token" in args
+
+    if tool in {"hotkey", "press_key"}:
+        if tool == "hotkey":
+            raw_key_list = args.get("keys") or []
+        else:
+            # press_key accepts `modifiers` (and legacy `modifier`) alongside `key`; treat the
+            # combined chord exactly like a hotkey so modifiers cannot bypass the gate.
+            raw_mods = args.get("modifiers")
+            if raw_mods is None:
+                raw_mods = args.get("modifier")
+            if isinstance(raw_mods, str):
+                raw_mods = [raw_mods]
+            raw_key_list = list(raw_mods or []) + [args.get("key")]
+        if not isinstance(raw_key_list, (list, tuple)):
+            raw_key_list = [raw_key_list]
+        raw_keys = [str(k).strip().lower() for k in raw_key_list if k is not None]
+        norm_keys = {_KEY_ALIASES.get(k, k) for k in raw_keys}
+        if (
+            is_element_addressed
+            and norm_keys & _ACTIVATION_KEYS
+            and "draft" not in norm_desc
+            and (
+                (is_mail_ctx and re.search(r"\bsend\b", norm_desc))
+                or re.search(r"\bsend\s+(?:message|email|mail)(?:\s+now)?\b", norm_desc)
+            )
+        ):
+            return (
+                "commit_action_forbidden_by_safety_policy (mail_send_forbidden_by_safety_policy): "
+                f"{tool} activation key on {label_or_desc!r} targets Send control without WAITING_FOR_HUMAN confirmation"
+            )
+        if (
+            is_element_addressed
+            and norm_keys & _ACTIVATION_KEYS
+            and is_destructive_app_ctx
+            and re.search(r"\b(?:delete|empty\s+trash|erase|move\s+to\s+trash)\b", norm_desc)
+        ):
+            return (
+                "commit_action_forbidden_by_safety_policy: "
+                f"{tool} activation key on {label_or_desc!r} targets destructive delete/trash control without WAITING_FOR_HUMAN confirmation"
+            )
+        if "cmd" in norm_keys and "shift" in norm_keys and "d" in norm_keys:
+            return (
+                "commit_action_forbidden_by_safety_policy (mail_send_forbidden_by_safety_policy): "
+                "hotkey cmd+shift+d attempts Mail Send without WAITING_FOR_HUMAN confirmation"
+            )
+        if (
+            "cmd" in norm_keys
+            and ("return" in norm_keys or "enter" in norm_keys)
+            and (is_mail_ctx or "send" in norm_desc)
+        ):
+            return (
+                "commit_action_forbidden_by_safety_policy (mail_send_forbidden_by_safety_policy): "
+                "hotkey cmd+return attempts Send without WAITING_FOR_HUMAN confirmation"
+            )
+        if "cmd" in norm_keys and "delete" in norm_keys:
+            return (
+                "commit_action_forbidden_by_safety_policy: "
+                "hotkey cmd+delete / cmd+shift+delete attempts destructive delete/trash without WAITING_FOR_HUMAN confirmation"
+            )
+        if is_messages_ctx and norm_keys & {"return", "enter"}:
+            return (
+                "commit_action_forbidden_by_safety_policy (mail_send_forbidden_by_safety_policy): "
+                f"{tool} return/enter in Messages sends the conversation without WAITING_FOR_HUMAN confirmation"
+            )
+        if (
+            is_destructive_app_ctx
+            and "delete" in norm_keys
+            and _target_role(observation, args) not in TEXT_INPUT_AX_ROLES
+        ):
+            return (
+                "commit_action_forbidden_by_safety_policy: "
+                f"{tool} delete key outside a text input in {app_name or win_title!r} may trash the selection "
+                "without WAITING_FOR_HUMAN confirmation"
+            )
+
+    if tool == "type_text" and is_messages_ctx:
+        text_val = args.get("text")
+        if isinstance(text_val, str) and ("\n" in text_val or "\r" in text_val):
+            return (
+                "commit_action_forbidden_by_safety_policy (mail_send_forbidden_by_safety_policy): "
+                "type_text newline in Messages sends the conversation without WAITING_FOR_HUMAN confirmation"
+            )
+
+    if tool in {"click", "double_click"}:
+        if is_destructive_app_ctx and not is_element_addressed:
+            # Coordinate clicks have no AX label to gate on; the caller-supplied description is not
+            # authority, so refuse them where Send/Delete controls may sit under the pointer.
+            return (
+                "commit_action_forbidden_by_safety_policy: "
+                f"coordinate {tool} in {app_name or win_title!r} cannot be label-gated; use an element_index target"
+            )
+        if "draft" not in norm_desc:
+            if (
+                is_mail_ctx and re.search(r"\bsend(?:\s+(?:message|email|mail)(?:\s+now)?)?\b", norm_desc)
+            ) or re.search(r"\bsend\s+(?:message|email|mail)(?:\s+now)?\b", norm_desc):
+                return (
+                    "commit_action_forbidden_by_safety_policy (mail_send_forbidden_by_safety_policy): "
+                    f"action {label_or_desc!r} targets Send control without WAITING_FOR_HUMAN confirmation"
+                )
+        if re.search(
+            r"\b(?:empty\s+trash|erase\s+deleted(?:\s+items)?|delete\s+(?:message|messages|mail|mailbox|item|items|account|vault|forever|immediately)|move\s+to\s+trash)\b",
+            norm_desc,
+        ) or (
+            is_destructive_app_ctx
+            and "calculator" not in app_name
+            and "calculator" not in win_title
+            and re.search(r"\b(?:delete|empty\s+trash|erase)\b", norm_desc)
+        ):
+            return (
+                "commit_action_forbidden_by_safety_policy: "
+                f"action {label_or_desc!r} targets destructive delete/trash control without WAITING_FOR_HUMAN confirmation"
+            )
+
+    return None
+
+
+def _is_forbidden_mail_send(
+    observation: Mapping[str, Any] | None,
+    label_or_desc: str,
+    tool: str,
+    args: Mapping[str, Any],
+) -> bool:
+    return _check_commit_safety_gate(observation, label_or_desc, tool, args) is not None
+
+
 def extract_window_observation(
     driver_result: Mapping[str, Any],
     *,
@@ -965,6 +1166,16 @@ def extract_window_observation(
         if isinstance(item, Mapping) and isinstance(item.get("element_index"), int):
             by_index[item["element_index"]] = item
 
+    win_root_label = ""
+    for raw_el in raw_elements:
+        if isinstance(raw_el, Mapping) and str(raw_el.get("role") or "") in WINDOW_ROOT_ROLES and raw_el.get("label"):
+            win_root_label = str(raw_el.get("label") or "")
+            break
+    obs_context = {
+        "app_name": sc.get("app_name"),
+        "window_title": sc.get("window_title") or win_root_label or None,
+    }
+
     compact_elements: list[dict[str, Any]] = []
     explicit_target_elements: list[dict[str, Any]] = []
 
@@ -984,12 +1195,17 @@ def extract_window_observation(
         )
         label = str(raw_label or "").replace("\u200e", "").strip()
         subrole = str(el.get("subrole") or "").strip()
-        is_secure = "secure" in role.lower() or "secure" in subrole.lower()
-        value = (
-            None
-            if is_secure or el.get("value") is None
+        raw_val_str = (
+            ""
+            if el.get("value") is None
             else str(el.get("value") or "").replace("\u200e", "").strip()
         )
+        is_secure = (
+            "secure" in role.lower()
+            or "secure" in subrole.lower()
+            or "\uf79a" in raw_val_str
+        )
+        value = None if (is_secure or el.get("value") is None) else raw_val_str
         actions, has_explicit_actions = _normalized_actions(el)
         supports_press = _supports_press_action(actions)
 
@@ -1000,17 +1216,17 @@ def extract_window_observation(
         ):
             continue
         can_auto_click = (not is_secure) and _element_can_auto_click(role, actions, has_explicit_actions)
-        can_click = _element_can_explicit_click(role, actions, has_explicit_actions)
-        can_set_value = role in VALUE_SETTABLE_AX_ROLES
-        has_label_or_value = bool(label or value or role in TEXT_INPUT_AX_ROLES)
+        can_click = (not is_secure) and _element_can_explicit_click(role, actions, has_explicit_actions)
+        can_set_value = (not is_secure) and (role in VALUE_SETTABLE_AX_ROLES)
+        has_label_or_value = bool(label or value or is_secure or role in TEXT_INPUT_AX_ROLES)
         is_actionable_control = (
             has_label_or_value
             and (role in ACTIONABLE_AX_ROLES or supports_press)
-            and (can_click or can_set_value)
+            and (can_click or can_set_value or is_secure)
         )
 
         is_text_input = role in TEXT_INPUT_AX_ROLES or is_secure
-        state_str = "enabled (has_value)" if value else "enabled"
+        state_str = "enabled (secure)" if is_secure else ("enabled (has_value)" if value else "enabled")
         display_label = label or (value if not is_text_input else "") or role
         depth, in_toolbar = _element_depth_and_toolbar(idx, el, by_index, md_depth, md_toolbar_ids)
 
@@ -1045,12 +1261,16 @@ def extract_window_observation(
     for compact_el in prioritized_elements:
         if not compact_el.get("can_auto_click", compact_el.get("can_click", True)):
             continue
+        display_label = compact_el["label"]
+        if _check_commit_safety_gate(
+            obs_context, display_label, "click", {"element_index": compact_el["element_index"]}
+        ) is not None:
+            continue
         total_click_candidates += 1
         if len(auto_candidates) >= MAX_AUTO_CANDIDATES:
             continue
         idx = compact_el["element_index"]
         role = compact_el["role"]
-        display_label = compact_el["label"]
         base_id = f"ax.{idx}.{_slug(display_label)}"
         cid = base_id
         suffix = 2
@@ -1094,16 +1314,19 @@ def extract_window_observation(
         "pid": expected_pid,
         "window_id": expected_window_id,
         "snapshot_id": snapshot_id,
-        "app_name": sc.get("app_name"),
-        "window_title": sc.get("window_title"),
+        "app_name": obs_context["app_name"],
+        "window_title": obs_context["window_title"],
         "elements_complete": elements_complete,
         "truncated": driver_truncated,
         "total_actionable_elements": total_actionable_elements,
         "omitted_elements_count": omitted_elements_count,
         "omitted_candidates_count": omitted_candidates_count,
+        "elements_omitted": omitted_elements_count,
+        "candidates_omitted": omitted_candidates_count,
         "observation_truncated": observation_truncated,
         "static_texts": static_texts,
         "indexed_element_ids": {e["element_index"] for e in all_elements},
+        "secure_element_ids": {e["element_index"] for e in all_elements if "secure" in str(e.get("state") or "")},
         "elements": bounded_elements,
         "all_elements": all_elements,
         "auto_candidates": auto_candidates,
@@ -1113,12 +1336,15 @@ def extract_window_observation(
 def build_bound_candidates(
     raw_candidates: list[Mapping[str, Any]] | None,
     observation: Mapping[str, Any],
+    *,
+    action_value: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build or validate caller-supplied executable candidates bound to (pid, window_id, snapshot_id)."""
     pid = observation["pid"]
     window_id = observation["window_id"]
     snapshot_id = observation["snapshot_id"]
     valid_indices: set[int] = observation["indexed_element_ids"]
+    secure_indices: set[int] = set(observation.get("secure_element_ids") or set())
     source_elements = (
         observation.get("all_elements")
         if "all_elements" in observation
@@ -1131,7 +1357,65 @@ def build_bound_candidates(
     }
 
     if not raw_candidates:
-        auto = list(observation["auto_candidates"])
+        if action_value is not None:
+            if not isinstance(action_value, str):
+                raise ValueError("value must be a string when auto-building set_value candidates")
+            sv_candidates: list[dict[str, Any]] = []
+            used_sv_ids: set[str] = set()
+            for el in (observation.get("elements") or []):
+                if not isinstance(el, Mapping):
+                    continue
+                idx = el.get("element_index")
+                role = str(el.get("role") or "")
+                state = str(el.get("state") or "")
+                label = str(el.get("label") or role)
+                if (
+                    not isinstance(idx, int)
+                    or idx in secure_indices
+                    or "secure" in state
+                    or role not in VALUE_SETTABLE_AX_ROLES
+                ):
+                    continue
+                if len(sv_candidates) >= MAX_AUTO_CANDIDATES:
+                    break
+                base_id = f"sv.{idx}.{_slug(label)}"
+                cid = base_id
+                suffix = 2
+                while cid in used_sv_ids:
+                    cid = f"{base_id}-{suffix}"
+                    suffix += 1
+                used_sv_ids.add(cid)
+                sv_candidates.append({
+                    "id": cid,
+                    "description": f"Set [{idx}] {role} {json.dumps(label, ensure_ascii=False)} to value",
+                    "pid": pid,
+                    "window_id": window_id,
+                    "snapshot_id": snapshot_id,
+                    "tool": "set_value",
+                    "arguments": {
+                        "pid": pid,
+                        "window_id": window_id,
+                        "snapshot_id": snapshot_id,
+                        "element_index": idx,
+                        "element_token": f"{snapshot_id}:{idx}",
+                        "value": action_value,
+                    },
+                })
+            if not sv_candidates:
+                raise ValueError("no value-settable AX elements found in window to build set_value candidates")
+            return sv_candidates
+
+        auto = [
+            c
+            for c in observation["auto_candidates"]
+            if _check_commit_safety_gate(
+                observation,
+                str(c.get("description") or ""),
+                str(c.get("tool") or "click"),
+                c.get("arguments") or {},
+            )
+            is None
+        ]
         if not auto:
             raise ValueError("no actionable AX elements found in window to build candidates")
         return auto
@@ -1179,7 +1463,7 @@ def build_bound_candidates(
 
         raw_args = item.get("arguments")
         if raw_args is None:
-            # Shorthand candidate: {id, description, element_index, tool?, text?, key?, keys?, value?, direction?, ...}
+            # Shorthand candidate: {id, description, element_index, tool?, text?, key?, keys?, value?, path?, direction?, ...}
             raw_args = {}
             for k in (
                 "element_index",
@@ -1190,6 +1474,7 @@ def build_bound_candidates(
                 "modifiers",
                 "modifier",
                 "value",
+                "path",
                 "action",
                 "button",
                 "direction",
@@ -1228,6 +1513,29 @@ def build_bound_candidates(
         if tool in {"click", "double_click", "right_click", "type_text", "press_key", "hotkey", "scroll"}:
             args_dict.setdefault("delivery_mode", "background")
 
+        if tool == "invoke_menu":
+            menu_path = args_dict.get("path")
+            if (
+                not isinstance(menu_path, list)
+                or len(menu_path) < 1
+                or len(menu_path) > INVOKE_MENU_MAX_PATH
+                or not all(isinstance(p, str) and p.strip() for p in menu_path)
+            ):
+                raise ValueError(
+                    f"missing_or_invalid_menu_path: candidate {cid!r} for invoke_menu requires a non-empty path list of strings"
+                )
+            # cua-driver invoke_menu accepts only {pid, window_id, path, session} (additionalProperties=false)
+            # and is always window-scoped AX menu resolution; drop the validated background defaults and
+            # refuse element / coordinate targets that the driver would reject.
+            args_dict.pop("delivery_mode", None)
+            args_dict.pop("scope", None)
+            extra = sorted(set(args_dict) - INVOKE_MENU_ARG_KEYS)
+            if extra:
+                raise ValueError(
+                    f"unsupported_menu_arguments: candidate {cid!r} for invoke_menu cannot pass {extra!r}"
+                )
+            args_dict["path"] = [p.strip() for p in menu_path]
+
         if "element_token" in args_dict:
             tok = args_dict["element_token"]
             if not isinstance(tok, str) or ":" not in tok:
@@ -1249,6 +1557,8 @@ def build_bound_candidates(
             if not isinstance(el_idx, int) or isinstance(el_idx, bool) or el_idx not in valid_indices:
                 raise ValueError(f"unknown_element_index: candidate {cid!r} references element_index={el_idx!r} not in snapshot {snapshot_id}")
             target_el = el_by_idx.get(el_idx)
+            if el_idx in secure_indices or (target_el is not None and "secure" in str(target_el.get("state") or "")):
+                raise ValueError(f"secure_element_refused: candidate {cid!r} cannot target secure element_index={el_idx}")
             if target_el is not None:
                 target_role = str(target_el.get("role") or "").strip()
                 if tool == "set_value" and target_role and target_role not in VALUE_SETTABLE_AX_ROLES:
@@ -1267,6 +1577,9 @@ def build_bound_candidates(
                     raise ValueError(
                         f"unsupported_element_action: candidate {cid!r} cannot click role {target_role!r} without AXPress support"
                     )
+                el_gate = _check_commit_safety_gate(observation, str(target_el.get("label") or ""), tool, args_dict)
+                if el_gate is not None:
+                    raise ValueError(f"{el_gate} (candidate={cid!r})")
             args_dict["snapshot_id"] = snapshot_id
             args_dict["element_token"] = f"{snapshot_id}:{el_idx}"
         elif tool == "set_value":
@@ -1276,6 +1589,10 @@ def build_bound_candidates(
 
         if tool == "scroll" and "direction" not in args_dict:
             raise ValueError(f"missing_scroll_direction: candidate {cid!r} for scroll requires direction")
+
+        desc_gate = _check_commit_safety_gate(observation, desc, tool, args_dict)
+        if desc_gate is not None:
+            raise ValueError(f"{desc_gate} (candidate={cid!r})")
 
         bound.append({
             "id": cid,
@@ -1297,6 +1614,7 @@ def authorize_candidate_dispatch(
     expected_window_id: int,
     current_snapshot_id: str,
     valid_element_indices: set[int],
+    observation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate scope, freshness, background delivery, and selected candidate before Driver dispatch."""
     if decision.get("kind") != "selected":
@@ -1322,7 +1640,7 @@ def authorize_candidate_dispatch(
     if candidate.get("pid") != expected_pid or candidate.get("window_id") != expected_window_id:
         raise ValueError("out_of_scope_target: candidate target does not match expected (pid, window_id)")
 
-    tool = candidate.get("tool")
+    tool = str(candidate.get("tool") or "")
     if tool == "drag":
         raise ValueError(
             "background_drag_unavailable_on_macos: cua-driver on macOS requires foreground delivery for drag, "
@@ -1336,11 +1654,40 @@ def authorize_candidate_dispatch(
         raise ValueError("out_of_scope_target: candidate arguments mismatch expected (pid, window_id)")
     if args.get("delivery_mode", "background") != "background" or args.get("scope", "window") != "window":
         raise ValueError("foreground_or_global_input_forbidden: candidate requires foreground or desktop scope")
+    if tool == "invoke_menu":
+        menu_path = args.get("path")
+        if (
+            not isinstance(menu_path, list)
+            or len(menu_path) < 1
+            or len(menu_path) > INVOKE_MENU_MAX_PATH
+            or not all(isinstance(p, str) and p.strip() for p in menu_path)
+        ):
+            raise ValueError(
+                f"missing_or_invalid_menu_path: candidate {selected_id!r} for invoke_menu requires a non-empty path list of strings"
+            )
+        extra = sorted(set(args) - INVOKE_MENU_ARG_KEYS)
+        if extra:
+            raise ValueError(
+                f"unsupported_menu_arguments: candidate {selected_id!r} for invoke_menu cannot pass {extra!r}"
+            )
     if "element_index" in args:
         if args.get("snapshot_id") != current_snapshot_id:
             raise ValueError("stale_snapshot_id: element action missing current snapshot_id")
         if args["element_index"] not in valid_element_indices:
             raise ValueError(f"unknown_element_index: {args['element_index']!r}")
+        if observation is not None and args["element_index"] in (observation.get("secure_element_ids") or set()):
+            raise ValueError(
+                f"secure_element_refused: candidate {selected_id!r} cannot target secure element_index={args['element_index']}"
+            )
+
+    action_gate = _check_commit_safety_gate(
+        observation,
+        str(candidate.get("description") or ""),
+        tool,
+        args,
+    )
+    if action_gate is not None:
+        raise ValueError(f"{action_gate} (candidate={selected_id!r})")
 
     return {"id": selected_id, "tool": tool, "arguments": args, "description": candidate.get("description")}
 
@@ -1355,8 +1702,14 @@ def _normalize_numeric_grouped(text: str) -> str | None:
     return stripped.replace(",", "")
 
 
+def _normalize_math_ops(text: str) -> str:
+    return text.replace("\u00d7", "*").replace("\u00f7", "/").replace("\u2212", "-")
+
+
 def _static_text_exact_match(expected_val: str, candidate_text: str) -> bool:
     if candidate_text == expected_val:
+        return True
+    if _normalize_math_ops(candidate_text) == _normalize_math_ops(expected_val):
         return True
     norm_exp = _normalize_numeric_grouped(expected_val)
     norm_cand = _normalize_numeric_grouped(candidate_text)
@@ -1520,6 +1873,19 @@ def check_postcondition(
             raw_val = expected["element_value_equals"]
             if not isinstance(raw_val, str):
                 return state_changed, False, "invalid_element_value_equals"
+            if "element_label_equals" not in expected and "element_label_contains" not in expected:
+                pre_lbl = str(
+                    (pre_el.get("raw_label") if "raw_label" in pre_el else pre_el.get("label")) or ""
+                ).strip()
+                post_lbl = str(
+                    (post_el.get("raw_label") if "raw_label" in post_el else post_el.get("label")) or ""
+                ).strip()
+                if pre_lbl and post_lbl and pre_lbl != post_lbl:
+                    return (
+                        state_changed,
+                        False,
+                        f"target_element_label_mismatch: element_index={bound_idx} pre_label={pre_lbl!r} != post_label={post_lbl!r}",
+                    )
             if "value" not in post_el or post_el["value"] is None:
                 return (
                     state_changed,
@@ -1651,7 +2017,9 @@ SESSION_SCOPED_DRIVER_TOOLS = frozenset({
     "hotkey",
     "set_value",
     "scroll",
+    "invoke_menu",
     "start_session",
+    "set_agent_cursor_enabled",
     "end_session",
 })
 
@@ -1817,7 +2185,7 @@ class DriverClient:
             init_timeout = min(init_timeout, max_timeout_s)
         startup_deadline = time.monotonic() + max(0.001, init_timeout)
         try:
-            self._request_unlocked(
+            init_res = self._request_unlocked(
                 "initialize",
                 {
                     "protocolVersion": DEFAULT_PROTOCOL,
@@ -1828,6 +2196,42 @@ class DriverClient:
             )
             init_notif = (json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n").encode("utf-8")
             self._write_all_unlocked(proc.stdin.fileno(), init_notif, startup_deadline, "notifications/initialized")
+            srv_info = init_res.get("serverInfo") if isinstance(init_res, Mapping) else None
+            if (
+                isinstance(srv_info, Mapping)
+                and srv_info.get("name") == "cua-driver"
+                and self._env.get("AGY_CUA_JEV_LEGACY_CURSOR") != "1"
+            ):
+                target_session = self.session_id or "implicit"
+                try:
+                    self._request_unlocked(
+                        "tools/call",
+                        {
+                            "name": "start_session",
+                            "arguments": {
+                                "session": target_session,
+                                "cursor_motion": {
+                                    "timing": "fixed",
+                                    "glide_duration_ms": 1,
+                                    "dwell_after_click_ms": 0,
+                                },
+                                "cursor_theme": {"reduced_motion": "on"},
+                            },
+                        },
+                        timeout_s=min(1.0, max(0.001, startup_deadline - time.monotonic())),
+                    )
+                    self._request_unlocked(
+                        "tools/call",
+                        {
+                            "name": "set_agent_cursor_enabled",
+                            "arguments": {"session": target_session, "enabled": False},
+                        },
+                        timeout_s=min(1.0, max(0.001, startup_deadline - time.monotonic())),
+                    )
+                    if self.session_id:
+                        self._session_active = True
+                except Exception:
+                    pass
         except Exception:
             self._reset_unlocked()
             raise
@@ -2066,6 +2470,14 @@ TOOLS = [
                 },
                 "pid": {"type": "integer", "minimum": 1, "description": "Target application pid."},
                 "window_id": {"type": "integer", "minimum": 1, "description": "Target application window_id."},
+                "value": {
+                    "type": "string",
+                    "description": (
+                        "Optional text value for value-setting steps. When provided and explicit candidates are "
+                        "omitted, editable AX fields (AXTextField, AXSearchField, AXTextArea, AXComboBox) are "
+                        "additionally offered as bounded set_value candidates without exposing the value in Jev prompts."
+                    ),
+                },
                 "query": {
                     "type": "string",
                     "minLength": 1,
@@ -2114,7 +2526,8 @@ TOOLS = [
         "name": "jev_batch",
         "description": (
             "Execute a guarded multi-step batch (1..16 steps) on an explicit background window (pid, window_id) "
-            "over the protected controller loop. Every step takes a fresh get_window_state, binds a fresh "
+            "over the protected controller loop. Every step takes a fresh get_window_state (or reuses the prior "
+            "step's verified post-observation when chain_observations=true and scope matches), binds a fresh "
             "element_token (<snapshot_id>:<element_index>), enforces background-only window-scoped delivery, "
             "and requires a bound expected_postcondition that achieves verification_outcome='goal_verified' "
             "before advancing. Stops immediately on the first failed/unverified step or timeout and returns "
@@ -2142,6 +2555,16 @@ TOOLS = [
                     "type": "boolean",
                     "description": "If false (default), halts with stale_snapshot if window AX state drifts externally between steps.",
                 },
+                "chain_observations": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, when step k achieves verification_outcome='goal_verified' and step k+1 uses the "
+                        "same (query, max_depth) scope without requiring a pixel screenshot anchor, step k's verified "
+                        "post-observation is reused as step k+1's pre-observation while binding a fresh element_token "
+                        "to step k's post_snapshot_id. Only honoured together with allow_interstep_drift=true, because a "
+                        "reused observation cannot detect external drift; otherwise each step takes a fresh read."
+                    ),
+                },
                 "steps": {
                     "type": "array",
                     "minItems": 1,
@@ -2153,6 +2576,10 @@ TOOLS = [
                         "required": ["goal", "expected_postcondition"],
                         "properties": {
                             "goal": {"type": "string"},
+                            "value": {
+                                "type": "string",
+                                "description": "Optional text value for bounded set_value auto-candidates in this step.",
+                            },
                             "mode": {"type": "string", "enum": ["jev", "deterministic"]},
                             "query": {"type": "string", "minLength": 1},
                             "max_depth": {
@@ -2420,6 +2847,8 @@ class JevMcpServer:
         _deadline_monotonic: float | None = None,
         _expected_pre_sig: tuple[Any, ...] | None = None,
         _out_post_sig: list[tuple[Any, ...]] | None = None,
+        _chained_obs: Mapping[str, Any] | None = None,
+        _out_post_obs: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         step_started = time.perf_counter()
         if not isinstance(args, Mapping):
@@ -2456,6 +2885,13 @@ class JevMcpServer:
         if not isinstance(window_id, int) or isinstance(window_id, bool) or window_id <= 0:
             return _format_tool_result(
                 {"schema": "agy_cua.jev_step_v1", "status": "refused", "reason": "invalid_window_id"},
+                is_error=True,
+            )
+
+        action_value = args.get("value")
+        if action_value is not None and not isinstance(action_value, str):
+            return _format_tool_result(
+                {"schema": "agy_cua.jev_step_v1", "status": "refused", "reason": "invalid_value"},
                 is_error=True,
             )
 
@@ -2555,53 +2991,82 @@ class JevMcpServer:
                         needs_pixel_anchor = True
                         break
         obs_started = time.perf_counter()
-        try:
-            driver = self._get_driver()
-            pre_obs_args: dict[str, Any] = {
-                "pid": pid,
-                "window_id": window_id,
-                "include_screenshot": needs_pixel_anchor,
-                "tree_format": "both",
-            }
-            if query_val is not None:
-                pre_obs_args["query"] = query_val
-            if max_depth_val is not None:
-                pre_obs_args["max_depth"] = max_depth_val
-            raw_pre = driver.call_tool(
-                "get_window_state",
-                pre_obs_args,
-                timeout_s=remaining_timeout_s(driver.timeout_ms / 1000.0),
-                deadline_monotonic=_deadline_monotonic,
-            )
-            if raw_pre.get("isError"):
-                err_txt = "".join(c.get("text", "") for c in (raw_pre.get("content") or []) if isinstance(c, Mapping))
-                raise RuntimeError(err_txt or "get_window_state returned isError=true")
-            pre_obs = extract_window_observation(raw_pre, expected_pid=pid, expected_window_id=window_id)
-        except Exception as exc:
-            release_if_unowned()
+        if _chained_obs is not None and not needs_pixel_anchor:
+            try:
+                driver = self._get_driver()
+                pre_obs = dict(_chained_obs)
+            except Exception as exc:
+                release_if_unowned()
+                payload = {
+                    "schema": "agy_cua.jev_step_v1",
+                    "status": "observation_failed",
+                    "verification_outcome": "not_executed",
+                    "reason": str(exc),
+                    "pid": pid,
+                    "window_id": window_id,
+                    "session_id": self.session_id,
+                    "verified": False,
+                    "uncertain_side_effect": False,
+                    "timings_ms": {
+                        "observe_ms": 0.0,
+                        "provider_ms": 0.0,
+                        "dispatch_ms": 0.0,
+                        "verify_ms": 0.0,
+                        "total_ms": round((time.perf_counter() - step_started) * 1000, 2),
+                    },
+                    "accounting": self.accounting.to_dict(),
+                }
+                self._record_trace(payload)
+                return _format_tool_result(payload, is_error=True)
+            obs_ms = 0.0
+        else:
+            try:
+                driver = self._get_driver()
+                pre_obs_args: dict[str, Any] = {
+                    "pid": pid,
+                    "window_id": window_id,
+                    "include_screenshot": needs_pixel_anchor,
+                    "tree_format": "both",
+                }
+                if query_val is not None:
+                    pre_obs_args["query"] = query_val
+                if max_depth_val is not None:
+                    pre_obs_args["max_depth"] = max_depth_val
+                raw_pre = driver.call_tool(
+                    "get_window_state",
+                    pre_obs_args,
+                    timeout_s=remaining_timeout_s(driver.timeout_ms / 1000.0),
+                    deadline_monotonic=_deadline_monotonic,
+                )
+                if raw_pre.get("isError"):
+                    err_txt = "".join(c.get("text", "") for c in (raw_pre.get("content") or []) if isinstance(c, Mapping))
+                    raise RuntimeError(err_txt or "get_window_state returned isError=true")
+                pre_obs = extract_window_observation(raw_pre, expected_pid=pid, expected_window_id=window_id)
+            except Exception as exc:
+                release_if_unowned()
+                obs_ms = round((time.perf_counter() - obs_started) * 1000, 2)
+                payload = {
+                    "schema": "agy_cua.jev_step_v1",
+                    "status": "observation_failed",
+                    "verification_outcome": "not_executed",
+                    "reason": str(exc),
+                    "pid": pid,
+                    "window_id": window_id,
+                    "session_id": self.session_id,
+                    "verified": False,
+                    "uncertain_side_effect": False,
+                    "timings_ms": {
+                        "observe_ms": obs_ms,
+                        "provider_ms": 0.0,
+                        "dispatch_ms": 0.0,
+                        "verify_ms": 0.0,
+                        "total_ms": round((time.perf_counter() - step_started) * 1000, 2),
+                    },
+                    "accounting": self.accounting.to_dict(),
+                }
+                self._record_trace(payload)
+                return _format_tool_result(payload, is_error=True)
             obs_ms = round((time.perf_counter() - obs_started) * 1000, 2)
-            payload = {
-                "schema": "agy_cua.jev_step_v1",
-                "status": "observation_failed",
-                "verification_outcome": "not_executed",
-                "reason": str(exc),
-                "pid": pid,
-                "window_id": window_id,
-                "session_id": self.session_id,
-                "verified": False,
-                "uncertain_side_effect": False,
-                "timings_ms": {
-                    "observe_ms": obs_ms,
-                    "provider_ms": 0.0,
-                    "dispatch_ms": 0.0,
-                    "verify_ms": 0.0,
-                    "total_ms": round((time.perf_counter() - step_started) * 1000, 2),
-                },
-                "accounting": self.accounting.to_dict(),
-            }
-            self._record_trace(payload)
-            return _format_tool_result(payload, is_error=True)
-        obs_ms = round((time.perf_counter() - obs_started) * 1000, 2)
         obs_disclosure = {
             "total_actionable_elements": pre_obs["total_actionable_elements"],
             "omitted_elements_count": pre_obs["omitted_elements_count"],
@@ -2663,7 +3128,11 @@ class JevMcpServer:
 
         # Stage 2: Build / validate closed candidate table bound to fresh observation
         try:
-            bound_candidates = build_bound_candidates(args.get("candidates"), pre_obs)
+            bound_candidates = build_bound_candidates(
+                args.get("candidates"),
+                pre_obs,
+                action_value=action_value,
+            )
             history_in = args.get("history")
             if history_in is None:
                 history_in = [
@@ -2839,6 +3308,7 @@ class JevMcpServer:
                 expected_window_id=window_id,
                 current_snapshot_id=pre_obs["snapshot_id"],
                 valid_element_indices=pre_obs["indexed_element_ids"],
+                observation=pre_obs,
             )
         except Exception as exc:
             release_if_unowned()
@@ -3035,6 +3505,8 @@ class JevMcpServer:
         self._update_target_snapshot(pid, window_id, post_obs["snapshot_id"])
         if _out_post_sig is not None:
             _out_post_sig.append(_obs_state_signature(post_obs))
+        if _out_post_obs is not None:
+            _out_post_obs.append(post_obs)
 
         if expected_post is None:
             verification_outcome = "state_changed" if state_changed else "dispatched"
@@ -3172,6 +3644,20 @@ class JevMcpServer:
                 is_error=True,
             )
 
+        if "chain_observations" in args and args["chain_observations"] is not None:
+            if not isinstance(args["chain_observations"], bool):
+                return _format_tool_result(
+                    {
+                        "schema": "agy_cua.jev_batch_v1",
+                        "status": "refused",
+                        "reason": "invalid_chain_observations",
+                        "pid": pid,
+                        "window_id": window_id,
+                        "session_id": self.session_id,
+                    },
+                    is_error=True,
+                )
+
         initial_expected_snap = args.get("expected_snapshot_id")
         if initial_expected_snap is not None and (
             not isinstance(initial_expected_snap, str) or not SNAPSHOT_ID_RE.match(initial_expected_snap)
@@ -3215,6 +3701,19 @@ class JevMcpServer:
                     },
                     is_error=True,
                 )
+            if "value" in step_spec and step_spec["value"] is not None:
+                if not isinstance(step_spec["value"], str):
+                    return _format_tool_result(
+                        {
+                            "schema": "agy_cua.jev_batch_v1",
+                            "status": "refused",
+                            "reason": f"step[{idx}] invalid value",
+                            "pid": pid,
+                            "window_id": window_id,
+                            "session_id": self.session_id,
+                        },
+                        is_error=True,
+                    )
             s_snap = step_spec.get("expected_snapshot_id")
             if s_snap is not None and (not isinstance(s_snap, str) or not SNAPSHOT_ID_RE.match(s_snap)):
                 return _format_tool_result(
@@ -3370,11 +3869,14 @@ class JevMcpServer:
         batch_timeout_ms = clamp_batch_timeout_ms(raw_timeout)
         batch_deadline = time.monotonic() + (batch_timeout_ms / 1000.0)
         allow_drift = bool(args.get("allow_interstep_drift", False))
+        chain_obs = bool(args.get("chain_observations", False))
+        chain_effective = chain_obs and allow_drift
 
         completed_steps: list[dict[str, Any]] = []
         failed_step: dict[str, Any] | None = None
         remaining_steps: list[dict[str, Any]] = []
         prev_post_sig: tuple[Any, ...] | None = None
+        prev_post_obs: dict[str, Any] | None = None
         prev_obs_scope: tuple[str | None, int | None] | None = None
 
         agg_observe_ms = 0.0
@@ -3403,6 +3905,8 @@ class JevMcpServer:
                 "window_id": window_id,
                 "expected_postcondition": step_spec["expected_postcondition"],
             }
+            if "value" in step_spec and step_spec["value"] is not None:
+                step_args["value"] = step_spec["value"]
             if "mode" in step_spec:
                 step_args["mode"] = step_spec["mode"]
             if "deterministic" in step_spec:
@@ -3423,6 +3927,16 @@ class JevMcpServer:
                 step_spec.get("max_depth"),
             )
             out_sig: list[tuple[Any, ...]] = []
+            out_obs: list[dict[str, Any]] = []
+            # A chained pre-observation IS step k's post-observation, so comparing its signature to
+            # prev_post_sig is vacuous. Only reuse it when the caller has explicitly accepted interstep
+            # drift; with drift protection on, take a fresh read so external changes are detected.
+            use_chained_obs = (
+                prev_post_obs
+                if (chain_effective and prev_post_obs is not None and prev_obs_scope == curr_obs_scope)
+                else None
+            )
+            summary_chained = use_chained_obs is not None
             step_res = self.handle_step(
                 step_args,
                 _deadline_monotonic=batch_deadline,
@@ -3432,6 +3946,8 @@ class JevMcpServer:
                     else prev_post_sig
                 ),
                 _out_post_sig=out_sig,
+                _chained_obs=use_chained_obs,
+                _out_post_obs=out_obs,
             )
             step_sc = step_res.get("structuredContent") or {}
             t_ms = step_sc.get("timings_ms") or {}
@@ -3460,12 +3976,14 @@ class JevMcpServer:
                 "returned_model": step_sc.get("returned_model"),
                 "sdk_identity": step_sc.get("sdk_identity"),
                 "confidence": step_sc.get("confidence"),
+                "observation_chained": summary_chained,
                 "timings_ms": t_ms,
             }
 
             if step_sc.get("status") == "verified" and step_sc.get("verification_outcome") == "goal_verified":
                 completed_steps.append(summary_item)
                 prev_post_sig = out_sig[0] if out_sig else None
+                prev_post_obs = out_obs[0] if out_obs else None
                 prev_obs_scope = curr_obs_scope
             else:
                 failed_step = summary_item
@@ -3517,6 +4035,9 @@ class JevMcpServer:
             "status": batch_status,
             "verification_outcome": batch_outcome,
             "verified": all_verified,
+            "all_verified": all_verified,
+            "goal_verified": all_verified,
+            "chain_observations_effective": chain_effective,
             "uncertain_side_effect": uncertain,
             "pid": pid,
             "window_id": window_id,
@@ -3532,6 +4053,8 @@ class JevMcpServer:
             "completed_steps": completed_steps,
             "failed_step": failed_step,
             "remaining_steps": remaining_steps,
+            "halted_at_step_index": None if all_verified else (failed_step or {}).get("step_index"),
+            "steps": completed_steps + ([failed_step] if failed_step else []),
             "timings_ms": {
                 "observe_ms": agg_observe_ms,
                 "provider_ms": agg_provider_ms,
@@ -3543,6 +4066,13 @@ class JevMcpServer:
         }
         self._record_trace(batch_payload)
         return _format_tool_result(batch_payload, is_error=(not all_verified))
+
+    def handle_sequence(self, args: Mapping[str, Any]) -> dict[str, Any]:
+        if not isinstance(args, Mapping):
+            return self.handle_batch(args)
+        seq_args = dict(args)
+        seq_args.setdefault("chain_observations", True)
+        return self.handle_batch(seq_args)
 
     def handle_message(self, message: Any) -> dict[str, Any] | None:
         if not isinstance(message, Mapping):
@@ -3603,6 +4133,8 @@ class JevMcpServer:
                 return reply(self.handle_step(arguments))
             if name in {"jev_batch", "jev_run_steps"}:
                 return reply(self.handle_batch(arguments))
+            if name == "jev_sequence":
+                return reply(self.handle_sequence(arguments))
             return fail(-32602, f"Unknown tool: {name}")
         if isinstance(method, str) and method.startswith("notifications/"):
             return None
