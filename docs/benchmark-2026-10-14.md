@@ -89,7 +89,7 @@ failures nor completed repetitions. The existing baseline above is unchanged.
 | Requested arm (preserved verbatim) | Model resolution | Speed resolution | Repetitions completed | Pass rate | Wall time | Turns | Images sent | Input/output tokens | Cost | Focus violations / probe errors |
 | :--- | :--- | :--- | ---: | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `6.1 sol fast` | Live catalog: `gpt-6.1-sol` | Live catalog: Fast = `priority` | 0 / 12 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
-| `6.1 sol astra ultrafast` | Unresolved: clarification requested between `gpt-6-astra` and `gpt-6.1-sol` | `gpt-6-astra` advertises `ultrafast`; this CLI catalog does not advertise it for Sol | 0 / 12 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+| `6.1 sol astra ultrafast` | Bobby clarified `gpt-6.1-sol` + Ultrafast | This live Sol catalog exposes `priority` only; Ultrafast unavailable through its advertised controls | 0 / 12 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
 
 **Method and identity.** PR #11 was fetched and rechecked OPEN at immutable base
 `154edf54e6223b4c61543d78206247535b3e2b89`. Work used repo `saariuslystoned/agy-cua`,
@@ -152,7 +152,9 @@ describes supported JSON-RPC integration.
 There are no per-repetition results or variance estimates, and no causal speed
 explanation is supported. A noncompeting desktop interval was not established;
 existing Cua Driver load and other operator services were left untouched.
-After identity and native app approval are resolved, run the six original IDs
+Official docs describe Sol Ultrafast support, but the session's live catalog
+does not expose that tier for Sol. No Astra substitution or unsupported-speed
+probe was made. After native app approval and Sol Ultrafast availability are resolved, run the six original IDs
 twice per arm, sequentially, preserving every failure. In either a scripted or
 manual run, include first-call overhead from prompt submission through agent
 completion, then run the original independent verifier; disclose any timing
