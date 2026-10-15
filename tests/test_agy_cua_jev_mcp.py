@@ -1714,6 +1714,507 @@ class StdioEndToEndTest(unittest.TestCase):
             self.assertEqual(jev.clamp_batch_timeout_ms(25), jev.MIN_BATCH_TIMEOUT_MS)
             self.assertEqual(jev.clamp_batch_timeout_ms(0), jev.DEFAULT_BATCH_TIMEOUT_MS)
 
+    def test_mail_toolbar_prioritized_over_deep_outline_and_discloses_omissions(self):
+        elements = [
+            {"element_index": 0, "role": "AXWindow", "label": "Inbox — Mail", "enabled": True},
+            {"element_index": 1, "role": "AXSplitGroup", "label": "", "enabled": True, "parent_index": 0},
+            {"element_index": 2, "role": "AXScrollArea", "label": "mailboxes", "enabled": True, "parent_index": 1},
+            {"element_index": 3, "role": "AXOutline", "label": "mailboxes", "enabled": True, "parent_index": 2},
+        ]
+        # 80 deep outline rows/buttons (indices 4..83) before shallow AXToolbar (indices 90..92)
+        for i in range(4, 84):
+            if i % 2 == 0:
+                elements.append({
+                    "element_index": i,
+                    "role": "AXRow",
+                    "label": f"Mailbox Row {i}",
+                    "enabled": True,
+                    "parent_index": 3,
+                    "actions": ["AXPress"],
+                })
+            else:
+                elements.append({
+                    "element_index": i,
+                    "role": "AXButton",
+                    "label": f"Unread Count {i}",
+                    "enabled": True,
+                    "parent_index": i - 1,
+                    "actions": ["AXPress"],
+                })
+        elements.extend([
+            {"element_index": 90, "role": "AXToolbar", "label": "Toolbar", "enabled": True, "parent_index": 0},
+            {
+                "element_index": 91,
+                "role": "AXButton",
+                "label": "New Message",
+                "enabled": True,
+                "parent_index": 90,
+                "actions": ["AXPress"],
+            },
+            {
+                "element_index": 92,
+                "role": "AXSearchField",
+                "label": "Search",
+                "value": "",
+                "enabled": True,
+                "parent_index": 90,
+                "actions": ["AXPress"],
+            },
+        ])
+
+        obs = jev.extract_window_observation(
+            {
+                "structuredContent": {
+                    "pid": 501,
+                    "window_id": 2001,
+                    "snapshot_id": "s0000beef",
+                    "app_name": "Mail",
+                    "window_title": "Inbox — Mail",
+                    "elements_complete": True,
+                    "truncated": False,
+                    "elements": elements,
+                },
+                "content": [{"type": "text", "text": '- [0] AXWindow "Inbox — Mail"'}],
+            },
+            expected_pid=501,
+            expected_window_id=2001,
+        )
+
+        # Shallow toolbar controls [91] and [92] must be prioritized ahead of deep outline rows
+        self.assertEqual(obs["elements"][0]["element_index"], 91)
+        self.assertEqual(obs["elements"][1]["element_index"], 92)
+        self.assertTrue(obs["elements"][0]["in_toolbar"])
+        self.assertTrue(obs["elements"][1]["in_toolbar"])
+
+        cands = jev.build_bound_candidates(None, obs)
+        cand_ids = [c["id"] for c in cands]
+        self.assertEqual(cand_ids[0], "ax.91.new-message")
+        self.assertEqual(cand_ids[1], "ax.92.search")
+
+        # Omission counts must be disclosed when 82 actionable elements exceed MAX_ELEMENTS=64 and MAX_AUTO_CANDIDATES=28
+        self.assertEqual(obs["total_actionable_elements"], 82)
+        self.assertEqual(obs["omitted_elements_count"], 82 - jev.MAX_ELEMENTS)
+        self.assertEqual(obs["omitted_candidates_count"], 82 - jev.MAX_AUTO_CANDIDATES)
+        self.assertTrue(obs["observation_truncated"])
+
+        # Explicit candidate targeting a valid in-snapshot element beyond the 64-element prompt cap must still bind and verify
+        explicit_deep = jev.build_bound_candidates(
+            [{"id": "click.deep.83", "description": "Click deep unread button 83", "tool": "click", "element_index": 83}],
+            obs,
+        )
+        self.assertEqual(explicit_deep[0]["arguments"]["element_token"], "s0000beef:83")
+
+        post_elements = [
+            dict(el, label="Unread Count 83 (Selected)") if el.get("element_index") == 83 else dict(el)
+            for el in elements
+        ]
+        post_obs = jev.extract_window_observation(
+            {
+                "structuredContent": {
+                    "pid": 501,
+                    "window_id": 2001,
+                    "snapshot_id": "s0000bef0",
+                    "elements": post_elements,
+                },
+                "content": [{"type": "text", "text": '- [0] AXWindow "Inbox — Mail"'}],
+            },
+            expected_pid=501,
+            expected_window_id=2001,
+        )
+        changed, met, reason = jev.check_postcondition(
+            {"element_label_equals": "Unread Count 83 (Selected)"},
+            obs,
+            post_obs,
+            target_element_index=83,
+        )
+        self.assertTrue(changed)
+        self.assertTrue(met)
+        self.assertEqual(reason, "expected_postcondition_verified")
+
+        # Also verify tree_markdown indentation fallback when parent_index is omitted or containers are unindexed
+        md_only_obs = jev.extract_window_observation(
+            {
+                "structuredContent": {
+                    "pid": 501,
+                    "window_id": 2001,
+                    "snapshot_id": "s0000bef1",
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "Inbox"},
+                        {"element_index": 10, "role": "AXRow", "label": "Deep row", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 20, "role": "AXButton", "label": "New Message", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 30, "role": "AXButton", "label": "Sidebar Action", "enabled": True, "actions": ["AXPress"]},
+                    ],
+                    "tree_markdown": (
+                        '- [0] AXWindow "Inbox"\n'
+                        '  - AXSplitGroup\n'
+                        '    - [2] AXScrollArea\n'
+                        '      - [3] AXOutline\n'
+                        '        - [10] AXRow "Deep row"\n'
+                        '  - AXToolbar\n'
+                        '    - [20] AXButton "New Message"\n'
+                        '  - AXSplitGroup\n'
+                        '    - [30] AXButton "Sidebar Action"\n'
+                    ),
+                },
+                "content": [],
+            },
+            expected_pid=501,
+            expected_window_id=2001,
+        )
+        self.assertEqual(md_only_obs["elements"][0]["element_index"], 20)
+        self.assertTrue(md_only_obs["elements"][0]["in_toolbar"])
+        self.assertEqual(md_only_obs["elements"][0]["depth"], 2)
+        self.assertEqual(md_only_obs["elements"][1]["element_index"], 30)
+        self.assertFalse(md_only_obs["elements"][1]["in_toolbar"])
+        self.assertEqual(md_only_obs["elements"][1]["depth"], 2)
+        self.assertEqual(md_only_obs["elements"][2]["element_index"], 10)
+        self.assertFalse(md_only_obs["elements"][2]["in_toolbar"])
+        self.assertEqual(md_only_obs["elements"][2]["depth"], 4)
+
+    def test_mail_role_and_action_support_filtering_for_search_link_and_cell(self):
+        obs = jev.extract_window_observation(
+            {
+                "structuredContent": {
+                    "pid": 501,
+                    "window_id": 2001,
+                    "snapshot_id": "s0000cafe",
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "Mail", "enabled": True},
+                        # Non-pressable AXCell must not become a click candidate
+                        {"element_index": 10, "role": "AXCell", "label": "Sender cell", "enabled": True, "parent_index": 0, "actions": []},
+                        # Pressable AXCell is allowed
+                        {"element_index": 11, "role": "AXCell", "label": "Flagged cell", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                        # Pressable enabled AXLink is allowed
+                        {"element_index": 12, "role": "AXLink", "label": "Open thread link", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                        # Disabled AXLink must be excluded
+                        {"element_index": 13, "role": "AXLink", "label": "Disabled link", "enabled": False, "parent_index": 0, "actions": ["AXPress"]},
+                        # Non-pressable AXLink (explicit actions without AXPress) must not generate click candidate
+                        {"element_index": 14, "role": "AXLink", "label": "Static link", "enabled": True, "parent_index": 0, "actions": ["AXShowMenu"]},
+                        # Enabled AXSearchField (even with empty actions list) supports both focus-click and explicit set_value / type_text
+                        {"element_index": 15, "role": "AXSearchField", "label": "Search", "value": "", "enabled": True, "parent_index": 0, "actions": []},
+                        # Disabled AXSearchField must be excluded
+                        {"element_index": 16, "role": "AXSearchField", "label": "Disabled Search", "value": "", "enabled": False, "parent_index": 0, "actions": ["AXPress"]},
+                        # Enabled AXSearchField with explicit non-clickable action only (AXCancel) skips auto-click but allows set_value / type_text
+                        {"element_index": 17, "role": "AXSearchField", "label": "Filter", "value": "", "enabled": True, "parent_index": 0, "actions": ["AXCancel"]},
+                        # Enabled AXScrollArea and AXWebArea support explicit scroll / type_text without polluting auto-click candidates
+                        {"element_index": 18, "role": "AXScrollArea", "label": "Message list scroll", "enabled": True, "parent_index": 0, "actions": []},
+                        {"element_index": 19, "role": "AXWebArea", "label": "Message body", "enabled": True, "parent_index": 0, "actions": []},
+                        {"element_index": 20, "role": "AXSlider", "label": "Zoom level", "value": "100", "enabled": True, "parent_index": 0, "actions": ["AXIncrement", "AXDecrement"]},
+                        # Secure field reported as role=AXTextField + subrole=AXSecureTextField must redact value and skip auto-click
+                        {
+                            "element_index": 21,
+                            "role": "AXTextField",
+                            "subrole": "AXSecureTextField",
+                            "title": "Password",
+                            "value": "s3cr3t!",
+                            "enabled": True,
+                            "parent_index": 0,
+                            "actions": ["AXConfirm"],
+                        },
+                    ],
+                },
+                "content": [{"type": "text", "text": '- [0] AXWindow "Mail"'}],
+            },
+            expected_pid=501,
+            expected_window_id=2001,
+        )
+
+        auto_cands = jev.build_bound_candidates(None, obs)
+        auto_indices = [c["arguments"]["element_index"] for c in auto_cands]
+        self.assertEqual(auto_indices, [11, 12, 15])
+
+        # Verify secure subrole redacted its value in extracted elements
+        sec_els = [e for e in obs["all_elements"] if e["element_index"] == 21]
+        self.assertEqual(len(sec_els), 1)
+        self.assertNotIn("value", sec_els[0])
+        self.assertEqual(sec_els[0]["label"], "Password")
+
+        # Enabled AXSearchField [15] and [17] support explicit set_value and type_text candidates,
+        # and enabled AXCell [10], AXScrollArea [18], AXWebArea [19], and AXSlider [20] support valid explicit actions
+        search_cands = jev.build_bound_candidates(
+            [
+                {"id": "search.set", "description": "Set Search to invoice", "tool": "set_value", "element_index": 15, "value": "invoice"},
+                {"id": "search.type", "description": "Type invoice into Search", "tool": "type_text", "element_index": 15, "text": "invoice"},
+                {"id": "filter.set", "description": "Set Filter to unread", "tool": "set_value", "element_index": 17, "value": "unread"},
+                {"id": "cell.dbl", "description": "Double-click sender cell to open message", "tool": "double_click", "element_index": 10},
+                {"id": "cell.ctx", "description": "Right-click sender cell for menu", "tool": "right_click", "element_index": 10},
+                {"id": "list.scroll", "description": "Scroll message list down", "tool": "scroll", "element_index": 18, "direction": "down"},
+                {"id": "body.type", "description": "Type draft body into AXWebArea", "tool": "type_text", "element_index": 19, "text": "Hello"},
+                {"id": "slider.click", "description": "Click zoom slider", "tool": "click", "element_index": 20},
+            ],
+            obs,
+        )
+        self.assertEqual(len(search_cands), 8)
+        self.assertEqual(search_cands[0]["arguments"]["element_token"], "s0000cafe:15")
+        self.assertEqual(search_cands[1]["arguments"]["element_token"], "s0000cafe:15")
+        self.assertEqual(search_cands[2]["arguments"]["element_token"], "s0000cafe:17")
+        self.assertEqual(search_cands[3]["arguments"]["element_token"], "s0000cafe:10")
+        self.assertEqual(search_cands[4]["arguments"]["element_token"], "s0000cafe:10")
+        self.assertEqual(search_cands[5]["arguments"]["element_token"], "s0000cafe:18")
+        self.assertEqual(search_cands[6]["arguments"]["element_token"], "s0000cafe:19")
+        self.assertEqual(search_cands[7]["arguments"]["element_token"], "s0000cafe:20")
+
+        # Clicking AXSearchField [17] (which only supports AXCancel) is rejected
+        with self.assertRaisesRegex(ValueError, "unsupported_element_action"):
+            jev.build_bound_candidates(
+                [{"id": "bad.filter.click", "description": "Click non-clickable search field", "tool": "click", "element_index": 17}],
+                obs,
+            )
+
+        # Non-pressable AXCell [10] must be rejected specifically with unsupported_element_action on click,
+        # and disabled AXSearchField [16] must be rejected with unknown_element_index
+        with self.assertRaisesRegex(ValueError, "unsupported_element_action"):
+            jev.build_bound_candidates(
+                [{"id": "bad.cell", "description": "Click non-pressable cell", "tool": "click", "element_index": 10}],
+                obs,
+            )
+        with self.assertRaisesRegex(ValueError, "unknown_element_index"):
+            jev.build_bound_candidates(
+                [{"id": "bad.search", "description": "Set disabled search", "tool": "set_value", "element_index": 16, "value": "x"}],
+                obs,
+            )
+
+        # Incompatible tool for role (e.g. set_value or type_text on AXLink or AXCell) must be rejected
+        with self.assertRaisesRegex(ValueError, "incompatible_tool_for_role"):
+            jev.build_bound_candidates(
+                [{"id": "bad.link.set", "description": "Set value on link", "tool": "set_value", "element_index": 12, "value": "x"}],
+                obs,
+            )
+        with self.assertRaisesRegex(ValueError, "incompatible_tool_for_role"):
+            jev.build_bound_candidates(
+                [{"id": "bad.link.type", "description": "Type text on link", "tool": "type_text", "element_index": 12, "text": "x"}],
+                obs,
+            )
+        with self.assertRaisesRegex(ValueError, "incompatible_tool_for_role"):
+            jev.build_bound_candidates(
+                [{"id": "bad.cell.set", "description": "Set value on cell", "tool": "set_value", "element_index": 11, "value": "x"}],
+                obs,
+            )
+
+        # validate_select_request preserves enabled, depth, and in_toolbar metadata while rejecting raw value exposure
+        validated = jev.validate_select_request({
+            "goal": "Set Search",
+            "pid": 501,
+            "window_id": 2001,
+            "snapshot_id": "s0000cafe",
+            "elements": [
+                {
+                    "element_index": 15,
+                    "role": "AXSearchField",
+                    "label": "Search",
+                    "state": "enabled (has_value)",
+                    "enabled": True,
+                    "depth": 2,
+                    "in_toolbar": True,
+                }
+            ],
+            "candidates": [{"id": "search.set", "description": "Set Search"}],
+        })
+        self.assertTrue(validated["elements"][0]["enabled"])
+        self.assertEqual(validated["elements"][0]["depth"], 2)
+        self.assertTrue(validated["elements"][0]["in_toolbar"])
+        with self.assertRaisesRegex(ValueError, "unsupported fields"):
+            jev.validate_select_request({
+                "goal": "Set Search",
+                "pid": 501,
+                "window_id": 2001,
+                "snapshot_id": "s0000cafe",
+                "elements": [
+                    {
+                        "element_index": 15,
+                        "role": "AXSearchField",
+                        "label": "Search",
+                        "value": "secret-or-private-value",
+                    }
+                ],
+                "candidates": [{"id": "search.set", "description": "Set Search"}],
+            })
+
+    def test_jev_step_forwards_query_and_max_depth_to_stage1_and_stage5_for_mail_continuity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_mail_driver = os.path.join(tmp, "fake-mail-driver")
+            calls_log = os.path.join(tmp, "driver_calls.jsonl")
+            with open(fake_mail_driver, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent(f"""\
+                    #!/usr/bin/env python3
+                    import json, sys
+
+                    step = 0
+                    search_val = ""
+                    log_path = {calls_log!r}
+
+                    for line in sys.stdin:
+                        msg = json.loads(line)
+                        if "id" not in msg:
+                            continue
+                        method = msg.get("method")
+                        if method == "initialize":
+                            res = {{"protocolVersion": "2025-06-18", "capabilities": {{}}, "serverInfo": {{"name": "fake-mail"}}}}
+                        elif method == "tools/call":
+                            params = msg.get("params", {{}})
+                            name = params.get("name")
+                            args = params.get("arguments", {{}})
+                            with open(log_path, "a", encoding="utf-8") as lf:
+                                lf.write(json.dumps({{"name": name, "arguments": args}}) + "\\n")
+                            if name == "get_window_state":
+                                step += 1
+                                snap = f"s0000002{{step}}"
+                                # Simulate Mail starvation unless scoped with max_depth=2 and query="Search"
+                                if args.get("max_depth") == 2 and args.get("query") == "Search":
+                                    md = f'- [0] AXWindow "Inbox"\\n  - [90] AXToolbar\\n    - [92] AXSearchField (Search) = "{{search_val}}"'
+                                    els = [
+                                        {{"element_index": 0, "role": "AXWindow", "label": "Inbox"}},
+                                        {{"element_index": 90, "role": "AXToolbar", "label": "Toolbar", "parent_index": 0}},
+                                        {{
+                                            "element_index": 92,
+                                            "role": "AXSearchField",
+                                            "label": "Search",
+                                            "value": search_val,
+                                            "enabled": True,
+                                            "parent_index": 90,
+                                            "actions": ["AXPress"],
+                                        }},
+                                    ]
+                                    truncated = False
+                                    complete = True
+                                else:
+                                    md = '- [0] AXWindow "Inbox"\\n  - [4] AXRow "Deep row"'
+                                    els = [
+                                        {{"element_index": 0, "role": "AXWindow", "label": "Inbox"}},
+                                        {{"element_index": 4, "role": "AXRow", "label": "Deep row", "enabled": True, "parent_index": 0, "actions": ["AXPress"]}},
+                                    ]
+                                    truncated = True
+                                    complete = False
+                                res = {{
+                                    "content": [{{"type": "text", "text": md}}],
+                                    "structuredContent": {{
+                                        "pid": args.get("pid", 501),
+                                        "window_id": args.get("window_id", 2001),
+                                        "snapshot_id": snap,
+                                        "app_name": "Mail",
+                                        "window_title": "Inbox",
+                                        "elements_complete": complete,
+                                        "truncated": truncated,
+                                        "tree_markdown": md,
+                                        "elements": els,
+                                    }},
+                                }}
+                            elif name == "set_value":
+                                search_val = str(args.get("value", ""))
+                                res = {{"content": [{{"type": "text", "text": "value set"}}], "structuredContent": {{"ok": True}}}}
+                            else:
+                                res = {{"content": [{{"type": "text", "text": "ok"}}], "structuredContent": {{"ok": True}}}}
+                        else:
+                            res = {{}}
+                        print(json.dumps({{"jsonrpc": "2.0", "id": msg["id"], "result": res}}), flush=True)
+                """))
+            os.chmod(fake_mail_driver, os.stat(fake_mail_driver).st_mode | stat.S_IEXEC)
+
+            captured_wire_payloads = []
+
+            def fake_http_post(req, _t):
+                captured_wire_payloads.append(json.loads(req.data.decode("utf-8")))
+                return 200, json.dumps({
+                    "model": "jev-1.13.0",
+                    "answers": {
+                        "candidate": {
+                            "type": "choice",
+                            "choice": "set.search",
+                            "confidence": 0.98,
+                            "probabilities": {"set.search": 0.98, "reobserve": 0.01, "abstain": 0.01},
+                        }
+                    },
+                    "usage": {"input_tokens": 80, "output_tokens": 10},
+                })
+
+            server = jev.JevMcpServer(
+                env={"AGY_CUA_DRIVER": fake_mail_driver, "TYPESAFE_API_KEY": "test-key"},
+                keychain_reader=lambda _: None,
+                http_post=fake_http_post,
+            )
+            try:
+                # Invalid query / max_depth are refused before touching driver
+                bad_q = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {"goal": "Search", "pid": 501, "window_id": 2001, "query": "   "},
+                    },
+                })
+                self.assertEqual(bad_q["result"]["structuredContent"]["reason"], "invalid_query")
+
+                bad_d = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {"goal": "Search", "pid": 501, "window_id": 2001, "max_depth": 15},
+                    },
+                })
+                self.assertEqual(bad_d["result"]["structuredContent"]["reason"], "invalid_max_depth")
+
+                resp = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {
+                            "goal": "Set Search field to quarterly report",
+                            "pid": 501,
+                            "window_id": 2001,
+                            "query": "Search",
+                            "max_depth": 2,
+                            "candidates": [
+                                {
+                                    "id": "set.search",
+                                    "description": 'Set [92] AXSearchField "Search" to quarterly report',
+                                    "tool": "set_value",
+                                    "element_index": 92,
+                                    "value": "quarterly report",
+                                }
+                            ],
+                            "expected_postcondition": {"element_value_equals": "quarterly report"},
+                        },
+                    },
+                })
+            finally:
+                server.close()
+
+            sc = resp["result"]["structuredContent"]
+            self.assertEqual(sc["status"], "verified")
+            self.assertEqual(sc["verification_outcome"], "goal_verified")
+            self.assertTrue(sc["verified"])
+            self.assertEqual(sc["verification_reason"], "expected_postcondition_verified")
+            self.assertEqual(sc["total_actionable_elements"], 1)
+            self.assertEqual(sc["omitted_elements_count"], 0)
+            self.assertEqual(sc["omitted_candidates_count"], 0)
+            self.assertFalse(sc["pre_observation_truncated"])
+            self.assertEqual(sc["post_total_actionable_elements"], 1)
+            self.assertEqual(sc["post_omitted_elements_count"], 0)
+            self.assertEqual(sc["post_omitted_candidates_count"], 0)
+            self.assertFalse(sc["post_observation_truncated"])
+            self.assertFalse(sc["observation_truncated"])
+
+            # Verify Jev wire payload preserved depth and in_toolbar metadata without leaking raw value
+            self.assertEqual(len(captured_wire_payloads), 1)
+            sent_el = captured_wire_payloads[0]["state"]["elements"][0]
+            self.assertEqual(sent_el["element_index"], 92)
+            self.assertEqual(sent_el["depth"], 2)
+            self.assertTrue(sent_el["in_toolbar"])
+            self.assertNotIn("value", sent_el)
+
+            with open(calls_log, "r", encoding="utf-8") as lf:
+                logged = [json.loads(line) for line in lf if line.strip()]
+            obs_calls = [c["arguments"] for c in logged if c["name"] == "get_window_state"]
+            self.assertEqual(len(obs_calls), 2)
+            for call_args in obs_calls:
+                self.assertEqual(call_args.get("query"), "Search")
+                self.assertEqual(call_args.get("max_depth"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
