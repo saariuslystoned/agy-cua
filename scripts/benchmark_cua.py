@@ -120,6 +120,8 @@ class SpendTracker:
     gemini_calls: int = 0
     jev_calls: int = 0
     screenshots_sent: int = 0
+    gemini_uncertain_failures: int = 0
+    jev_uncertain_failures: int = 0
 
     @property
     def total_usd(self) -> float:
@@ -207,9 +209,11 @@ def sample_frontmost_info() -> tuple[int | None, str | None]:
         parsed = json.loads(out)
         front_pid = parsed.get("front_pid")
         front_bundle = parsed.get("front_bundle")
-        if front_pid is None or not isinstance(front_bundle, str) or not front_bundle.strip():
+        if isinstance(front_pid, bool) or not isinstance(front_pid, (int, float)) or int(front_pid) <= 0:
             return None, None
-        return int(front_pid), front_bundle.strip()
+        # Unbundled executables (the Swift fixture) report a null bundle id; the pid stays authoritative.
+        bundle = front_bundle.strip() if isinstance(front_bundle, str) else ""
+        return int(front_pid), bundle
     except Exception:
         return None, None
 
@@ -230,7 +234,7 @@ class FocusMonitor:
     def sample_once(self) -> None:
         self.samples += 1
         f_pid, f_bundle = sample_frontmost_info()
-        if f_pid is None or f_bundle is None:
+        if f_pid is None:
             self.probe_errors += 1
             return
         if f_pid == self.target_pid or (self.target_bundle and f_bundle == self.target_bundle):
@@ -497,7 +501,12 @@ def _verify_1password(sf: Path | None, canary_leaked: bool) -> tuple[bool, str, 
     ), st
 
 
-def call_gemini_with_retry(
+def make_genai_client() -> genai.Client:
+    """Gemini client with transport-level retries disabled (tracker #2: no automatic provider retries)."""
+    return genai.Client(http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)))
+
+
+def call_gemini_once(
     client: genai.Client,
     model_id: str,
     contents: list[types.Content],
@@ -506,27 +515,53 @@ def call_gemini_with_retry(
     *,
     had_screenshot: bool = False,
 ) -> Any:
-    last_exc: Exception | None = None
-    active_client = client
-    for attempt in range(6):
-        spend.reserve_before_call(GEMINI_RESERVE_ALLOWANCE_USD)
-        try:
-            resp = active_client.models.generate_content(
-                model=model_id,
-                contents=contents,
-                config=config,
-            )
-        except Exception as exc:
-            # Retain the conservative reservation on uncertain provider failures
-            last_exc = exc
-            time.sleep(min(10.0, 1.5 * (attempt + 1)))
-            active_client = genai.Client()
-            continue
-        spend.release_reservation(GEMINI_RESERVE_ALLOWANCE_USD)
-        spend.record_gemini(resp, had_screenshot=had_screenshot)
-        return resp
-    assert last_exc is not None
-    raise last_exc
+    """One bounded provider attempt. Failures (including uncertain timeouts) are preserved, never resubmitted."""
+    spend.reserve_before_call(GEMINI_RESERVE_ALLOWANCE_USD)
+    try:
+        resp = client.models.generate_content(
+            model=model_id,
+            contents=contents,
+            config=config,
+        )
+    except Exception:
+        # Retain the conservative reservation: the attempt may have been billed.
+        spend.gemini_uncertain_failures += 1
+        raise
+    spend.release_reservation(GEMINI_RESERVE_ALLOWANCE_USD)
+    spend.record_gemini(resp, had_screenshot=had_screenshot)
+    return resp
+
+
+def prune_history_images(chat_history: list[types.Content], keep: int = 2) -> int:
+    """Keep only the `keep` most recent images across top-level parts and function responses.
+
+    Returns the number of images removed. Older top-level images are replaced by a text placeholder so
+    the turn keeps a valid non-empty part; older function-response images are dropped from the response.
+    """
+    seen = 0
+    removed = 0
+    for msg in reversed(chat_history):
+        new_parts: list[types.Part] = []
+        for part in reversed(list(msg.parts or [])):
+            fr = getattr(part, "function_response", None)
+            if fr is not None and fr.parts:
+                kept_subs = []
+                for sub in reversed(list(fr.parts)):
+                    if getattr(sub, "inline_data", None) is not None:
+                        seen += 1
+                        if seen > keep:
+                            removed += 1
+                            continue
+                    kept_subs.append(sub)
+                fr.parts = list(reversed(kept_subs)) or None
+            elif getattr(part, "inline_data", None) is not None:
+                seen += 1
+                if seen > keep:
+                    removed += 1
+                    part = types.Part.from_text(text="[earlier screenshot omitted]")
+            new_parts.append(part)
+        msg.parts = list(reversed(new_parts))
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -587,7 +622,7 @@ def run_arm_google_cua_bg(
         if audit_contents_for_canary(chat_history):
             canary_leaked = True
         t_model = time.perf_counter()
-        resp = call_gemini_with_retry(
+        resp = call_gemini_once(
             client,
             model_id,
             chat_history,
@@ -712,17 +747,8 @@ def run_arm_google_cua_bg(
                 parts=[types.Part(function_response=fr) for fr in f_responses],
             )
         )
-        # Keep only the 2 most recent screenshots in history to avoid context bloat
-        seen_imgs = 0
-        for msg in reversed(chat_history):
-            for part in msg.parts or []:
-                fr = getattr(part, "function_response", None)
-                if fr and fr.parts:
-                    for sub in fr.parts:
-                        if getattr(sub, "inline_data", None):
-                            seen_imgs += 1
-                            if seen_imgs > 2:
-                                sub.inline_data = None
+        # Keep only the 2 most recent screenshots (initial user PNG included) to avoid context bloat
+        prune_history_images(chat_history, keep=2)
 
     return {
         "outer_turns": outer_turns,
@@ -846,7 +872,7 @@ def run_arm_agy_cua_direct(
         if audit_contents_for_canary(chat_history):
             canary_leaked = True
         t_m = time.perf_counter()
-        resp = call_gemini_with_retry(client, model_id, chat_history, config, spend, had_screenshot=False)
+        resp = call_gemini_once(client, model_id, chat_history, config, spend, had_screenshot=False)
         model_latencies_ms.append(round((time.perf_counter() - t_m) * 1000, 2))
 
         if not resp.candidates:
@@ -938,36 +964,42 @@ def run_arm_agy_cua_jev(
     jev_prev_calls = 0
 
     jev_server = jev_mod.JevMcpServer(env=env)
-    orig_call_provider = jev_server._call_provider
+    # Selection calls evaluate_jev_choice(..., self.http_post): wrap that real transport so every outgoing
+    # Jev request is audited for canary leakage and reserved against the budget before it is sent.
+    orig_http_post = jev_server.http_post
+    completed_jev_requests = 0
 
-    def audited_call_provider(request_payload: dict[str, Any]) -> dict[str, Any]:
-        nonlocal canary_leaked, jev_prev_in, jev_prev_out, jev_prev_calls
-        if contains_secret_canary(json.dumps(request_payload, ensure_ascii=False)):
+    def audited_http_post(req: Any, timeout_s: float) -> tuple[int, str]:
+        nonlocal canary_leaked, completed_jev_requests
+        raw = getattr(req, "data", None) or b""
+        body = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        if contains_secret_canary(body):
             canary_leaked = True
         spend.reserve_before_call(JEV_RESERVE_ALLOWANCE_USD)
         try:
-            resp = orig_call_provider(request_payload)
+            result = orig_http_post(req, timeout_s)
         except Exception:
+            # Uncertain transport failure: keep the reservation (it may have been billed).
+            spend.jev_uncertain_failures += 1
+            raise
+        completed_jev_requests += 1
+        return result
+
+    jev_server.http_post = audited_http_post
+
+    def reconcile_jev_spend() -> None:
+        """After selection completes, charge accounted usage and release one reservation per completed request."""
+        nonlocal jev_prev_in, jev_prev_out, jev_prev_calls, completed_jev_requests
+        while completed_jev_requests > 0:
+            completed_jev_requests -= 1
             jev_prev_in, jev_prev_out, jev_prev_calls = spend.record_jev_incremental(
                 jev_server.accounting,
                 jev_prev_in,
                 jev_prev_out,
                 jev_prev_calls,
                 reserved_allowance_usd=JEV_RESERVE_ALLOWANCE_USD,
-                uncertain_failure=True,
+                uncertain_failure=False,
             )
-            raise
-        jev_prev_in, jev_prev_out, jev_prev_calls = spend.record_jev_incremental(
-            jev_server.accounting,
-            jev_prev_in,
-            jev_prev_out,
-            jev_prev_calls,
-            reserved_allowance_usd=JEV_RESERVE_ALLOWANCE_USD,
-            uncertain_failure=False,
-        )
-        return resp
-
-    jev_server._call_provider = audited_call_provider  # type: ignore[method-assign]
 
     try:
         postcond_schema = types.Schema(
@@ -1104,7 +1136,7 @@ def run_arm_agy_cua_jev(
             if audit_contents_for_canary(chat_history):
                 canary_leaked = True
             t_m = time.perf_counter()
-            resp = call_gemini_with_retry(client, model_id, chat_history, config, spend, had_screenshot=False)
+            resp = call_gemini_once(client, model_id, chat_history, config, spend, had_screenshot=False)
             model_latencies_ms.append(round((time.perf_counter() - t_m) * 1000, 2))
 
             if not resp.candidates:
@@ -1122,14 +1154,17 @@ def run_arm_agy_cua_jev(
                 raw_args = dict(fc.args or {})
                 if name in {"jev_batch", "jev_sequence"} and hillclimbed_v1:
                     seq_steps = raw_args.get("steps") or []
-                    res = jev_server.handle_batch({
-                        "pid": pid,
-                        "window_id": window_id,
-                        "chain_observations": True,
-                        # Controlled fixture: explicitly accept interstep drift so chaining is honoured.
-                        "allow_interstep_drift": True,
-                        "steps": seq_steps,
-                    })
+                    try:
+                        res = jev_server.handle_batch({
+                            "pid": pid,
+                            "window_id": window_id,
+                            "chain_observations": True,
+                            # Controlled fixture: explicitly accept interstep drift so chaining is honoured.
+                            "allow_interstep_drift": True,
+                            "steps": seq_steps,
+                        })
+                    finally:
+                        reconcile_jev_spend()
                     sc = res.get("structuredContent") or {}
                     if contains_secret_canary(json.dumps(sc, ensure_ascii=False)):
                         canary_leaked = True
@@ -1176,7 +1211,10 @@ def run_arm_agy_cua_jev(
                         step_call["value"] = raw_args["value"]
                     if "expected_postcondition" in raw_args and raw_args["expected_postcondition"]:
                         step_call["expected_postcondition"] = raw_args["expected_postcondition"]
-                    res = jev_server.handle_step(step_call)
+                    try:
+                        res = jev_server.handle_step(step_call)
+                    finally:
+                        reconcile_jev_spend()
                     sc = res.get("structuredContent") or {}
                     if contains_secret_canary(json.dumps(sc, ensure_ascii=False)):
                         canary_leaked = True
@@ -1284,7 +1322,7 @@ def main() -> int:
         sys.stderr.write("ERROR: GEMINI_API_KEY not found in environment or swarm-intercom/.env\n")
         return 2
 
-    client = genai.Client()
+    client = make_genai_client()
     spend = SpendTracker(max_budget_usd=args.max_budget_usd)
 
     all_tasks = build_tasks()
