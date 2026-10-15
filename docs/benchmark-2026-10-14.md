@@ -141,7 +141,9 @@ Use a local venv with `google-genai==2.23.0`, `python-dotenv`, and Pillow for th
 shared harness imports. The adapter disables the optional dotenv bootstrap and
 never reads credentials. The app flag forwards an already obtained human grant
 only for Calculator and this fixture; other approval requests fail closed.
-Exit 2 records the blocker. Saved summaries contain selected metadata and
+Exit 2 records the blocker. The adapter requires native window-ID binding and matching native inventory
+identity; a same-title window, path lookup, or app name alone cannot admit access.
+Saved summaries contain selected metadata and
 classifications, never arbitrary UI state or raw error text. Screenshot pixels
 and state files stay in ignored private evidence.
 
@@ -149,7 +151,7 @@ and state files stay in ignored private evidence.
 
 Frozen benchmark base: PR #11 OPEN at
 `154edf54e6223b4c61543d78206247535b3e2b89`. Executed adapter source:
-`1c1ff24ea4b1df572e0c2eb62f353fbfdc33f29a`, branch
+`c34d7af21ed4113601b1573d37d4bd39414ed7f8`, branch
 `codex/issue-12-codex-cu`, worktree
 `/Users/bobbybones/Developer/side-quests/agy-cua-worktrees/issue-12-codex-cu`.
 The evidence binds the source, fixture binary and fixture source hashes.
@@ -157,7 +159,7 @@ The evidence binds the source, fixture binary and fixture source hashes.
 executed AST comparisons prove this. The summary serialization statement was
 extracted unchanged into `write_benchmark_summary()` for reuse. The original
 fixture, focus probe and historical baseline summary remain byte-identical.
-Production adapters were not tuned. Local validation: **68 tests passed**,
+Production adapters were not tuned. Local validation: **69 tests passed**,
 ShellCheck passed, diff checks passed.
 
 This resumed admission work made no model request and no paid API request. The

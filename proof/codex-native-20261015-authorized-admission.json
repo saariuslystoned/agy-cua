@@ -1,5 +1,5 @@
 {
-  "timestamp_utc": "20261015T173145Z",
+  "timestamp_utc": "20261015T173924Z",
   "run_status": "blocked",
   "results": [],
   "arms": [
@@ -31,8 +31,8 @@
     "cost_usd": "ChatGPT subscription marginal billing unavailable; API prices are not applied."
   },
   "base_sha": "154edf54e6223b4c61543d78206247535b3e2b89",
-  "runner_head": "1c1ff24ea4b1df572e0c2eb62f353fbfdc33f29a",
-  "runner_source_sha256": "2489fbafb89b3994b9b66d3b7ee05794dfd468e7bcce8d275edeac24a7e5666c",
+  "runner_head": "c34d7af21ed4113601b1573d37d4bd39414ed7f8",
+  "runner_source_sha256": "15aaeb4e186ffc783f1bb895e77080c76330cb569de4e362a68f492d5a5f1494",
   "fixture_source_sha256": "cab5753af003a01ba2051cc3f6074a3d4ced30101ac8c13971a5b7d549441483",
   "peer_fixture_count_before_setup": 0,
   "cost_note": "No model request made; subscription marginal pricing unavailable, not zero.",
@@ -46,7 +46,7 @@
     "T5b_1password_vault_item"
   ],
   "initial_form_oracle_passed": false,
-  "private_fixture_screenshot_sha256": "8bf18d7f3acf75da34f4e2a3a95f248b99fb2c9d353456b71718e409c5a99517",
+  "private_fixture_screenshot_sha256": "de811f93796721798d8fe9d1c3808f93a9b270c172f271dcf3b827befd608d50",
   "runtime": {
     "userAgent": "Codex Desktop/0.161.0 (Mac OS 26.5.2; arm64) dumb (agy_cua_native_benchmark; 0.1)",
     "platformFamily": "unix",
@@ -83,6 +83,7 @@
         "error": "invalid_original_fixture_name"
       }
     ],
+    "window_identity_verified": false,
     "inventory_matches": 0
   },
   "blocker": "original_unbundled_fixture_not_addressable_by_native_plugin",
@@ -550,7 +551,7 @@
     {
       "command": "python3 -m unittest discover -v tests",
       "exit_code": 0,
-      "tests": 68
+      "tests": 69
     },
     {
       "command": "shellcheck bin/agy-cua scripts/*.sh",
@@ -584,5 +585,16 @@
       "[]"
     ],
     "inventory_is_error": false
+  },
+  "private_screenshot_visual_inspection": "Original empty provisioning form, Standard Tier, Pending; inspected latest exact-source screenshot. Pixel hash changed from earlier capture, so no byte-equality claim made for screenshots.",
+  "accepted_review_finding": {
+    "reviewed_head": "5870174d89579850db241efc18ac0c4b5e3c2d49",
+    "reviewer": "GitHub Copilot Code Review",
+    "finding": "Same-title fixture may belong to another worker",
+    "disposition": "accepted_and_fixed",
+    "authority": "probe_fixture requires native window binding plus matching native inventory ID; title/path/name alone cannot admit",
+    "regression": "test_same_title_other_worker_cannot_admit_or_persist_ui",
+    "pre_fix_discriminator": "Executed helper at 1c1ff24ea4b1df572e0c2eb62f353fbfdc33f29a; same-title receipt without native window identity falsely admitted. New negative assertion rejects that implementation.",
+    "exact_new_head_review": "pending"
   }
 }
