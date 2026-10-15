@@ -768,7 +768,9 @@ def _parse_markdown_hierarchy(tree_md: str) -> tuple[dict[int, int], set[int]]:
         role_by_level[level] = role
         if idx_str is not None:
             idx = int(idx_str)
-            md_depth[idx] = level
+            root_at_zero = role_by_level.get(0) in WINDOW_ROOT_ROLES
+            eff_depth = level if (root_at_zero or role in WINDOW_ROOT_ROLES) else level + 1
+            md_depth[idx] = eff_depth
             if any(r == "AXToolbar" for k, r in role_by_level.items() if k <= level):
                 md_toolbar_ids.add(idx)
     return md_depth, md_toolbar_ids
@@ -788,6 +790,9 @@ def _element_depth_and_toolbar(
     in_toolbar = str(element.get("role") or "") == "AXToolbar" or (idx in md_toolbar_ids)
     has_parent_chain = False
     chain_complete = False
+    root_indices = {
+        k for k, v in by_index.items() if str(v.get("role") or "").strip() in WINDOW_ROOT_ROLES
+    }
     while curr is not None:
         role = str(curr.get("role") or "")
         if role == "AXToolbar":
@@ -802,15 +807,16 @@ def _element_depth_and_toolbar(
         if parent_idx in seen:
             break
         seen.add(parent_idx)
+        hops += 1
+        has_parent_chain = True
         parent = by_index.get(parent_idx)
         if parent is None:
             if parent_idx in md_depth:
-                hops += md_depth[parent_idx] + 1
-                has_parent_chain = True
+                hops += md_depth[parent_idx]
                 chain_complete = True
+            elif root_indices and parent_idx not in root_indices:
+                hops += 1
             break
-        hops += 1
-        has_parent_chain = True
         curr = parent
 
     explicit_depth = element.get("depth")
@@ -844,12 +850,10 @@ def _supports_interactive_click_action(actions: set[str]) -> bool:
 
 def _element_can_auto_click(role: str, actions: set[str], has_explicit_actions: bool) -> bool:
     """Return True only when an actionable element supports an automatic click/focus-click candidate."""
-    if _supports_press_action(actions):
-        return True
     if role == "AXCell":
-        return False
+        return _supports_press_action(actions)
     if role == "AXLink":
-        return not has_explicit_actions
+        return _supports_press_action(actions) if has_explicit_actions else True
     if role in TEXT_INPUT_AX_ROLES:
         if not has_explicit_actions or not actions:
             return True
@@ -864,8 +868,10 @@ def _element_can_auto_click(role: str, actions: set[str], has_explicit_actions: 
         "AXTabGroup",
         "AXRow",
     }:
-        if has_explicit_actions and actions and not _supports_interactive_click_action(actions):
-            return False
+        if has_explicit_actions:
+            return bool(actions) and _supports_interactive_click_action(actions)
+        return True
+    if role in ACTIONABLE_AX_ROLES and _supports_press_action(actions):
         return True
     return False
 
@@ -983,6 +989,7 @@ def extract_window_observation(
             "element_index": idx,
             "role": role,
             "label": display_label,
+            "raw_label": label,
             "state": state_str,
             "depth": depth,
             "in_toolbar": in_toolbar,
@@ -990,7 +997,7 @@ def extract_window_observation(
             "can_auto_click": can_auto_click,
         }
         if value is not None:
-            compact_el["value"] = value[:120]
+            compact_el["value"] = value
         if is_actionable_control:
             compact_elements.append(compact_el)
         else:
@@ -1484,7 +1491,13 @@ def check_postcondition(
             raw_val = expected["element_value_equals"]
             if not isinstance(raw_val, str):
                 return state_changed, False, "invalid_element_value_equals"
-            actual_val = str(post_el.get("value") or "")
+            if "value" not in post_el or post_el["value"] is None:
+                return (
+                    state_changed,
+                    False,
+                    f"expected element_value_equals={raw_val!r} on element_index={bound_idx}, but element has no observable value",
+                )
+            actual_val = str(post_el["value"])
             if actual_val != raw_val:
                 return (
                     state_changed,
@@ -1492,11 +1505,14 @@ def check_postcondition(
                     f"expected element_value_equals={raw_val!r} on element_index={bound_idx}, got {actual_val!r}",
                 )
 
+        actual_lbl = str(
+            (post_el.get("raw_label") if "raw_label" in post_el else post_el.get("label")) or ""
+        )
+
         if "element_label_equals" in expected:
             raw_lbl_eq = expected["element_label_equals"]
             if not isinstance(raw_lbl_eq, str) or not raw_lbl_eq:
                 return state_changed, False, "invalid_empty_element_label_equals"
-            actual_lbl = str(post_el.get("label") or "")
             if actual_lbl != raw_lbl_eq:
                 return (
                     state_changed,
@@ -1508,7 +1524,6 @@ def check_postcondition(
             raw_lbl = expected["element_label_contains"]
             if not isinstance(raw_lbl, str) or not raw_lbl:
                 return state_changed, False, "invalid_empty_element_label_contains"
-            actual_lbl = str(post_el.get("label") or "")
             if raw_lbl not in actual_lbl:
                 return (
                     state_changed,
