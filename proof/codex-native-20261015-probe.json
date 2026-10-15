@@ -756,9 +756,9 @@
     {
       "command": "python3 -m unittest discover -v tests",
       "exit_code": 0,
-      "tests": 55,
+      "tests": 56,
       "result": "OK",
-      "local_log": "runs/benchmark-codex-runs/20261015-native-probe/tests.log"
+      "local_log": "runs/benchmark-codex-runs/20261015-native-probe/tests-final.log"
     },
     {
       "command": "shellcheck bin/agy-cua scripts/*.sh",
@@ -901,5 +901,15 @@
       "properties": {}
     },
     "response": "not_granted; explicit human app-access question pending in implementation chat"
+  },
+  "review": {
+    "reviewer": "GitHub Copilot Code Review",
+    "reviewed_head": "c19ab5bbae296e485c59870610f16340df3d955d",
+    "finding": "Translate queue.Empty to app_server_timeout",
+    "disposition": "accepted_and_fixed",
+    "authority": "scripts/probe_codex_native.py Probe.call",
+    "test": "test_silent_server_is_classified_as_timeout",
+    "pre_fix_discriminator": "Executed Probe.call from 9890be434f7f2a0c22ac42447f7a97664a524ee0: Queue.Empty reproduced; new TimeoutError assertion rejects that base.",
+    "exact_new_head_review": "pending"
   }
 }

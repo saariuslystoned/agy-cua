@@ -47,7 +47,10 @@ class Probe:
         self.send({"id": request_id, "method": method, "params": params})
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            message = self.messages.get(timeout=max(0.001, deadline - time.monotonic()))
+            try:
+                message = self.messages.get(timeout=max(0.001, deadline - time.monotonic()))
+            except queue.Empty as exc:
+                raise TimeoutError("app_server_timeout") from exc
             if message is None:
                 raise RuntimeError("app_server_closed")
             if "id" in message and "method" in message:

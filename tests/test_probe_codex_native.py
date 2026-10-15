@@ -39,6 +39,14 @@ class FakeProbe:
 
 
 class AdmissionTests(unittest.TestCase):
+    def test_silent_server_is_classified_as_timeout(self):
+        client = object.__new__(probe.Probe)
+        client.next_id = 0
+        client.messages = probe.queue.Queue()
+        client.send = lambda message: None
+        with self.assertRaisesRegex(TimeoutError, "^app_server_timeout$"):
+            client.call("model/list", {}, timeout=0.001)
+
     def execute(self, fake):
         with patch.object(probe, "Probe", return_value=fake):
             result = probe.run()
