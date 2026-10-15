@@ -106,6 +106,7 @@ class FixtureAdmissionTests(unittest.TestCase):
         session = self.session([
             {"isError": True, "content": [{"type": "text", "text": "Invalid app: /fixture"}]},
             {"isError": True, "content": [{"type": "text", "text": "macOS getApp requires an app name, path, or bundle ID."}]},
+            {"isError": True, "content": [{"type": "text", "text": "Invalid app: bench_fixture"}]},
             {"content": [{"type": "text", "text": "[]"}]},
         ])
         result = runner.probe_fixture(session, "thread", Path("/fixture"), 42)
@@ -113,10 +114,12 @@ class FixtureAdmissionTests(unittest.TestCase):
         self.assertEqual(result["inventory_matches"], 0)
         self.assertEqual(result["attempts"][0]["error"], "invalid_original_fixture_path")
         self.assertEqual(result["attempts"][1]["error"], "macos_requires_app_identity")
+        self.assertEqual(result["attempts"][2]["error"], "invalid_original_fixture_name")
 
     def test_error_text_is_not_saved_and_malformed_inventory_cannot_admit(self):
         session = self.session([
             {"isError": True, "content": [{"type": "text", "text": "PRIVATE_ERROR"}]},
+            {"isError": True, "content": []},
             {"isError": True, "content": []},
             {"isError": True, "content": [{"type": "text", "text": "not JSON"}]},
         ])
@@ -128,7 +131,7 @@ class FixtureAdmissionTests(unittest.TestCase):
     def test_exact_inventory_app_id_must_itself_work(self):
         for failed in (False, True):
             session = self.session([
-                {"isError": True}, {"isError": True},
+                {"isError": True}, {"isError": True}, {"isError": True},
                 {"content": [{"type": "text", "text": '[{"id":"fixture-only"}]'}]},
                 {"isError": failed, "content": [{"type": "text", "text": 'Window: "AGYCuaBench-form"'}]},
             ])
@@ -137,7 +140,7 @@ class FixtureAdmissionTests(unittest.TestCase):
             self.assertIn('cua.getApp("fixture-only")', session.calls[-1][1]["arguments"]["code"])
 
     def test_empty_success_receipt_is_not_fixture_access(self):
-        session = self.session([{}, {}, {"content": [{"type": "text", "text": "[]"}]}])
+        session = self.session([{}, {}, {}, {"content": [{"type": "text", "text": "[]"}]}])
         result = runner.probe_fixture(session, "thread", Path("/fixture"), 42)
         self.assertFalse(result["accessible"])
         self.assertEqual(result["attempts"][0]["error"], "missing_fixture_ui_evidence")

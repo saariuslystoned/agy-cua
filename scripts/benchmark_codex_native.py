@@ -146,7 +146,8 @@ def probe_fixture(session, thread_id: str, fixture: Path, window_id: int) -> dic
     """
     result = {"accessible": False, "attempts": []}
     code = 'var fixtureApp = await cua.getApp(' + json.dumps(str(fixture)) + ');'
-    probes = [("path", code), ("window_id", 'var fixtureApp = await cua.getApp({windowId:' + str(window_id) + '});')]
+    probes = [("path", code), ("window_id", 'var fixtureApp = await cua.getApp({windowId:' + str(window_id) + '});'),
+              ("display_name", 'var fixtureApp = await cua.getApp("bench_fixture");')]
     def native(code):
         return session.call("mcpServer/tool/call", {"threadId": thread_id, "server": "cua_repl", "tool": "js",
             "arguments": {"code": code, "title": "Check original benchmark fixture native access"}})
@@ -159,9 +160,11 @@ def probe_fixture(session, thread_id: str, fixture: Path, window_id: int) -> dic
         receipt = native(code)
         texts = [c.get("text", "") for c in receipt.get("content", []) if c.get("type") == "text"]
         invalid_path = any(t.startswith("Invalid app: " + str(fixture)) for t in texts)
+        invalid_name = any(t.startswith("Invalid app: bench_fixture") for t in texts)
         unsupported_window = any(t.startswith("macOS getApp requires an app name, path, or bundle ID.") for t in texts)
         error = "invalid_original_fixture_path" if invalid_path else (
-            "macos_requires_app_identity" if unsupported_window else "native_tool_error"
+            "invalid_original_fixture_name" if invalid_name else (
+                "macos_requires_app_identity" if unsupported_window else "native_tool_error")
         )
         failed = not fixture_visible(receipt)
         if failed and not receipt.get("isError"):
