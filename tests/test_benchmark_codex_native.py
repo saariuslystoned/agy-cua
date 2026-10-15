@@ -157,6 +157,34 @@ class FixtureAdmissionTests(unittest.TestCase):
         self.assertFalse(result["accessible"])
         self.assertEqual(result["attempts"][0]["error"], "missing_fixture_ui_evidence")
 
+    def test_fixture_bundle_path_extracts_app_bundle_root(self):
+        self.assertIsNone(runner.fixture_bundle_path(Path("/fixture")))
+        self.assertEqual(
+            runner.fixture_bundle_path(Path("/tmp/BenchFixture.app/Contents/MacOS/bench_fixture")),
+            Path("/tmp/BenchFixture.app"),
+        )
+
+    def test_bundled_macos_fixture_admits_only_when_single_instance_verified(self):
+        ui = {"content": [{"type": "text", "text": 'Window: "AGYCuaBench-form", App: BenchFixture.'}]}
+        inv = {"content": [{"type": "text", "text": '[{"id":"com.agycua.benchfixture","is_running":true,"window_ids":[]}]'}]}
+        fixture_bin = Path("/tmp/BenchFixture.app/Contents/MacOS/bench_fixture")
+        orig_peers = runner.peer_fixtures
+        try:
+            runner.peer_fixtures = lambda: [1234]
+            session = self.session([ui, {"isError": True, "content": [{"type": "text", "text": "macOS getApp requires an app name, path, or bundle ID."}]}, ui, inv])
+            admitted = runner.probe_fixture(session, "thread", fixture_bin, 42, expected_pid=1234)
+            self.assertTrue(admitted["accessible"])
+            self.assertTrue(admitted["window_identity_verified"])
+            self.assertEqual(admitted["accepted_target_kind"], "bundle_app")
+
+            runner.peer_fixtures = lambda: [1234, 5678]
+            session2 = self.session([ui, {"isError": True}, ui, inv])
+            rejected = runner.probe_fixture(session2, "thread", fixture_bin, 42, expected_pid=1234)
+            self.assertFalse(rejected["accessible"])
+            self.assertFalse(rejected["window_identity_verified"])
+        finally:
+            runner.peer_fixtures = orig_peers
+
 
 if __name__ == "__main__":
     unittest.main()

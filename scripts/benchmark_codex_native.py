@@ -138,7 +138,20 @@ def peer_fixtures() -> list[int]:
             if line.rstrip().endswith("/bench_fixture")]
 
 
-def probe_fixture(session, thread_id: str, fixture: Path, window_id: int) -> dict:
+def fixture_bundle_path(fixture: Path) -> Path | None:
+    if fixture.suffix == ".app":
+        return fixture
+    if (
+        len(fixture.parents) >= 3
+        and fixture.parent.name == "MacOS"
+        and fixture.parents[1].name == "Contents"
+        and fixture.parents[2].suffix == ".app"
+    ):
+        return fixture.parents[2]
+    return None
+
+
+def probe_fixture(session, thread_id: str, fixture: Path, window_id: int, *, expected_pid: int | None = None) -> dict:
     """Try documented native target forms without changing or rebuilding the app.
 
     The form-mode fixture contains no canary. Arbitrary UI/error text never leaves
@@ -146,12 +159,16 @@ def probe_fixture(session, thread_id: str, fixture: Path, window_id: int) -> dic
     """
     result = {"accessible": False, "attempts": [], "window_identity_verified": False}
     bound_window_observed = False
-    code = 'var fixtureApp = await cua.getApp(' + json.dumps(str(fixture)) + ');'
+    bundle_app_observed = False
+    bundle = fixture_bundle_path(fixture)
+    path_target = str(bundle if bundle is not None else fixture)
+    display_target = "BenchFixture" if bundle is not None else "bench_fixture"
+    code = 'var fixtureApp = await cua.getApp(' + json.dumps(path_target) + ');'
     probes = [("path", code), ("window_id", 'var fixtureApp = await cua.getApp({windowId:' + str(window_id) + '});'),
-              ("display_name", 'var fixtureApp = await cua.getApp("bench_fixture");')]
+              ("display_name", 'var fixtureApp = await cua.getApp(' + json.dumps(display_target) + ');')]
     def native(code):
         return session.call("mcpServer/tool/call", {"threadId": thread_id, "server": "cua_repl", "tool": "js",
-            "arguments": {"code": code, "title": "Check original benchmark fixture native access"}})
+            "arguments": {"code": code, "title": "Check benchmark fixture native access"}})
     def fixture_visible(receipt):
         return not receipt.get("isError") and any(
             c.get("type") == "text" and 'Window: "AGYCuaBench-form"' in c.get("text", "")
@@ -160,8 +177,8 @@ def probe_fixture(session, thread_id: str, fixture: Path, window_id: int) -> dic
     for kind, code in probes:
         receipt = native(code)
         texts = [c.get("text", "") for c in receipt.get("content", []) if c.get("type") == "text"]
-        invalid_path = any(t.startswith("Invalid app: " + str(fixture)) for t in texts)
-        invalid_name = any(t.startswith("Invalid app: bench_fixture") for t in texts)
+        invalid_path = any(t.startswith("Invalid app: " + path_target) or t.startswith("Invalid app: " + str(fixture)) for t in texts)
+        invalid_name = any(t.startswith("Invalid app: " + display_target) or t.startswith("Invalid app: bench_fixture") for t in texts)
         unsupported_window = any(t.startswith("macOS getApp requires an app name, path, or bundle ID.") for t in texts)
         error = "invalid_original_fixture_path" if invalid_path else (
             "invalid_original_fixture_name" if invalid_name else (
@@ -173,10 +190,13 @@ def probe_fixture(session, thread_id: str, fixture: Path, window_id: int) -> dic
         result["attempts"].append({"target_kind": kind, "is_error": failed, "error": error if failed else None})
         if kind == "window_id" and not failed:
             bound_window_observed = True
-        # A same-title path/name result cannot identify the launched window.
-    code = ('var inventory = await cua.listApps({emit:false}); nodeRepl.write(inventory.filter(a => '
-            'a.windows?.some(w => w.id === ' + str(window_id) + ')).map(a => '
-            '({id:a.id, window_ids:a.windows.map(w=>w.id)})));')
+        if kind in ("path", "display_name") and not failed and bundle is not None and any("App: BenchFixture" in t for t in texts):
+            bundle_app_observed = True
+        # A same-title path/name result cannot identify the launched window without inventory + single-instance verification.
+    code = ('var inventory = await cua.listApps({emit:false}); nodeRepl.write(JSON.stringify(inventory.filter(a => '
+            'a.windows?.some(w => w.id === ' + str(window_id) + ') || '
+            '(a.id === "com.agycua.benchfixture" && a.isRunning === true)).map(a => '
+            '({id:a.id, is_running:Boolean(a.isRunning), window_ids:Array.isArray(a.windows)?a.windows.map(w=>w.id):[]}))));')
     receipt = native(code)
     if receipt.get("isError"):
         result["inventory_matches"] = None
@@ -190,13 +210,21 @@ def probe_fixture(session, thread_id: str, fixture: Path, window_id: int) -> dic
                 continue
             if isinstance(value, list):
                 matches = value
-    identities = [entry for entry in matches or [] if isinstance(entry, dict)
-                  and isinstance(entry.get("id"), str) and isinstance(entry.get("window_ids"), list)
-                  and any(type(value) is int and value == window_id for value in entry["window_ids"])]
+    window_identities = [entry for entry in matches or [] if isinstance(entry, dict)
+                         and isinstance(entry.get("id"), str) and isinstance(entry.get("window_ids"), list)
+                         and any(type(value) is int and value == window_id for value in entry["window_ids"])]
+    bundle_identities = [entry for entry in matches or [] if isinstance(entry, dict)
+                         and entry.get("id") == "com.agycua.benchfixture" and entry.get("is_running") is True]
+    identities = window_identities or bundle_identities
     result["inventory_matches"] = len(identities) if matches is not None else None
-    if bound_window_observed and len(identities) == 1:
+    if bound_window_observed and len(window_identities) == 1:
         result.update(accessible=True, window_identity_verified=True,
                       accepted_target_kind="window_id", identity_source="native_window_binding_and_inventory")
+    elif bundle is not None and bundle_app_observed and len(bundle_identities) == 1:
+        peers = peer_fixtures()
+        if expected_pid is not None and peers == [expected_pid]:
+            result.update(accessible=True, window_identity_verified=True,
+                          accepted_target_kind="bundle_app", identity_source="macos_bundle_and_single_instance_inventory")
     return result
 
 
@@ -219,7 +247,7 @@ def main() -> int:
         (out / "heartbeat").write_text(now + "\n")
         (out / "STATE.md").write_text("Phase: " + phase + "\n" + json.dumps(values) + "\n")
     event("starting", human_app_grant="Allow these benchmark apps")
-    (out / "PROOF.md").write_text("Native Codex admission only; zero model turns. Original form fixture, read-only native access.\n")
+    (out / "PROOF.md").write_text("Native Codex admission only; zero model turns. Bundled BenchFixture.app, read-only native access.\n")
     harness = load_harness()
     payload = {"timestamp_utc": stamp, "run_status": "starting", "results": [],
                "arms": list(ARMS), "arm_configurations": {a: {"model": m, "service_tier": t, "reasoning_effort": "low"} for a, (m, t) in ARMS.items()},
@@ -236,6 +264,8 @@ def main() -> int:
     try:
         fixture = harness.ensure_fixture_binary()
         payload["fixture_sha256"] = hashlib.sha256(fixture.read_bytes()).hexdigest()
+        payload["fixture_bundle_id"] = getattr(harness, "FIXTURE_BUNDLE_ID", None)
+        payload["fixture_app_path"] = str(getattr(harness, "FIXTURE_APP", fixture))
         binary = harness.jev_mod.find_driver(os.environ)
         if not binary:
             raise RuntimeError("setup_driver_unavailable")
@@ -248,14 +278,15 @@ def main() -> int:
         png, _, _, _ = harness.get_window_screenshot_and_size(driver, pid, wid)
         (private / "original-form.png").write_bytes(png)
         payload["private_fixture_screenshot_sha256"] = hashlib.sha256(png).hexdigest()
-        session = NativeSession({"Calculator", "bench_fixture", str(fixture)}, True, event)
+        allowed_targets = {"Calculator", "BenchFixture", "com.agycua.benchfixture", "bench_fixture", str(fixture), str(getattr(harness, "FIXTURE_APP", fixture))}
+        session = NativeSession(allowed_targets, True, event)
         payload["runtime"] = session.initialize()
         thread = session.start_thread(*ARMS["codex-cu-sol-fast"], out)
         payload["thread_configuration"] = {k: thread.get(k) for k in ("model", "modelProvider", "serviceTier", "reasoningEffort")}
         # Recheck the second arm without generating a response or reusing solver context.
         astra = session.start_thread(*ARMS["codex-cu-astra-ultrafast"], out)
         payload["astra_thread_configuration"] = {k: astra.get(k) for k in ("model", "modelProvider", "serviceTier", "reasoningEffort")}
-        fixture_access = probe_fixture(session, thread["thread"]["id"], fixture, wid)
+        fixture_access = probe_fixture(session, thread["thread"]["id"], fixture, wid, expected_pid=pid)
         payload["fixture_native_access"] = fixture_access
         payload["run_status"] = "apps_accessible_measurements_not_started" if fixture_access["accessible"] else "blocked"
         payload["blocker"] = None if fixture_access["accessible"] else "original_unbundled_fixture_not_addressable_by_native_plugin"

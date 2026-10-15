@@ -45,7 +45,11 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parent.parent
 JEV_MCP_PATH = ROOT / "bin" / "agy-cua-jev-mcp"
 FIXTURE_SRC = ROOT / "scripts" / "bench_fixture.swift"
-FIXTURE_BIN = ROOT / "runs" / ".cache" / "bench_fixture"
+FIXTURE_BUNDLE_ID = "com.agycua.benchfixture"
+FIXTURE_DISPLAY_NAME = "BenchFixture"
+FIXTURE_APP = ROOT / "runs" / ".cache" / "BenchFixture.app"
+FIXTURE_BIN = FIXTURE_APP / "Contents" / "MacOS" / "bench_fixture"
+FIXTURE_PLIST = FIXTURE_APP / "Contents" / "Info.plist"
 PROBE_FOCUS_SH = ROOT / "scripts" / "probe-focus.sh"
 
 _loader = importlib.machinery.SourceFileLoader("agy_cua_jev_mcp", str(JEV_MCP_PATH))
@@ -247,10 +251,50 @@ class TaskSpec:
     max_outer_steps: int = 12
 
 
+FIXTURE_INFO_PLIST_XML = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>{FIXTURE_DISPLAY_NAME}</string>
+    <key>CFBundleExecutable</key>
+    <string>bench_fixture</string>
+    <key>CFBundleIdentifier</key>
+    <string>{FIXTURE_BUNDLE_ID}</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>{FIXTURE_DISPLAY_NAME}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+"""
+
+
 def ensure_fixture_binary() -> Path:
     FIXTURE_BIN.parent.mkdir(parents=True, exist_ok=True)
-    if not FIXTURE_BIN.exists() or FIXTURE_SRC.stat().st_mtime > FIXTURE_BIN.stat().st_mtime:
-        subprocess.run(["swiftc", "-O", str(FIXTURE_SRC), "-o", str(FIXTURE_BIN)], check=True)
+    plist_changed = not FIXTURE_PLIST.exists() or FIXTURE_PLIST.read_text(encoding="utf-8") != FIXTURE_INFO_PLIST_XML
+    if plist_changed:
+        FIXTURE_PLIST.write_text(FIXTURE_INFO_PLIST_XML, encoding="utf-8")
+    bin_stale = not FIXTURE_BIN.exists() or FIXTURE_SRC.stat().st_mtime > FIXTURE_BIN.stat().st_mtime
+    if bin_stale or plist_changed:
+        if bin_stale:
+            subprocess.run(["swiftc", "-O", str(FIXTURE_SRC), "-o", str(FIXTURE_BIN)], check=True)
+        subprocess.run(["codesign", "--force", "--sign", "-", str(FIXTURE_APP)], check=True)
+        lsregister = Path(
+            "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+        )
+        if lsregister.exists():
+            subprocess.run([str(lsregister), "-f", str(FIXTURE_APP)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return FIXTURE_BIN
 
 
@@ -1407,7 +1451,7 @@ def launch_target_for_task(
         proc.terminate()
         raise RuntimeError(f"Fixture {task.fixture_mode} (pid={proc.pid}) opened no windows")
     wid = int(windows[0]["window_id"])
-    return int(proc.pid), wid, proc, state_file, "bench_fixture"
+    return int(proc.pid), wid, proc, state_file, FIXTURE_BUNDLE_ID
 
 
 def write_benchmark_summary(out_dir: Path, payload: dict[str, Any]) -> None:

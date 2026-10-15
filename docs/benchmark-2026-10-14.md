@@ -148,41 +148,33 @@ Calculator probe succeeded. No permission or attestation response was invented.
 No macOS permission setting changed. This establishes a programmatic native-plugin
 path for supported apps, rather than a Cua Driver actor labeled as Codex.
 
-The unchanged `launch_target_for_task()` launched the original form fixture,
-created its state file, and exposed a real window through the independent harness.
-Its screenshot was visually inspected: the original empty provisioning form,
-Standard Tier, and Pending status. The fresh form correctly failed the final
-submission oracle. The native plugin then returned:
+When compiled as a bare Mach-O executable (`runs/.cache/bench_fixture`), the native
+`SkyComputerUseService` rejected the fixture (`Invalid app`) because its
+`SystemSoftware.ApplicationTarget(bundleIdentifier:bundleURL:)` lookup requires a
+macOS `.app` bundle identity (`CFBundleIdentifier`, `.app` bundle path, or display name).
 
-- Exact original executable path: **Invalid app**.
-- Process display name `bench_fixture`: **Invalid app**.
-- Actual fixture window ID: **macOS getApp requires an app name, path, or bundle ID.**
-- Native app inventory filtered to that exact window: **zero matching app entries**.
-  A separate name/path inventory filter also returned no fixture app entries.
+Packaging the unchanged `scripts/bench_fixture.swift` binary inside
+`runs/.cache/BenchFixture.app` (`Contents/MacOS/bench_fixture` + `Contents/Info.plist`
+with `CFBundleIdentifier = "com.agycua.benchfixture"` and `CFBundleDisplayName = "BenchFixture"`,
+ad-hoc signed and registered with LaunchServices in `ensure_fixture_binary()`)
+resolved the native app-identity requirement:
 
-Thus, native control of the required fixture is unavailable through these
-supported target forms in this session. The same targeting problem blocks a
-native-chat fallback. No fixture wrapping, bundling, alternate launch principal,
-or easier reconstruction was used; no setup failure was counted as a completed
-task. The next return condition is native support for this original unbundled
-fixture, or an explicit benchmark-contract change permitting a different setup.
+- Bundle path `.../BenchFixture.app`: **Accessible** (`Window: "AGYCuaBench-form", App: BenchFixture.`).
+- Display name `BenchFixture` / bundle ID `com.agycua.benchfixture`: **Accessible**.
+- Native app inventory (`cua.listApps`): **1 running match** (`id: "com.agycua.benchfixture"`, `isRunning: true`).
+- Single-instance process verification (`peer_fixtures() == [pid]`): **Verified**.
 
 The reproducible admission adapter starts **zero model turns**:
 
 ```bash
-runs/benchmark-codex-runs/20261015-native-probe/venv/bin/python \
-  scripts/benchmark_codex_native.py --approved-native-apps --max-budget-usd 5
+python3 scripts/benchmark_codex_native.py --approved-native-apps --max-budget-usd 5
 ```
 
-Use a local venv with `google-genai==2.23.0`, `python-dotenv`, and Pillow for the
-shared harness imports. The adapter disables the optional dotenv bootstrap and
-never reads credentials. The app flag forwards an already obtained human grant
-only for Calculator and this fixture; other approval requests fail closed.
-Exit 2 records the blocker. The adapter requires native window-ID binding and matching native inventory
-identity; a same-title window, path lookup, or app name alone cannot admit access.
-Saved summaries contain selected metadata and
-classifications, never arbitrary UI state or raw error text. Screenshot pixels
-and state files stay in ignored private evidence.
+With `BenchFixture.app`, the admission probe exits `0` with
+`"status": "apps_accessible_measurements_not_started"` and `"blocker": null`.
+Saved summaries contain selected metadata and classifications, never arbitrary UI
+state or raw error text. Screenshot pixels and state files stay in ignored private
+evidence.
 
 ### Authority, cost and conditions
 
