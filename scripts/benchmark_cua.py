@@ -147,7 +147,7 @@ class SpendTracker:
         self,
         resp: Any,
         *,
-        had_screenshot: bool = False,
+        images_sent: int = 0,
         reserved_allowance_usd: float = 0.0,
     ) -> tuple[int, int, int, float]:
         """Charge validated Gemini usage, then release its reservation.
@@ -156,8 +156,8 @@ class SpendTracker:
         reservation is retained and the run aborts through main()'s checkpoint handler.
         """
         self.gemini_calls += 1
-        if had_screenshot:
-            self.screenshots_sent += 1
+        # Count every transmitted image (history resends included), not screenshot-bearing calls.
+        self.screenshots_sent += max(0, int(images_sent))
         um = getattr(resp, "usage_metadata", None)
 
         def _count(name: str, required: bool) -> int:
@@ -535,6 +535,46 @@ def _verify_1password(sf: Path | None, canary_leaked: bool) -> tuple[bool, str, 
     ), st
 
 
+def checked_call(driver: Any, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Dispatch a mutating driver tool and fail closed on `isError` receipts.
+
+    DriverClient.call_tool() returns isError results without raising; a failed mutating receipt leaves the
+    effect uncertain, so abort (main() checkpoints) instead of letting the planner continue or repeat it.
+    """
+    res = driver.call_tool(tool, args)
+    if isinstance(res, Mapping) and res.get("isError"):
+        detail = "".join(c.get("text", "") for c in (res.get("content") or []) if isinstance(c, Mapping))[:300]
+        if tool in {"type_text", "set_value"}:
+            detail = "<redacted>"
+        raise RuntimeError(f"driver {tool} returned isError: {detail}")
+    return res
+
+
+def count_request_images(contents: list[types.Content]) -> int:
+    """Count image parts actually transmitted in a Gemini request (top-level and function-response)."""
+    n = 0
+    for msg in contents or []:
+        for part in getattr(msg, "parts", None) or []:
+            if getattr(part, "inline_data", None) is not None:
+                n += 1
+            fr = getattr(part, "function_response", None)
+            if fr is not None and fr.parts:
+                n += sum(1 for sub in fr.parts if getattr(sub, "inline_data", None) is not None)
+    return n
+
+
+def parse_key_chord(args: Mapping[str, Any]) -> list[str] | None:
+    """Return a chord list from list or '+'-delimited string `keys` / `key` (e.g. 'Control+A'), else None."""
+    raw = args.get("keys")
+    if raw is None and isinstance(args.get("key"), str) and "+" in args["key"].strip("+"):
+        raw = args["key"]
+    if isinstance(raw, str):
+        raw = [k for k in (s.strip() for s in raw.split("+")) if k]
+    if isinstance(raw, list) and raw:
+        return [CUA_KEY_MAP.get(str(k).lower(), str(k).lower()) for k in raw]
+    return None
+
+
 def make_genai_client() -> genai.Client:
     """Gemini client with transport-level retries disabled (tracker #2: no automatic provider retries)."""
     return genai.Client(http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)))
@@ -546,10 +586,9 @@ def call_gemini_once(
     contents: list[types.Content],
     config: types.GenerateContentConfig,
     spend: SpendTracker,
-    *,
-    had_screenshot: bool = False,
 ) -> Any:
     """One bounded provider attempt. Failures (including uncertain timeouts) are preserved, never resubmitted."""
+    images_sent = count_request_images(contents)
     spend.reserve_before_call(GEMINI_RESERVE_ALLOWANCE_USD)
     try:
         resp = client.models.generate_content(
@@ -561,7 +600,7 @@ def call_gemini_once(
         # Retain the conservative reservation: the attempt may have been billed.
         spend.gemini_uncertain_failures += 1
         raise
-    spend.record_gemini(resp, had_screenshot=had_screenshot, reserved_allowance_usd=GEMINI_RESERVE_ALLOWANCE_USD)
+    spend.record_gemini(resp, images_sent=images_sent, reserved_allowance_usd=GEMINI_RESERVE_ALLOWANCE_USD)
     return resp
 
 
@@ -662,7 +701,6 @@ def run_arm_google_cua_bg(
             chat_history,
             config,
             spend,
-            had_screenshot=True,
         )
         m_ms = round((time.perf_counter() - t_model) * 1000, 2)
         model_latencies_ms.append(m_ms)
@@ -696,36 +734,37 @@ def run_arm_google_cua_bg(
                     btn = str(args.get("button", "left")).lower()
                     cnt = int(args.get("click_count", args.get("count", 1)) or 1)
                     if cnt >= 2:
-                        driver.call_tool("double_click", {"pid": pid, "window_id": window_id, "x": px, "y": py, "delivery_mode": "background"})
+                        checked_call(driver, "double_click", {"pid": pid, "window_id": window_id, "x": px, "y": py, "delivery_mode": "background"})
                     elif btn == "right":
-                        driver.call_tool("right_click", {"pid": pid, "window_id": window_id, "x": px, "y": py, "delivery_mode": "background"})
+                        checked_call(driver, "right_click", {"pid": pid, "window_id": window_id, "x": px, "y": py, "delivery_mode": "background"})
                     else:
-                        driver.call_tool("click", {"pid": pid, "window_id": window_id, "x": px, "y": py, "delivery_mode": "background"})
+                        checked_call(driver, "click", {"pid": pid, "window_id": window_id, "x": px, "y": py, "delivery_mode": "background"})
                     result_msg = f"Clicked ({px}, {py})"
                 elif name == "double_click" or name == "double_click_at":
                     px, py = denorm(args.get("x", 500), args.get("y", 500))
-                    driver.call_tool("double_click", {"pid": pid, "window_id": window_id, "x": px, "y": py, "delivery_mode": "background"})
+                    checked_call(driver, "double_click", {"pid": pid, "window_id": window_id, "x": px, "y": py, "delivery_mode": "background"})
                     result_msg = f"Double-clicked ({px}, {py})"
                 elif name in {"type_text_at", "type_text", "type"}:
                     text = str(args.get("text", ""))
                     if "x" in args and "y" in args:
                         px, py = denorm(args["x"], args["y"])
-                        driver.call_tool("click", {"pid": pid, "window_id": window_id, "x": px, "y": py, "delivery_mode": "background"})
+                        checked_call(driver, "click", {"pid": pid, "window_id": window_id, "x": px, "y": py, "delivery_mode": "background"})
                         time.sleep(0.08)
-                    if args.get("clear_before_typing", True):
-                        driver.call_tool("hotkey", {"pid": pid, "window_id": window_id, "keys": ["cmd", "a"], "delivery_mode": "background"})
+                    # Only legacy type_text_at replaces by default; upstream 'type' inserts into the focused input.
+                    if args.get("clear_before_typing", name == "type_text_at"):
+                        checked_call(driver, "hotkey", {"pid": pid, "window_id": window_id, "keys": ["cmd", "a"], "delivery_mode": "background"})
                         time.sleep(0.04)
-                    driver.call_tool("type_text", {"pid": pid, "window_id": window_id, "text": text, "delivery_mode": "background"})
+                    checked_call(driver, "type_text", {"pid": pid, "window_id": window_id, "text": text, "delivery_mode": "background"})
                     if args.get("press_enter"):
-                        driver.call_tool("press_key", {"pid": pid, "window_id": window_id, "key": "return", "delivery_mode": "background"})
+                        checked_call(driver, "press_key", {"pid": pid, "window_id": window_id, "key": "return", "delivery_mode": "background"})
                     result_msg = "Typed text"
                 elif name in {"press_key", "key_press", "key_combination", "hotkey"}:
-                    if "keys" in args and isinstance(args["keys"], list):
-                        mapped = [CUA_KEY_MAP.get(str(k).lower(), str(k).lower()) for k in args["keys"]]
-                        driver.call_tool("hotkey", {"pid": pid, "window_id": window_id, "keys": mapped, "delivery_mode": "background"})
+                    mapped = parse_key_chord(args)
+                    if mapped is not None and len(mapped) > 1:
+                        checked_call(driver, "hotkey", {"pid": pid, "window_id": window_id, "keys": mapped, "delivery_mode": "background"})
                     else:
-                        k = CUA_KEY_MAP.get(str(args.get("key", "return")).lower(), str(args.get("key", "return")).lower())
-                        driver.call_tool("press_key", {"pid": pid, "window_id": window_id, "key": k, "delivery_mode": "background"})
+                        k = mapped[0] if mapped else CUA_KEY_MAP.get(str(args.get("key", "return")).lower(), str(args.get("key", "return")).lower())
+                        checked_call(driver, "press_key", {"pid": pid, "window_id": window_id, "key": k, "delivery_mode": "background"})
                     result_msg = "Pressed key"
                 elif name in {"scroll", "scroll_at"}:
                     direction = str(args.get("direction", "down")).lower()
@@ -735,7 +774,7 @@ def run_arm_google_cua_bg(
                         px, py = denorm(args["x"], args["y"])
                         s_args["x"] = px
                         s_args["y"] = py
-                    driver.call_tool("scroll", s_args)
+                    checked_call(driver, "scroll", s_args)
                     result_msg = f"Scrolled {direction}"
                 elif name in {"wait", "wait_5_seconds"}:
                     time.sleep(0.5)
@@ -908,7 +947,7 @@ def run_arm_agy_cua_direct(
         if audit_contents_for_canary(chat_history):
             canary_leaked = True
         t_m = time.perf_counter()
-        resp = call_gemini_once(client, model_id, chat_history, config, spend, had_screenshot=False)
+        resp = call_gemini_once(client, model_id, chat_history, config, spend)
         model_latencies_ms.append(round((time.perf_counter() - t_m) * 1000, 2))
 
         if not resp.candidates:
@@ -927,7 +966,8 @@ def run_arm_agy_cua_direct(
             t_d = time.perf_counter()
             if name == "click_element":
                 actions_dispatched += 1
-                res = driver.call_tool(
+                res = checked_call(
+                    driver,
                     "click",
                     {"pid": pid, "window_id": window_id, "element_token": str(args.get("element_token", "")), "delivery_mode": "background"},
                 )
@@ -935,7 +975,8 @@ def run_arm_agy_cua_direct(
                 act_txt = "".join(c.get("text", "") for c in (res.get("content") or []) if isinstance(c, Mapping))
             elif name == "set_element_value":
                 actions_dispatched += 1
-                res = driver.call_tool(
+                res = checked_call(
+                    driver,
                     "set_value",
                     {"pid": pid, "window_id": window_id, "element_token": str(args.get("element_token", "")), "value": str(args.get("value", ""))},
                 )
@@ -1035,10 +1076,15 @@ def run_arm_agy_cua_jev(
             raise
         # Settle this request's own usage against its own reservation before Jev parses it.
         try:
-            spend.settle_jev_request(status, text, reserved_allowance_usd=JEV_RESERVE_ALLOWANCE_USD)
+            accounted = spend.settle_jev_request(status, text, reserved_allowance_usd=JEV_RESERVE_ALLOWANCE_USD)
         except RuntimeError as exc:
             budget_exc.append(exc)
             raise
+        if not accounted:
+            # Reservation retained by settle_jev_request; halt the controller and abort the arm.
+            exc = RuntimeError(f"Jev usage unaccounted (HTTP {status}); reservation retained")
+            budget_exc.append(exc)
+            raise exc
         return status, text
 
     jev_server.http_post = audited_http_post
@@ -1178,7 +1224,7 @@ def run_arm_agy_cua_jev(
             if audit_contents_for_canary(chat_history):
                 canary_leaked = True
             t_m = time.perf_counter()
-            resp = call_gemini_once(client, model_id, chat_history, config, spend, had_screenshot=False)
+            resp = call_gemini_once(client, model_id, chat_history, config, spend)
             model_latencies_ms.append(round((time.perf_counter() - t_m) * 1000, 2))
 
             if not resp.candidates:
@@ -1190,7 +1236,6 @@ def run_arm_agy_cua_jev(
                 break
 
             f_responses: list[types.FunctionResponse] = []
-            sequence_verified_done = False
             for fc in fcs:
                 name = fc.name
                 raw_args = dict(fc.args or {})
@@ -1226,8 +1271,6 @@ def run_arm_agy_cua_jev(
                         "post_static_texts": sc.get("post_static_texts"),
                         "timings_ms": sc.get("timings_ms"),
                     })
-                    if sc.get("verified") is True:
-                        sequence_verified_done = True
                     f_responses.append(
                         types.FunctionResponse(
                             name=name,
@@ -1285,8 +1328,7 @@ def run_arm_agy_cua_jev(
                         )
                     )
 
-            if sequence_verified_done:
-                break
+            # A verified batch only proves its own steps; hand results back so the planner can finish the task.
             chat_history.append(types.Content(role="user", parts=[types.Part(function_response=fr) for fr in f_responses]))
 
         acc = jev_server.accounting
