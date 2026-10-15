@@ -78,88 +78,102 @@ We benchmarked four computer-use architectures head-to-head across six determini
    - AppKit multi-mode fixture: [`scripts/bench_fixture.swift`](../scripts/bench_fixture.swift) (`--mode form | dense | mail-twin | 1password-twin --state-file <path>`)
    - Head-to-head runner: [`scripts/benchmark_cua.py`](../scripts/benchmark_cua.py) (`--arms google-cua-bg,agy-cua-direct,agy-cua-jev-v0,agy-cua-jev-v1 --tasks all --max-budget-usd 1.0`; run with `google-genai 2.23.0`)
 
-## 5. Codex Computer Use — admission blocked (2026-10-15)
+## 5. Codex Computer Use — original fixture cannot be addressed (2026-10-15)
 
-Issue [#12](https://github.com/saariuslystoned/agy-cua/issues/12) requested two
-native-plugin arms. **No benchmark task has run.** The sanitized
-[probe evidence](../proof/codex-native-20261015-probe.json) records all 24 planned
-task/repetition slots as `not_run` with null metrics; they are neither task
-failures nor completed repetitions. The existing baseline above is unchanged.
+**No benchmark task has run (0/24).** Bobby approved native app access and
+resolved the configurations to **GPT-6.1 Sol Fast** and **GPT-6 Astra Ultrafast**.
+The native plugin can access Calculator, but cannot address the exact original
+unbundled benchmark fixture. The current authority is the
+[authorized admission evidence](../proof/codex-native-20261015-authorized-admission.json);
+the earlier [capability probe](../proof/codex-native-20261015-probe.json) remains
+historical evidence, including the initial permission failure.
 
-| Requested arm (preserved verbatim) | Model resolution | Speed resolution | Repetitions completed | Pass rate | Wall time | Turns | Images sent | Input/output tokens | Cost | Focus violations / probe errors |
+| Final requested arm | Configured model | Speed/service tier | Completed / required runs | Pass rate | Wall time | Model turns | Images sent | Input/output tokens | Cost | Focus violations / probe errors |
 | :--- | :--- | :--- | ---: | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `6.1 sol fast` | Live catalog: `gpt-6.1-sol` | Live catalog: Fast = `priority` | 0 / 12 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
-| `6.1 sol astra ultrafast` | Bobby's final choice: `gpt-6-astra` | Live catalog: Ultrafast = `ultrafast` | 0 / 12 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+| `6.1 sol fast` | `gpt-6.1-sol` | Fast / `priority` | 0 / 12 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+| `6 astra ultrafast` | `gpt-6-astra` | Ultrafast / `ultrafast` | 0 / 12 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
 
-**Method and identity.** PR #11 was fetched and rechecked OPEN at immutable base
-`154edf54e6223b4c61543d78206247535b3e2b89`. Work used repo `saariuslystoned/agy-cua`,
-branch `codex/issue-12-codex-cu`, worktree
-`/Users/bobbybones/Developer/side-quests/agy-cua-worktrees/issue-12-codex-cu`.
-Codex CLI `0.161.0` exposed the actual `unified-computer-use` plugin
-(`26.1007.71326`, `cua_repl/js`), not an adapter invoking Cua Driver as the
-measured actor. One read-only subscription agent probe requested Sol, Fast
-(`priority`), reasoning `low`; `thread/start` echoed those settings. Its actual
-tool-call event reached `cua_repl/js` and returned “Computer Use was not approved
-to use Calculator.” This is configuration provenance, not an upstream
-per-response model/service identity receipt. It is not a task timing result.
+Bobby's final choice supersedes an earlier Sol Ultrafast reply and resolves the
+dispatch label “6.1 sol astra ultrafast.” Both final combinations are advertised
+by the live catalog. Separate reasoning effort `low` was explicitly configured
+and echoed for both admission threads. Neither thread requested inference;
+these are configuration identities, not upstream per-response identity receipts.
+All 24 original task/repetition slots remain `not_run` with null metrics in the
+committed evidence. No per-repetition result, variance, or speed comparison can
+be computed, and no timing difference can be attributed to batching or screenshots.
 
-With `approvalPolicy=on-request`, the native tool instead required
-`mcpServer/elicitation/request`: **Allow Computer Use to use "Calculator"?**
-The form has an empty object schema. Bobby has been asked to approve native
-access to Calculator and the unchanged benchmark fixture for these test runs.
-The probe stops at that boundary without
-granting approval or manufacturing a host response. Calculator access succeeded
-from this existing desktop chat, so the evidence does **not** establish that
-native Computer Use is globally unscriptable. The unresolved part is approval
-routing for a new benchmark session. A later read-only probe returned the
-classified failure `native_plugin_call_failed`; that additional failure is also
-preserved in the evidence. The desktop chat creation/message tools
-offer model and reasoning controls but no speed field, so they alone cannot
-establish a requested-speed manual fallback. No default-speed substitute ran.
+### Native access result and reproducibility
 
-The reproducible metadata/read-only probe starts no model turns:
+The genuine `unified-computer-use` plugin (`26.1007.71326`, `cua_repl/js`) was
+called through Codex app-server `0.161.0`. After forwarding Bobby's explicit
+Calculator approval through the documented MCP elicitation response, a read-only
+Calculator probe succeeded. No permission or attestation response was invented.
+No macOS permission setting changed. This establishes a programmatic native-plugin
+path for supported apps, rather than a Cua Driver actor labeled as Codex.
+
+The unchanged `launch_target_for_task()` launched the original form fixture,
+created its state file, and exposed a real window through the independent harness.
+Its screenshot was visually inspected: the original empty provisioning form,
+Standard Tier, and Pending status. The fresh form correctly failed the final
+submission oracle. The native plugin then returned:
+
+- Exact original executable path: **Invalid app**.
+- Actual fixture window ID: **macOS getApp requires an app name, path, or bundle ID.**
+- Native app inventory filtered to that exact window: **zero matching app entries**.
+
+Thus, native control of the required fixture is unavailable through these
+supported target forms in this session. The same targeting problem blocks a
+native-chat fallback. No fixture wrapping, bundling, alternate launch principal,
+or easier reconstruction was used; no setup failure was counted as a completed
+task. The next return condition is native support for this original unbundled
+fixture, or an explicit benchmark-contract change permitting a different setup.
+
+The reproducible admission adapter starts **zero model turns**:
 
 ```bash
-python3 scripts/probe_codex_native.py \
-  --output runs/benchmark-codex-runs/<fresh-date-time>/probe.json
+runs/benchmark-codex-runs/20261015-native-probe/venv/bin/python \
+  scripts/benchmark_codex_native.py --approved-native-apps --max-budget-usd 5
 ```
 
-Exit 2 means blocked. It saves selected identity metadata and classified errors,
-never UI state, screenshots, account details, raw transport output or stderr.
-Successful plugin access alone does not admit a benchmark.
+Use a local venv with `google-genai==2.23.0`, `python-dotenv`, and Pillow for the
+shared harness imports. The adapter disables the optional dotenv bootstrap and
+never reads credentials. The app flag forwards an already obtained human grant
+only for Calculator and this fixture; other approval requests fail closed.
+Exit 2 records the blocker. Saved summaries contain selected metadata and
+classifications, never arbitrary UI state or raw error text. Screenshot pixels
+and state files stay in ignored private evidence.
 
-**Setup and independent verification.** `benchmark_cua.py`, `TaskSpec` goals,
-setup functions, `verify_fn`, `FocusMonitor`, `probe-focus.sh`, summary writer,
-fixture source and baseline metrics remain unchanged. The exact fixture was
-built through `ensure_fixture_binary()` in a local venv with `google-genai
-2.23.0`; source/binary hashes are in the evidence. Compilation does not prove a
-working fixture UI or completed setup. No focus monitor or task verifier ran.
-An implementation source read exposed the fixture sentinel in this chat;
-resumption requires fresh solver contexts without source, verifier evidence or
-sentinel access. No measured solver has run, and the sentinel is absent from
-the committed probe artifacts.
+### Authority, cost and conditions
 
-**Usage, pricing and comparison limits.** The separate agent capability probe
-reported 52,830 input tokens (23,296 cached) and 100 output tokens. These are
-probe-only usage, not benchmark metrics. Authentication was `chatgpt`; no paid
-API request was made. Subscription marginal dollar cost and credit debit are
-unavailable, not zero. The total issue budget remains $5; no further model
-requests were admitted. [Official Codex speed documentation](https://learn.chatgpt.com/docs/agent-configuration/speed)
-distinguishes subscription usage multipliers from credit/API billing. No API
-price was applied to subscription usage.
-[Official Computer Use documentation](https://learn.chatgpt.com/docs/computer-use)
-describes app approvals, while the
-[app-server documentation](https://learn.chatgpt.com/docs/app-server)
-describes supported JSON-RPC integration.
+Frozen benchmark base: PR #11 OPEN at
+`154edf54e6223b4c61543d78206247535b3e2b89`. Executed adapter source:
+`4a61be8853fb85f3258193a0d895b4a9c480fe33`, branch
+`codex/issue-12-codex-cu`, worktree
+`/Users/bobbybones/Developer/side-quests/agy-cua-worktrees/issue-12-codex-cu`.
+The evidence binds the source, fixture binary and fixture source hashes.
+`TaskSpec`, task goals, setup, verifiers, and focus contracts remain identical;
+executed AST comparisons prove this. The summary serialization statement was
+extracted unchanged into `write_benchmark_summary()` for reuse. The original
+fixture, focus probe and historical baseline summary remain byte-identical.
+Production adapters were not tuned. Local validation: **68 tests passed**,
+ShellCheck passed, diff checks passed.
 
-There are no per-repetition results or variance estimates, and no causal speed
-explanation is supported. A noncompeting desktop interval was not established;
-existing Cua Driver load and other operator services were left untouched.
-Bobby's latest instruction selects Sol Fast and Astra Ultrafast, superseding an
-earlier Sol Ultrafast reply. Both final choices are advertised by the live
-catalog; neither was silently substituted or run at default speed.
-After native app approval is resolved, run the six original IDs
-twice per arm, sequentially, preserving every failure. In either a scripted or
-manual run, include first-call overhead from prompt submission through agent
-completion, then run the original independent verifier; disclose any timing
-boundary difference and retain the original focus-based pass rule.
+This resumed admission work made no model request and no paid API request. The
+one earlier subscription capability probe reported 52,830 input tokens (23,296
+cached), 100 output tokens, and unavailable marginal dollar cost/credit debit.
+Those numbers are probe-only, never benchmark results. The total issue cap is
+$5; no paid API/key-backed run is admitted. Native subscription marginal cost
+remains unavailable, not zero. The
+[official Codex pricing](https://learn.chatgpt.com/docs/pricing) and
+[speed documentation](https://learn.chatgpt.com/docs/agent-configuration/speed)
+distinguish included subscription usage from credit/API billing; API prices were
+not applied to subscription usage. The
+[app-server protocol](https://learn.chatgpt.com/docs/app-server) documents the
+native MCP call and human elicitation response used here.
+
+A competing benchmark fixture/worker was observed and left untouched. No
+exclusive desktop interval, task timer or focus monitor was started, so focus
+metrics remain unavailable. A prior source read exposed the fixture sentinel in
+this implementation chat; it cannot serve as a measured solver. Future runs
+require fresh solver contexts without source/verifier evidence, a noncompeting
+desktop interval, the original focus-based pass rule, and every failure retained.
