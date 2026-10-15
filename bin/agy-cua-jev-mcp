@@ -362,7 +362,7 @@ def validate_select_request(args: Mapping[str, Any]) -> dict[str, Any]:
     for item in raw_elements:
         if not isinstance(item, Mapping):
             raise ValueError("each element must be an object")
-        el_allowed = {"element_index", "role", "label", "value", "state", "enabled", "depth", "in_toolbar"}
+        el_allowed = {"element_index", "role", "label", "state", "enabled", "depth", "in_toolbar"}
         if not set(item.keys()).issubset(el_allowed):
             raise ValueError(f"element contains unsupported fields: {sorted(set(item.keys()) - el_allowed)}")
         role = item.get("role")
@@ -377,10 +377,6 @@ def validate_select_request(args: Mapping[str, Any]) -> dict[str, Any]:
             if not isinstance(idx, int) or isinstance(idx, bool) or idx < 0:
                 raise ValueError("element_index must be a non-negative integer")
             entry["element_index"] = idx
-        if "value" in item and item["value"] is not None:
-            if not isinstance(item["value"], str):
-                raise ValueError("element value must be a string")
-            entry["value"] = item["value"][:120]
         if "state" in item and item["state"] is not None:
             if not isinstance(item["state"], str):
                 raise ValueError("element state must be a string")
@@ -753,7 +749,7 @@ def _is_unlabeled_window_button(element: Mapping[str, Any], by_index: Mapping[in
     return bool(parent and str(parent.get("role") or "") in WINDOW_ROOT_ROLES)
 
 
-_TREE_MD_LINE_RE = re.compile(r"^(\s*)-\s*\[(?:e)?(\d+)\]\s*([A-Za-z0-9_]+)")
+_TREE_MD_LINE_RE = re.compile(r"^(\s*)-\s*(?:\[(?:e)?(\d+)\]\s*)?([A-Za-z0-9_]+)")
 
 
 def _parse_markdown_hierarchy(tree_md: str) -> tuple[dict[int, int], set[int]]:
@@ -766,14 +762,15 @@ def _parse_markdown_hierarchy(tree_md: str) -> tuple[dict[int, int], set[int]]:
         if not m:
             continue
         indent, idx_str, role = m.group(1), m.group(2), m.group(3)
-        idx = int(idx_str)
         level = len(indent) // 2
         for deeper in [k for k in role_by_level if k > level]:
             del role_by_level[deeper]
         role_by_level[level] = role
-        md_depth[idx] = level
-        if any(r == "AXToolbar" for k, r in role_by_level.items() if k <= level):
-            md_toolbar_ids.add(idx)
+        if idx_str is not None:
+            idx = int(idx_str)
+            md_depth[idx] = level
+            if any(r == "AXToolbar" for k, r in role_by_level.items() if k <= level):
+                md_toolbar_ids.add(idx)
     return md_depth, md_toolbar_ids
 
 
@@ -797,12 +794,21 @@ def _element_depth_and_toolbar(
             in_toolbar = True
         parent_idx = curr.get("parent_index")
         if not isinstance(parent_idx, int) or isinstance(parent_idx, bool):
-            chain_complete = True
+            if role in WINDOW_ROOT_ROLES:
+                chain_complete = True
             break
+        if parent_idx in md_toolbar_ids:
+            in_toolbar = True
         if parent_idx in seen:
             break
         seen.add(parent_idx)
         parent = by_index.get(parent_idx)
+        if parent is None:
+            if parent_idx in md_depth:
+                hops += md_depth[parent_idx] + 1
+                has_parent_chain = True
+                chain_complete = True
+            break
         hops += 1
         has_parent_chain = True
         curr = parent
@@ -831,6 +837,11 @@ def _supports_press_action(actions: set[str]) -> bool:
     return bool({"axpress", "press"} & lowered)
 
 
+def _supports_interactive_click_action(actions: set[str]) -> bool:
+    lowered = {a.lower() for a in actions}
+    return bool({"axpress", "press", "axshowmenu", "showmenu", "axconfirm", "confirm", "axopen", "open"} & lowered)
+
+
 def _element_can_auto_click(role: str, actions: set[str], has_explicit_actions: bool) -> bool:
     """Return True only when an actionable element supports an automatic click/focus-click candidate."""
     if _supports_press_action(actions):
@@ -842,8 +853,7 @@ def _element_can_auto_click(role: str, actions: set[str], has_explicit_actions: 
     if role in TEXT_INPUT_AX_ROLES:
         if not has_explicit_actions or not actions:
             return True
-        lowered = {a.lower() for a in actions}
-        return bool({"axpress", "press", "axconfirm", "confirm", "axshowmenu"} & lowered)
+        return _supports_interactive_click_action(actions)
     if role in {
         "AXButton",
         "AXRadioButton",
@@ -854,7 +864,7 @@ def _element_can_auto_click(role: str, actions: set[str], has_explicit_actions: 
         "AXTabGroup",
         "AXRow",
     }:
-        if has_explicit_actions and actions and not _supports_press_action(actions):
+        if has_explicit_actions and actions and not _supports_interactive_click_action(actions):
             return False
         return True
     return False
@@ -932,8 +942,14 @@ def extract_window_observation(
             continue
         if el.get("enabled") is False:
             continue
-        label = str(el.get("label") or "").replace("\u200e", "").strip()
-        is_secure = "secure" in role.lower()
+        raw_label = (
+            el.get("label")
+            if el.get("label") not in (None, "")
+            else (el.get("title") if el.get("title") not in (None, "") else el.get("description"))
+        )
+        label = str(raw_label or "").replace("\u200e", "").strip()
+        subrole = str(el.get("subrole") or "").strip()
+        is_secure = "secure" in role.lower() or "secure" in subrole.lower()
         value = (
             None
             if is_secure or el.get("value") is None
@@ -948,14 +964,17 @@ def extract_window_observation(
             and not supports_press
         ):
             continue
-        can_auto_click = _element_can_auto_click(role, actions, has_explicit_actions)
+        can_auto_click = (not is_secure) and _element_can_auto_click(role, actions, has_explicit_actions)
         can_click = _element_can_explicit_click(role, actions, has_explicit_actions)
         can_set_value = role in VALUE_SETTABLE_AX_ROLES
-        is_actionable_control = (role in ACTIONABLE_AX_ROLES or supports_press) and (can_click or can_set_value)
-        if not label and not value and role not in TEXT_INPUT_AX_ROLES and role not in EXPLICIT_TARGET_CONTAINER_ROLES:
-            continue
+        has_label_or_value = bool(label or value or role in TEXT_INPUT_AX_ROLES)
+        is_actionable_control = (
+            has_label_or_value
+            and (role in ACTIONABLE_AX_ROLES or supports_press)
+            and (can_click or can_set_value)
+        )
 
-        is_text_input = role in TEXT_INPUT_AX_ROLES
+        is_text_input = role in TEXT_INPUT_AX_ROLES or is_secure
         state_str = "enabled (has_value)" if value else "enabled"
         display_label = label or (value if not is_text_input else "") or role
         depth, in_toolbar = _element_depth_and_toolbar(idx, el, by_index, md_depth, md_toolbar_ids)
@@ -1203,7 +1222,7 @@ def build_bound_candidates(
                 if (
                     tool == "type_text"
                     and target_role
-                    and target_role in (ACTIONABLE_AX_ROLES - TEXT_INPUT_AX_ROLES)
+                    and target_role not in (TEXT_INPUT_AX_ROLES | {"AXWebArea"})
                 ):
                     raise ValueError(
                         f"incompatible_tool_for_role: candidate {cid!r} cannot use type_text on role {target_role!r}"
@@ -1218,7 +1237,8 @@ def build_bound_candidates(
             raise ValueError(f"missing_target_address: candidate {cid!r} for set_value requires element_index")
         elif tool in {"click", "double_click", "right_click"} and ("x" not in args_dict or "y" not in args_dict):
             raise ValueError(f"missing_target_address: candidate {cid!r} for {tool} requires element_index (or x, y)")
-        elif tool == "scroll" and "direction" not in args_dict:
+
+        if tool == "scroll" and "direction" not in args_dict:
             raise ValueError(f"missing_scroll_direction: candidate {cid!r} for scroll requires direction")
 
         bound.append({
@@ -1712,7 +1732,7 @@ TOOLS = [
                     "type": "array",
                     "description": (
                         "Optional compact AX elements "
-                        "({element_index, role, label, value?, state?, enabled?, depth?, in_toolbar?})."
+                        "({element_index, role, label, state?, enabled?, depth?, in_toolbar?})."
                     ),
                     "items": {"type": "object"},
                 },
@@ -2065,7 +2085,6 @@ class JevMcpServer:
                         "state": e["state"],
                         "depth": e.get("depth", 1),
                         "in_toolbar": bool(e.get("in_toolbar", False)),
-                        **({"value": e["value"]} if "value" in e and e["value"] is not None else {}),
                     }
                     for e in prompt_els
                 ],

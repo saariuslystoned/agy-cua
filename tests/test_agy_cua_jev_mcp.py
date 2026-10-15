@@ -1112,7 +1112,7 @@ class StdioEndToEndTest(unittest.TestCase):
         self.assertTrue(met)
         self.assertEqual(reason, "expected_postcondition_verified")
 
-        # Also verify tree_markdown indentation fallback when parent_index is omitted
+        # Also verify tree_markdown indentation fallback when parent_index is omitted or containers are unindexed
         md_only_obs = jev.extract_window_observation(
             {
                 "structuredContent": {
@@ -1123,15 +1123,18 @@ class StdioEndToEndTest(unittest.TestCase):
                         {"element_index": 0, "role": "AXWindow", "label": "Inbox"},
                         {"element_index": 10, "role": "AXRow", "label": "Deep row", "enabled": True, "actions": ["AXPress"]},
                         {"element_index": 20, "role": "AXButton", "label": "New Message", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 30, "role": "AXButton", "label": "Sidebar Action", "enabled": True, "actions": ["AXPress"]},
                     ],
                     "tree_markdown": (
                         '- [0] AXWindow "Inbox"\n'
-                        '  - [1] AXSplitGroup\n'
+                        '  - AXSplitGroup\n'
                         '    - [2] AXScrollArea\n'
                         '      - [3] AXOutline\n'
                         '        - [10] AXRow "Deep row"\n'
-                        '  - [19] AXToolbar\n'
+                        '  - AXToolbar\n'
                         '    - [20] AXButton "New Message"\n'
+                        '  - AXSplitGroup\n'
+                        '    - [30] AXButton "Sidebar Action"\n'
                     ),
                 },
                 "content": [],
@@ -1142,9 +1145,12 @@ class StdioEndToEndTest(unittest.TestCase):
         self.assertEqual(md_only_obs["elements"][0]["element_index"], 20)
         self.assertTrue(md_only_obs["elements"][0]["in_toolbar"])
         self.assertEqual(md_only_obs["elements"][0]["depth"], 2)
-        self.assertEqual(md_only_obs["elements"][1]["element_index"], 10)
+        self.assertEqual(md_only_obs["elements"][1]["element_index"], 30)
         self.assertFalse(md_only_obs["elements"][1]["in_toolbar"])
-        self.assertEqual(md_only_obs["elements"][1]["depth"], 4)
+        self.assertEqual(md_only_obs["elements"][1]["depth"], 2)
+        self.assertEqual(md_only_obs["elements"][2]["element_index"], 10)
+        self.assertFalse(md_only_obs["elements"][2]["in_toolbar"])
+        self.assertEqual(md_only_obs["elements"][2]["depth"], 4)
 
     def test_mail_role_and_action_support_filtering_for_search_link_and_cell(self):
         obs = jev.extract_window_observation(
@@ -1175,6 +1181,17 @@ class StdioEndToEndTest(unittest.TestCase):
                         {"element_index": 18, "role": "AXScrollArea", "label": "Message list scroll", "enabled": True, "parent_index": 0, "actions": []},
                         {"element_index": 19, "role": "AXWebArea", "label": "Message body", "enabled": True, "parent_index": 0, "actions": []},
                         {"element_index": 20, "role": "AXSlider", "label": "Zoom level", "value": "100", "enabled": True, "parent_index": 0, "actions": ["AXIncrement", "AXDecrement"]},
+                        # Secure field reported as role=AXTextField + subrole=AXSecureTextField must redact value and skip auto-click
+                        {
+                            "element_index": 21,
+                            "role": "AXTextField",
+                            "subrole": "AXSecureTextField",
+                            "title": "Password",
+                            "value": "s3cr3t!",
+                            "enabled": True,
+                            "parent_index": 0,
+                            "actions": ["AXConfirm"],
+                        },
                     ],
                 },
                 "content": [{"type": "text", "text": '- [0] AXWindow "Mail"'}],
@@ -1186,6 +1203,12 @@ class StdioEndToEndTest(unittest.TestCase):
         auto_cands = jev.build_bound_candidates(None, obs)
         auto_indices = [c["arguments"]["element_index"] for c in auto_cands]
         self.assertEqual(auto_indices, [11, 12, 15])
+
+        # Verify secure subrole redacted its value in extracted elements
+        sec_els = [e for e in obs["all_elements"] if e["element_index"] == 21]
+        self.assertEqual(len(sec_els), 1)
+        self.assertNotIn("value", sec_els[0])
+        self.assertEqual(sec_els[0]["label"], "Password")
 
         # Enabled AXSearchField [15] and [17] support explicit set_value and type_text candidates,
         # and enabled AXCell [10], AXScrollArea [18], AXWebArea [19], and AXSlider [20] support valid explicit actions
@@ -1249,7 +1272,7 @@ class StdioEndToEndTest(unittest.TestCase):
                 obs,
             )
 
-        # validate_select_request preserves value, enabled, depth, and in_toolbar metadata
+        # validate_select_request preserves enabled, depth, and in_toolbar metadata while rejecting raw value exposure
         validated = jev.validate_select_request({
             "goal": "Set Search",
             "pid": 501,
@@ -1260,7 +1283,6 @@ class StdioEndToEndTest(unittest.TestCase):
                     "element_index": 15,
                     "role": "AXSearchField",
                     "label": "Search",
-                    "value": "invoice",
                     "state": "enabled (has_value)",
                     "enabled": True,
                     "depth": 2,
@@ -1269,10 +1291,25 @@ class StdioEndToEndTest(unittest.TestCase):
             ],
             "candidates": [{"id": "search.set", "description": "Set Search"}],
         })
-        self.assertEqual(validated["elements"][0]["value"], "invoice")
         self.assertTrue(validated["elements"][0]["enabled"])
         self.assertEqual(validated["elements"][0]["depth"], 2)
         self.assertTrue(validated["elements"][0]["in_toolbar"])
+        with self.assertRaisesRegex(ValueError, "unsupported fields"):
+            jev.validate_select_request({
+                "goal": "Set Search",
+                "pid": 501,
+                "window_id": 2001,
+                "snapshot_id": "s0000cafe",
+                "elements": [
+                    {
+                        "element_index": 15,
+                        "role": "AXSearchField",
+                        "label": "Search",
+                        "value": "secret-or-private-value",
+                    }
+                ],
+                "candidates": [{"id": "search.set", "description": "Set Search"}],
+            })
 
     def test_jev_step_forwards_query_and_max_depth_to_stage1_and_stage5_for_mail_continuity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1443,13 +1480,13 @@ class StdioEndToEndTest(unittest.TestCase):
             self.assertFalse(sc["post_observation_truncated"])
             self.assertFalse(sc["observation_truncated"])
 
-            # Verify Jev wire payload preserved depth, in_toolbar, and value metadata
+            # Verify Jev wire payload preserved depth and in_toolbar metadata without leaking raw value
             self.assertEqual(len(captured_wire_payloads), 1)
             sent_el = captured_wire_payloads[0]["state"]["elements"][0]
             self.assertEqual(sent_el["element_index"], 92)
             self.assertEqual(sent_el["depth"], 2)
             self.assertTrue(sent_el["in_toolbar"])
-            self.assertEqual(sent_el["value"], "")
+            self.assertNotIn("value", sent_el)
 
             with open(calls_log, "r", encoding="utf-8") as lf:
                 logged = [json.loads(line) for line in lf if line.strip()]
