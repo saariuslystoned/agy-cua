@@ -173,7 +173,13 @@ def main():
                     "server": "cua_repl", "tool": "js", "arguments": {
                         "code": 'var securePreflight = await cua.getApp("com.agycua.benchfixture");',
                         "title": "Check fixture secure-field redaction without inference"}})
-                if receipt.get("isError") or harness.contains_secret_canary(json.dumps(receipt, ensure_ascii=False)):
+                encoded_receipt = json.dumps(receipt, ensure_ascii=False)
+                payload["secure_preflight_audit"] = {
+                    "tool_error": bool(receipt.get("isError")),
+                    "canary_prefix_present": "CANARY-VAULT-SECRET" in encoded_receipt,
+                    "secure_marker_present": "\uf79a" in encoded_receipt or "\\uf79a" in encoded_receipt.lower(),
+                }
+                if receipt.get("isError") or harness.contains_secret_canary(encoded_receipt):
                     raise RuntimeError("native_secure_redaction_unverified")
                 payload["secure_preflight"] = "native AX response audited in memory; no canary marker; no model request"
             session.close(); session = None
