@@ -995,10 +995,725 @@ class StdioEndToEndTest(unittest.TestCase):
             self.assertTrue(sc_eof["accounting"]["halted"])
             self.assertEqual(sc_eof["accounting"]["uncertain_side_effects"], 1)
 
+    def test_jev_batch_guarded_multi_step_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            batch_driver = os.path.join(tmp, "batch-driver")
+            log_file = os.path.join(tmp, "driver-calls.jsonl")
+            with open(batch_driver, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent(f"""\
+                    #!/usr/bin/env python3
+                    import json, sys
+                    snap_seq = 10
+                    display = "99"
+                    log_path = {log_file!r}
+                    for line in sys.stdin:
+                        msg = json.loads(line)
+                        if "id" not in msg:
+                            continue
+                        method = msg.get("method")
+                        if method == "initialize":
+                            res = {{"protocolVersion": "2025-06-18", "capabilities": {{}}, "serverInfo": {{"name": "batch-driver"}}}}
+                        elif method == "tools/call":
+                            params = msg.get("params", {{}})
+                            name = params.get("name")
+                            args = params.get("arguments", {{}})
+                            with open(log_path, "a", encoding="utf-8") as lf:
+                                lf.write(json.dumps({{"name": name, "args": args}}) + "\\n")
+                            if name == "get_window_state":
+                                snap_seq += 1
+                                snap = f"s000000{{snap_seq}}"
+                                md = (
+                                    f'- [0] AXWindow "Calculator"\\n'
+                                    f'  - AXStaticText = "{{display}}"\\n'
+                                    f'  - [2] AXButton (All Clear)\\n'
+                                    f'  - [5] AXButton (7)\\n'
+                                    f'  - [6] AXButton (8)'
+                                )
+                                res = {{
+                                    "content": [{{"type": "text", "text": md}}],
+                                    "structuredContent": {{
+                                        "pid": args.get("pid", 42),
+                                        "window_id": args.get("window_id", 100),
+                                        "snapshot_id": snap,
+                                        "tree_markdown": md,
+                                        "elements": [
+                                            {{"element_index": 0, "role": "AXWindow", "label": "Calculator"}},
+                                            {{"element_index": 2, "role": "AXButton", "label": "All Clear", "enabled": True, "parent_index": 0, "actions": ["AXPress"]}},
+                                            {{"element_index": 5, "role": "AXButton", "label": "7", "enabled": True, "parent_index": 0, "actions": ["AXPress"]}},
+                                            {{"element_index": 6, "role": "AXButton", "label": "8", "enabled": True, "parent_index": 0, "actions": ["AXPress"]}},
+                                        ],
+                                    }},
+                                }}
+                            elif name == "click":
+                                tok = str(args.get("element_token", ""))
+                                expected_prefix = f"s000000{{snap_seq}}:"
+                                if not tok.startswith(expected_prefix) or args.get("delivery_mode") != "background":
+                                    res = {{"content": [{{"type": "text", "text": f"bad_token_or_mode:{{args}}"}}], "isError": True}}
+                                else:
+                                    idx = int(tok.split(":", 1)[1])
+                                    if idx == 2:
+                                        display = "0"
+                                    elif idx == 5:
+                                        display = "7" if display == "0" else display + "7"
+                                    elif idx == 6:
+                                        display = "8" if display == "0" else display + "8"
+                                    res = {{"content": [{{"type": "text", "text": f"clicked {{idx}}"}}], "structuredContent": {{"ok": True}}}}
+                            else:
+                                res = {{"content": [{{"type": "text", "text": "ok"}}], "structuredContent": {{"ok": True}}}}
+                        else:
+                            res = {{}}
+                        print(json.dumps({{"jsonrpc": "2.0", "id": msg["id"], "result": res}}), flush=True)
+                """))
+            os.chmod(batch_driver, os.stat(batch_driver).st_mode | stat.S_IEXEC)
+
+            jev_calls = []
+
+            def fake_http(req, _timeout):
+                payload = json.loads(req.data.decode("utf-8"))
+                goal = payload["state"]["goal"]
+                criteria = payload["questions"]["candidate"]["criteria"]
+                jev_calls.append(goal)
+                chosen = "ax.2.all-clear" if "All Clear" in goal else "ax.6.8"
+                probs = {cid: (0.96 if cid == chosen else round(0.04 / (len(criteria) - 1), 4)) for cid in criteria}
+                return 200, json.dumps({
+                    "model": "jev-1.13.0",
+                    "answers": {
+                        "candidate": {
+                            "type": "choice",
+                            "choice": chosen,
+                            "confidence": 0.96,
+                            "probabilities": probs,
+                        }
+                    },
+                    "usage": {"input_tokens": 80, "output_tokens": 10},
+                })
+
+            server = jev.JevMcpServer(
+                env={"AGY_CUA_DRIVER": batch_driver, "TYPESAFE_API_KEY": "test-key"},
+                keychain_reader=lambda _: None,
+                http_post=fake_http,
+            )
+            try:
+                # 1. Batch step missing expected_postcondition must be refused before any driver call
+                refused = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_batch",
+                        "arguments": {
+                            "pid": 42,
+                            "window_id": 100,
+                            "steps": [{"goal": "Click All Clear"}],
+                        },
+                    },
+                })
+                self.assertTrue(refused["result"]["isError"])
+                self.assertEqual(refused["result"]["structuredContent"]["status"], "refused")
+                self.assertFalse(os.path.exists(log_file))
+
+                # 2. Valid 3-step guarded batch (Jev + deterministic single-candidate + Jev)
+                resp = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_batch",
+                        "arguments": {
+                            "pid": 42,
+                            "window_id": 100,
+                            "steps": [
+                                {
+                                    "goal": "Click All Clear",
+                                    "expected_postcondition": {"static_text_equals": "0", "static_text_index": -1},
+                                },
+                                {
+                                    "goal": "Click button 7 deterministically",
+                                    "mode": "deterministic",
+                                    "candidates": [
+                                        {"id": "det.7", "description": 'Click [5] AXButton "7"', "tool": "click", "element_index": 5}
+                                    ],
+                                    "expected_postcondition": {"static_text_equals": "7", "static_text_index": -1},
+                                },
+                                {
+                                    "goal": "Click button 8",
+                                    "expected_postcondition": {"static_text_equals": "78", "static_text_index": -1},
+                                },
+                            ],
+                        },
+                    },
+                })
+            finally:
+                server.close()
+
+            sc = resp["result"]["structuredContent"]
+            self.assertFalse(resp["result"]["isError"])
+            self.assertEqual(sc["schema"], "agy_cua.jev_batch_v1")
+            self.assertEqual(sc["status"], "verified")
+            self.assertEqual(sc["verification_outcome"], "goal_verified")
+            self.assertTrue(sc["verified"])
+            self.assertFalse(sc["uncertain_side_effect"])
+            self.assertEqual(sc["completed_count"], 3)
+            self.assertEqual(len(sc["completed_steps"]), 3)
+            self.assertIsNone(sc["failed_step"])
+            self.assertEqual(sc["remaining_steps"], [])
+            # Jev was only called for steps 0 and 2; step 1 used deterministic single-candidate mode
+            self.assertEqual(len(jev_calls), 2)
+            self.assertEqual(sc["completed_steps"][0]["pre_snapshot_id"], "s00000011")
+            self.assertEqual(sc["completed_steps"][0]["post_snapshot_id"], "s00000012")
+            self.assertEqual(sc["completed_steps"][1]["pre_snapshot_id"], "s00000013")
+            self.assertEqual(sc["completed_steps"][1]["post_snapshot_id"], "s00000014")
+            self.assertEqual(sc["completed_steps"][1]["dispatched_arguments"]["element_token"], "s00000013:5")
+            self.assertEqual(sc["completed_steps"][2]["pre_snapshot_id"], "s00000015")
+            self.assertEqual(sc["completed_steps"][2]["post_snapshot_id"], "s00000016")
+
+    def test_jev_batch_stops_on_unexpected_intermediate_state_without_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            batch_driver = os.path.join(tmp, "batch-unmet-driver")
+            with open(batch_driver, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent("""\
+                    #!/usr/bin/env python3
+                    import json, sys
+                    snap_seq = 10
+                    display = "0"
+                    clicks = []
+                    for line in sys.stdin:
+                        msg = json.loads(line)
+                        if "id" not in msg:
+                            continue
+                        method = msg.get("method")
+                        if method == "initialize":
+                            res = {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "batch-unmet"}}
+                        elif method == "tools/call":
+                            params = msg.get("params", {})
+                            name = params.get("name")
+                            args = params.get("arguments", {})
+                            if name == "get_window_state":
+                                snap_seq += 1
+                                snap = f"s000000{snap_seq}"
+                                md = (
+                                    f'- [0] AXWindow "Calculator"\\n'
+                                    f'  - AXStaticText = "{display}"\\n'
+                                    f'  - [5] AXButton (7)\\n'
+                                    f'  - [6] AXButton (8)\\n'
+                                    f'  - [7] AXButton (9)'
+                                )
+                                res = {
+                                    "content": [{"type": "text", "text": md}],
+                                    "structuredContent": {
+                                        "pid": 42,
+                                        "window_id": 100,
+                                        "snapshot_id": snap,
+                                        "tree_markdown": md,
+                                        "elements": [
+                                            {"element_index": 0, "role": "AXWindow", "label": "Calculator"},
+                                            {"element_index": 5, "role": "AXButton", "label": "7", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                            {"element_index": 6, "role": "AXButton", "label": "8", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                            {"element_index": 7, "role": "AXButton", "label": "9", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                        ],
+                                    },
+                                }
+                            elif name == "click":
+                                tok = str(args.get("element_token", ""))
+                                idx = int(tok.split(":", 1)[1])
+                                clicks.append(idx)
+                                if idx == 5:
+                                    display = "7"
+                                elif idx == 6:
+                                    # Unexpected app state: display becomes "999" instead of "78"
+                                    display = "999"
+                                elif idx == 7:
+                                    display = "9999"
+                                res = {"content": [{"type": "text", "text": f"clicked {idx}"}], "structuredContent": {"ok": True}}
+                            else:
+                                res = {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+                        else:
+                            res = {}
+                        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": res}), flush=True)
+                """))
+            os.chmod(batch_driver, os.stat(batch_driver).st_mode | stat.S_IEXEC)
+
+            server = jev.JevMcpServer(
+                env={"AGY_CUA_DRIVER": batch_driver, "TYPESAFE_API_KEY": "test-key"},
+                keychain_reader=lambda _: None,
+            )
+            try:
+                resp = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_batch",
+                        "arguments": {
+                            "pid": 42,
+                            "window_id": 100,
+                            "steps": [
+                                {
+                                    "goal": "Click 7",
+                                    "mode": "deterministic",
+                                    "candidates": [{"id": "c7", "description": "Click 7", "tool": "click", "element_index": 5}],
+                                    "expected_postcondition": {"static_text_equals": "7"},
+                                },
+                                {
+                                    "goal": "Click 8",
+                                    "mode": "deterministic",
+                                    "candidates": [{"id": "c8", "description": "Click 8", "tool": "click", "element_index": 6}],
+                                    "expected_postcondition": {"static_text_equals": "78"},
+                                },
+                                {
+                                    "goal": "Click 9",
+                                    "mode": "deterministic",
+                                    "candidates": [{"id": "c9", "description": "Click 9", "tool": "click", "element_index": 7}],
+                                    "expected_postcondition": {"static_text_equals": "789"},
+                                },
+                            ],
+                        },
+                    },
+                })
+            finally:
+                server.close()
+
+            sc = resp["result"]["structuredContent"]
+            self.assertTrue(resp["result"]["isError"])
+            self.assertEqual(sc["status"], "postcondition_unmet")
+            self.assertFalse(sc["verified"])
+            self.assertEqual(sc["completed_count"], 1)
+            self.assertEqual(len(sc["completed_steps"]), 1)
+            self.assertEqual(sc["completed_steps"][0]["step_index"], 0)
+            self.assertEqual(sc["completed_steps"][0]["status"], "verified")
+            self.assertIsNotNone(sc["failed_step"])
+            self.assertEqual(sc["failed_step"]["step_index"], 1)
+            self.assertEqual(sc["failed_step"]["status"], "postcondition_unmet")
+            self.assertEqual(sc["failed_step"]["verification_outcome"], "state_changed")
+            self.assertEqual(len(sc["remaining_steps"]), 1)
+            self.assertEqual(sc["remaining_steps"][0]["step_index"], 2)
+            self.assertEqual(sc["remaining_steps"][0]["goal"], "Click 9")
+
+    def test_jev_batch_partial_failure_timeout_latches_outcome_unknown_and_halts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            partial_driver = os.path.join(tmp, "partial-timeout-driver")
+            with open(partial_driver, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent("""\
+                    #!/usr/bin/env python3
+                    import json, sys, time
+                    snap_seq = 10
+                    display = "0"
+                    click_count = 0
+                    for line in sys.stdin:
+                        msg = json.loads(line)
+                        if "id" not in msg:
+                            continue
+                        method = msg.get("method")
+                        if method == "initialize":
+                            res = {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "partial-timeout"}}
+                        elif method == "tools/call":
+                            params = msg.get("params", {})
+                            name = params.get("name")
+                            args = params.get("arguments", {})
+                            if name == "get_window_state":
+                                snap_seq += 1
+                                snap = f"s000000{snap_seq}"
+                                md = (
+                                    f'- [0] AXWindow "Calculator"\\n'
+                                    f'  - AXStaticText = "{display}"\\n'
+                                    f'  - [5] AXButton (7)\\n'
+                                    f'  - [6] AXButton (8)\\n'
+                                    f'  - [7] AXButton (9)'
+                                )
+                                res = {
+                                    "content": [{"type": "text", "text": md}],
+                                    "structuredContent": {
+                                        "pid": 42,
+                                        "window_id": 100,
+                                        "snapshot_id": snap,
+                                        "tree_markdown": md,
+                                        "elements": [
+                                            {"element_index": 0, "role": "AXWindow", "label": "Calculator"},
+                                            {"element_index": 5, "role": "AXButton", "label": "7", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                            {"element_index": 6, "role": "AXButton", "label": "8", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                            {"element_index": 7, "role": "AXButton", "label": "9", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                        ],
+                                    },
+                                }
+                            elif name == "click":
+                                click_count += 1
+                                if click_count == 1:
+                                    display = "7"
+                                    res = {"content": [{"type": "text", "text": "clicked 7"}], "structuredContent": {"ok": True}}
+                                else:
+                                    # Hang mid-dispatch on step 1
+                                    sys.stdout.write('{"jsonrpc": "2.0"')
+                                    sys.stdout.flush()
+                                    time.sleep(30)
+                            else:
+                                res = {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+                        else:
+                            res = {}
+                        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": res}), flush=True)
+                """))
+            os.chmod(partial_driver, os.stat(partial_driver).st_mode | stat.S_IEXEC)
+
+            server = jev.JevMcpServer(
+                env={
+                    "AGY_CUA_DRIVER": partial_driver,
+                    "AGY_CUA_DRIVER_TIMEOUT_MS": "250",
+                    "TYPESAFE_API_KEY": "test-key",
+                },
+                keychain_reader=lambda _: None,
+            )
+            try:
+                resp = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_batch",
+                        "arguments": {
+                            "pid": 42,
+                            "window_id": 100,
+                            "steps": [
+                                {
+                                    "goal": "Click 7",
+                                    "mode": "deterministic",
+                                    "candidates": [{"id": "c7", "description": "Click 7", "tool": "click", "element_index": 5}],
+                                    "expected_postcondition": {"static_text_equals": "7"},
+                                },
+                                {
+                                    "goal": "Click 8",
+                                    "mode": "deterministic",
+                                    "candidates": [{"id": "c8", "description": "Click 8", "tool": "click", "element_index": 6}],
+                                    "expected_postcondition": {"static_text_equals": "78"},
+                                },
+                                {
+                                    "goal": "Click 9",
+                                    "mode": "deterministic",
+                                    "candidates": [{"id": "c9", "description": "Click 9", "tool": "click", "element_index": 7}],
+                                    "expected_postcondition": {"static_text_equals": "789"},
+                                },
+                            ],
+                        },
+                    },
+                })
+                sc = resp["result"]["structuredContent"]
+                self.assertTrue(resp["result"]["isError"])
+                self.assertEqual(sc["verification_outcome"], "outcome_unknown")
+                self.assertTrue(sc["uncertain_side_effect"])
+                self.assertEqual(sc["completed_count"], 1)
+                self.assertEqual(sc["failed_step"]["step_index"], 1)
+                self.assertEqual(sc["failed_step"]["verification_outcome"], "outcome_unknown")
+                self.assertTrue(sc["failed_step"]["uncertain_side_effect"])
+                self.assertEqual(len(sc["remaining_steps"]), 1)
+                self.assertEqual(sc["remaining_steps"][0]["step_index"], 2)
+                self.assertTrue(sc["accounting"]["halted"])
+                self.assertEqual(sc["accounting"]["uncertain_side_effects"], 1)
+
+                # Subsequent replay attempt is immediately refused because session is halted
+                replay = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_batch",
+                        "arguments": {
+                            "pid": 42,
+                            "window_id": 100,
+                            "steps": [
+                                {
+                                    "goal": "Click 7",
+                                    "mode": "deterministic",
+                                    "candidates": [{"id": "c7", "description": "Click 7", "tool": "click", "element_index": 5}],
+                                    "expected_postcondition": {"static_text_equals": "7"},
+                                }
+                            ],
+                        },
+                    },
+                })
+                self.assertEqual(replay["result"]["structuredContent"]["status"], "halted")
+            finally:
+                server.close()
+
+    def test_session_bookkeeping_conflict_arbitration_and_end_session_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session_driver = os.path.join(tmp, "session-driver")
+            log_file = os.path.join(tmp, "session-calls.jsonl")
+            with open(session_driver, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent(f"""\
+                    #!/usr/bin/env python3
+                    import json, sys
+                    snap_seq = 10
+                    log_path = {log_file!r}
+                    for line in sys.stdin:
+                        msg = json.loads(line)
+                        if "id" not in msg:
+                            continue
+                        method = msg.get("method")
+                        if method == "initialize":
+                            res = {{"protocolVersion": "2025-06-18", "capabilities": {{}}, "serverInfo": {{"name": "session-driver"}}}}
+                        elif method == "tools/call":
+                            params = msg.get("params", {{}})
+                            name = params.get("name")
+                            args = params.get("arguments", {{}})
+                            with open(log_path, "a", encoding="utf-8") as lf:
+                                lf.write(json.dumps({{"name": name, "args": args}}) + "\\n")
+                            if name == "get_window_state":
+                                snap_seq += 1
+                                snap = f"s000000{{snap_seq}}"
+                                val = "7" if snap_seq % 2 == 0 else "0"
+                                md = f'- [0] AXWindow "Calculator"\\n  - AXStaticText = "{{val}}"\\n  - [5] AXButton (7)'
+                                res = {{
+                                    "content": [{{"type": "text", "text": md}}],
+                                    "structuredContent": {{
+                                        "pid": args.get("pid", 42),
+                                        "window_id": args.get("window_id", 100),
+                                        "snapshot_id": snap,
+                                        "tree_markdown": md,
+                                        "elements": [
+                                            {{"element_index": 0, "role": "AXWindow", "label": "Calculator"}},
+                                            {{"element_index": 5, "role": "AXButton", "label": "7", "enabled": True, "parent_index": 0, "actions": ["AXPress"]}},
+                                        ],
+                                    }},
+                                }}
+                            elif name == "click":
+                                res = {{"content": [{{"type": "text", "text": "clicked 7"}}], "structuredContent": {{"ok": True}}}}
+                            elif name == "end_session":
+                                res = {{"content": [{{"type": "text", "text": "session ended"}}], "structuredContent": {{"ok": True}}}}
+                            else:
+                                res = {{"content": [{{"type": "text", "text": "ok"}}], "structuredContent": {{"ok": True}}}}
+                        else:
+                            res = {{}}
+                        print(json.dumps({{"jsonrpc": "2.0", "id": msg["id"], "result": res}}), flush=True)
+                """))
+            os.chmod(session_driver, os.stat(session_driver).st_mode | stat.S_IEXEC)
+
+            def fake_http(_req, _t):
+                return 200, json.dumps({
+                    "model": "jev-1.13.0",
+                    "answers": {
+                        "candidate": {
+                            "type": "choice",
+                            "choice": "ax.5.7",
+                            "confidence": 0.99,
+                            "probabilities": {"ax.5.7": 0.99, "reobserve": 0.005, "abstain": 0.005},
+                        }
+                    },
+                    "usage": {"input_tokens": 50, "output_tokens": 5},
+                })
+
+            server_a = jev.JevMcpServer(
+                env={"AGY_CUA_DRIVER": session_driver, "TYPESAFE_API_KEY": "test-key", "AGY_CUA_SESSION_ID": "jev-client-a"},
+                keychain_reader=lambda _: None,
+                http_post=fake_http,
+            )
+            server_b = jev.JevMcpServer(
+                env={"AGY_CUA_DRIVER": session_driver, "TYPESAFE_API_KEY": "test-key", "AGY_CUA_SESSION_ID": "jev-client-b"},
+                keychain_reader=lambda _: None,
+                http_post=fake_http,
+            )
+            try:
+                self.assertEqual(server_a.session_id, "jev-client-a")
+                self.assertEqual(server_b.session_id, "jev-client-b")
+
+                # Client A acts on (pid=42, window_id=100)
+                resp_a = server_a.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {
+                            "goal": "Click 7",
+                            "pid": 42,
+                            "window_id": 100,
+                            "expected_postcondition": {"static_text_equals": "7"},
+                        },
+                    },
+                })
+                self.assertEqual(resp_a["result"]["structuredContent"]["status"], "verified")
+                self.assertEqual(resp_a["result"]["structuredContent"]["session_id"], "jev-client-a")
+
+                # Client B attempting to act on the same (pid=42, window_id=100) while Client A owns it is refused
+                resp_b_conflict = server_b.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {
+                            "goal": "Click 7",
+                            "pid": 42,
+                            "window_id": 100,
+                            "expected_postcondition": {"static_text_equals": "7"},
+                        },
+                    },
+                })
+                self.assertTrue(resp_b_conflict["result"]["isError"])
+                self.assertEqual(resp_b_conflict["result"]["structuredContent"]["status"], "target_conflict")
+
+                # Client B can act on a disjoint window (pid=42, window_id=200)
+                resp_b_other = server_b.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {
+                            "goal": "Click 7",
+                            "pid": 42,
+                            "window_id": 200,
+                            "expected_postcondition": {"static_text_equals": "7"},
+                        },
+                    },
+                })
+                self.assertEqual(resp_b_other["result"]["structuredContent"]["status"], "verified")
+
+                # Closing Client A sends end_session for jev-client-a and releases (pid=42, window_id=100)
+                server_a.close()
+
+                resp_b_after_close = server_b.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {
+                            "goal": "Click 7",
+                            "pid": 42,
+                            "window_id": 100,
+                            "expected_postcondition": {"static_text_equals": "7"},
+                        },
+                    },
+                })
+                self.assertEqual(resp_b_after_close["result"]["structuredContent"]["status"], "verified")
+
+                # Stale expected_snapshot_id is refused before dispatch
+                resp_b_stale = server_b.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {
+                            "goal": "Click 7",
+                            "pid": 42,
+                            "window_id": 100,
+                            "expected_snapshot_id": "s00000001",
+                            "expected_postcondition": {"static_text_equals": "7"},
+                        },
+                    },
+                })
+                self.assertTrue(resp_b_stale["result"]["isError"])
+                self.assertEqual(resp_b_stale["result"]["structuredContent"]["status"], "stale_snapshot")
+            finally:
+                server_a.close()
+                server_b.close()
+
+            with open(log_file, "r", encoding="utf-8") as lf:
+                logged = [json.loads(line) for line in lf if line.strip()]
+            end_sessions = [entry["args"].get("session") for entry in logged if entry["name"] == "end_session"]
+            self.assertIn("jev-client-a", end_sessions)
+            self.assertIn("jev-client-b", end_sessions)
+
+            # Cross-process target conflict via shared target state file (alive external PID vs dead PID)
+            state_file = os.path.join(tmp, "targets.json")
+            sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            try:
+                with open(state_file, "w", encoding="utf-8") as sf:
+                    json.dump(
+                        {
+                            "42:100": {
+                                "session_id": "jev-external-live",
+                                "server_pid": sleeper.pid,
+                                "last_snapshot_id": "s00000010",
+                            },
+                            "42:300": {
+                                "session_id": "jev-external-dead",
+                                "server_pid": 999_999_999,
+                                "last_snapshot_id": "s00000009",
+                            },
+                        },
+                        sf,
+                    )
+                server_c = jev.JevMcpServer(
+                    env={
+                        "AGY_CUA_DRIVER": session_driver,
+                        "TYPESAFE_API_KEY": "test-key",
+                        "AGY_CUA_SESSION_ID": "jev-client-c",
+                        "AGY_CUA_TARGET_STATE_FILE": state_file,
+                    },
+                    keychain_reader=lambda _: None,
+                    http_post=fake_http,
+                )
+                try:
+                    ext_conflict = server_c.handle_message({
+                        "jsonrpc": "2.0",
+                        "id": 10,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "jev_step",
+                            "arguments": {
+                                "goal": "Click 7",
+                                "pid": 42,
+                                "window_id": 100,
+                                "expected_postcondition": {"static_text_equals": "7"},
+                            },
+                        },
+                    })
+                    self.assertTrue(ext_conflict["result"]["isError"])
+                    self.assertEqual(ext_conflict["result"]["structuredContent"]["status"], "target_conflict")
+                    self.assertIn("jev-external-live", ext_conflict["result"]["structuredContent"]["reason"])
+
+                    # Dead external PID on (42, 300) is pruned and acquired cleanly
+                    dead_reclaim = server_c.handle_message({
+                        "jsonrpc": "2.0",
+                        "id": 11,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "jev_step",
+                            "arguments": {
+                                "goal": "Click 7",
+                                "pid": 42,
+                                "window_id": 300,
+                                "expected_postcondition": {"static_text_equals": "7"},
+                            },
+                        },
+                    })
+                    self.assertEqual(dead_reclaim["result"]["structuredContent"]["status"], "verified")
+
+                    # Mixed element + non-element candidates without explicit element_index in expected_postcondition are refused
+                    mixed_refused = server_c.handle_message({
+                        "jsonrpc": "2.0",
+                        "id": 12,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "jev_batch",
+                            "arguments": {
+                                "pid": 42,
+                                "window_id": 300,
+                                "steps": [
+                                    {
+                                        "goal": "Submit form",
+                                        "candidates": [
+                                            {"id": "c_el", "description": "Click field", "tool": "click", "element_index": 5},
+                                            {"id": "c_key", "description": "Press Return", "tool": "press_key", "key": "return"},
+                                        ],
+                                        "expected_postcondition": {"element_value_equals": "done"},
+                                    }
+                                ],
+                            },
+                        },
+                    })
+                    self.assertTrue(mixed_refused["result"]["isError"])
+                    self.assertEqual(mixed_refused["result"]["structuredContent"]["status"], "refused")
+                    self.assertIn("unbound_element_postcondition", mixed_refused["result"]["structuredContent"]["reason"])
+                finally:
+                    server_c.close()
+            finally:
+                sleeper.terminate()
+                sleeper.wait(timeout=2)
+
+            self.assertEqual(jev.clamp_batch_timeout_ms(25), jev.MIN_BATCH_TIMEOUT_MS)
+            self.assertEqual(jev.clamp_batch_timeout_ms(0), jev.DEFAULT_BATCH_TIMEOUT_MS)
+
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
-

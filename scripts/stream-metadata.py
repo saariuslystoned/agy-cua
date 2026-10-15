@@ -4,7 +4,53 @@ import json
 import sys
 
 JEV_SERVERS = {"agy-cua-jev", "agy-cua_agy-cua-jev"}
-JEV_SCHEMAS = {"agy_cua.jev_step_v1", "agy_cua.jev_select_action_v1"}
+JEV_SCHEMAS = {"agy_cua.jev_step_v1", "agy_cua.jev_batch_v1", "agy_cua.jev_select_action_v1"}
+
+
+def _sanitize_timings(timings):
+    return (
+        {
+            k: v
+            for k, v in timings.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+        }
+        if isinstance(timings, dict)
+        else {}
+    )
+
+
+def _sanitize_static_texts(texts):
+    return (
+        [str(x) for x in texts if isinstance(x, (str, int, float))]
+        if isinstance(texts, list)
+        else []
+    )
+
+
+def _sanitize_batch_step(step_obj):
+    if not isinstance(step_obj, dict):
+        return None
+    return {
+        "step_index": step_obj.get("step_index") if isinstance(step_obj.get("step_index"), int) else None,
+        "status": step_obj.get("status") if isinstance(step_obj.get("status"), str) else None,
+        "verification_outcome": (
+            step_obj.get("verification_outcome")
+            if isinstance(step_obj.get("verification_outcome"), str)
+            else None
+        ),
+        "verified": step_obj.get("verified") if isinstance(step_obj.get("verified"), bool) else None,
+        "selected_id": step_obj.get("selected_id") if isinstance(step_obj.get("selected_id"), str) else None,
+        "returned_model": step_obj.get("returned_model") if isinstance(step_obj.get("returned_model"), str) else None,
+        "sdk_identity": step_obj.get("sdk_identity") if isinstance(step_obj.get("sdk_identity"), str) else None,
+        "pre_snapshot_id": (
+            step_obj.get("pre_snapshot_id") if isinstance(step_obj.get("pre_snapshot_id"), str) else None
+        ),
+        "post_snapshot_id": (
+            step_obj.get("post_snapshot_id") if isinstance(step_obj.get("post_snapshot_id"), str) else None
+        ),
+        "post_static_texts": _sanitize_static_texts(step_obj.get("post_static_texts")),
+        "timings_ms": _sanitize_timings(step_obj.get("timings_ms")),
+    }
 
 
 def _extract_sanitized_jev_entry(raw_output):
@@ -36,22 +82,6 @@ def _extract_sanitized_jev_entry(raw_output):
         if isinstance(accounting, dict)
         else {}
     )
-    timings = parsed_obj.get("timings_ms")
-    clean_timings = (
-        {
-            k: v
-            for k, v in timings.items()
-            if isinstance(v, (int, float)) and not isinstance(v, bool)
-        }
-        if isinstance(timings, dict)
-        else {}
-    )
-    post_texts = parsed_obj.get("post_static_texts")
-    clean_post_texts = (
-        [str(x) for x in post_texts if isinstance(x, (str, int, float))]
-        if isinstance(post_texts, list)
-        else []
-    )
     entry = {
         "schema": parsed_obj.get("schema"),
         "status": parsed_obj.get("status") if isinstance(parsed_obj.get("status"), str) else None,
@@ -77,9 +107,24 @@ def _extract_sanitized_jev_entry(raw_output):
             else None
         ),
         "accounting": clean_accounting,
-        "timings_ms": clean_timings,
-        "post_static_texts": clean_post_texts,
+        "timings_ms": _sanitize_timings(parsed_obj.get("timings_ms")),
+        "post_static_texts": _sanitize_static_texts(parsed_obj.get("post_static_texts")),
     }
+    for int_key in ("completed_count", "total_steps"):
+        val = parsed_obj.get(int_key)
+        if isinstance(val, int) and not isinstance(val, bool):
+            entry[int_key] = val
+    raw_selected_ids = parsed_obj.get("selected_ids")
+    if isinstance(raw_selected_ids, list):
+        entry["selected_ids"] = [s for s in raw_selected_ids if isinstance(s, str)]
+    raw_completed = parsed_obj.get("completed_steps")
+    if isinstance(raw_completed, list):
+        entry["completed_steps"] = [
+            s for s in (_sanitize_batch_step(item) for item in raw_completed) if s is not None
+        ]
+    raw_failed = _sanitize_batch_step(parsed_obj.get("failed_step"))
+    if raw_failed is not None:
+        entry["failed_step"] = raw_failed
     provider_ms = parsed_obj.get("provider_ms")
     if isinstance(provider_ms, (int, float)) and not isinstance(provider_ms, bool):
         entry["provider_ms"] = provider_ms
