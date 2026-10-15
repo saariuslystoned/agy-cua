@@ -115,98 +115,166 @@ We also evaluated `gemini-4-argon` across `thinking_level=low`, `medium`, and `h
 
 ---
 
-## 6. Codex Computer Use — original fixture cannot be addressed (2026-10-15)
+## 6. Codex Computer Use — 24 native task attempts (2026-10-15)
 
-**No benchmark task has run (0/24).** Bobby approved native app access and
-resolved the configurations to **GPT-6.1 Sol Fast** and **GPT-6 Astra Ultrafast**.
-The native plugin can access Calculator, but cannot address the exact original
-unbundled benchmark fixture. The current authority is the
-[authorized admission evidence](../proof/codex-native-20261015-authorized-admission.json);
-the earlier [capability probe](../proof/codex-native-20261015-probe.json) remains
-historical evidence, including the initial permission failure.
+**Sol Fast passed 9/12; Astra Ultrafast passed 8/12 under the original focus-based
+rule.** Sol reached all 12 task goals; Astra reached 11/12. Six goal-successful
+runs failed because the target was foreground during focus samples. One Astra
+turn failed before any native tool call. Every attempt is retained; none was
+replaced. All four vault runs passed the unchanged secret/canary check, and all
+four mail runs saved a draft without Send.
 
-| Final requested arm | Configured model | Speed/service tier | Completed / required runs | Pass rate | Wall time | Model turns | Images sent | Input/output tokens | Cost | Focus violations / probe errors |
-| :--- | :--- | :--- | ---: | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `6.1 sol fast` | `gpt-6.1-sol` | Fast / `priority` | 0 / 12 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
-| `6 astra ultrafast` | `gpt-6-astra` | Ultrafast / `ultrafast` | 0 / 12 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable |
+This is a **scripted genuine native Computer Use** measurement through Codex
+app-server `0.161.0`, `unified-computer-use` `26.1007.71326` (`cua_repl/js`),
+on macOS 26.5.2 arm64. Cua Driver `0.35.4` performs independent setup, screenshot
+capture and verification. All measured UI decisions and input actions use the
+native plugin. The pinned setup dependency is `google-genai 2.23.0`; no Gemini or
+Jev inference is used in these native runs.
 
-Bobby's final choice supersedes an earlier Sol Ultrafast reply and resolves the
-dispatch label “6.1 sol astra ultrafast.” Both final combinations are advertised
-by the live catalog. Separate reasoning effort `low` was explicitly configured
-and echoed for both admission threads. Neither thread requested inference;
-these are configuration identities, not upstream per-response identity receipts.
-All 24 original task/repetition slots remain `not_run` with null metrics in the
-committed evidence. No per-repetition result, variance, or speed comparison can
-be computed, and no timing difference can be attributed to batching or screenshots.
+Every result and aggregate below is in
+[`proof/codex-native-20261015-measurements.json`](../proof/codex-native-20261015-measurements.json).
+That file binds each row to its executed source, original run, and private final
+screenshot hash. Local verification is recorded in
+[the verification receipt](../proof/codex-native-20261015-verification.md).
 
-### Native access result and reproducibility
+### Configurations and arm-level results
 
-The genuine `unified-computer-use` plugin (`26.1007.71326`, `cua_repl/js`) was
-called through Codex app-server `0.161.0`. After forwarding Bobby's explicit
-Calculator approval through the documented MCP elicitation response, a read-only
-Calculator probe succeeded. No permission or attestation response was invented.
-No macOS permission setting changed. This establishes a programmatic native-plugin
-path for supported apps, rather than a Cua Driver actor labeled as Codex.
+Both requested combinations were verified against the live catalog and explicitly
+configured on each fresh thread and turn. Reasoning effort is separately `low`.
+Provider model fallback is disabled; no reroute was observed. Model identity is
+established by `model/list`, `thread/start` configuration echo and explicit
+`turn/start` parameters; an upstream per-response identity receipt is unavailable.
 
-When compiled as a bare Mach-O executable (`runs/.cache/bench_fixture`), the native
-`SkyComputerUseService` rejected the fixture (`Invalid app`) because its
-`SystemSoftware.ApplicationTarget(bundleIdentifier:bundleURL:)` lookup requires a
-macOS `.app` bundle identity (`CFBundleIdentifier`, `.app` bundle path, or display name).
+| Arm | Model / service tier | Full passes | Task goals | Six-task attempt wall, r1 / r2 | Mean ± sample SD (n=2) | Model-requested native RPCs (12 attempts) | Reported input / output tokens | Outer turns / actions / images | Cost | Focus samples violating rule / probe errors |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- | :--- | ---: |
+| Sol Fast | `gpt-6.1-sol` / `priority` | 9/12 | 12/12 | 92.255 / 93.638 s | 92.947 ± 0.978 s | 41 | 1,603,176 / 2,667 (12/12 rows) | unavailable | unavailable | 32 / 0 |
+| Astra Ultrafast | `gpt-6-astra` / `ultrafast` | 8/12 | 11/12 | 67.969 / 61.018 s | 64.493 ± 4.915 s | 37 | 1,374,053 / 2,509 (11/12 rows) | unavailable | unavailable | 15 / 0 |
 
-Packaging the unchanged `scripts/bench_fixture.swift` binary inside
-`runs/.cache/BenchFixture.app` (`Contents/MacOS/bench_fixture` + `Contents/Info.plist`
-with `CFBundleIdentifier = "com.agycua.benchfixture"` and `CFBundleDisplayName = "BenchFixture"`,
-ad-hoc signed and registered with LaunchServices in `ensure_fixture_binary()`)
-resolved the native app-identity requirement:
+The historical six-task AGY totals above remain 409.67 s (`google-cua-bg`),
+139.80 s (`direct`), 178.39 s (`v0`) and 95.27 s (`v1`), each 6/6 with zero
+focus violations. Native totals include failed attempts. In particular, Astra's
+second total includes a **3.188 s failed turn**, so it is not a successful
+six-task completion time. Two repetitions provide descriptive variation only.
 
-- Bundle path `.../BenchFixture.app`: **Accessible** (`Window: "AGYCuaBench-form", App: BenchFixture.`).
-- Display name `BenchFixture` / bundle ID `com.agycua.benchfixture`: **Accessible**.
-- Native app inventory (`cua.listApps`): **1 running match** (`id: "com.agycua.benchfixture"`, `isRunning: true`).
-- Single-instance process verification (`peer_fixtures() == [pid]`): **Verified**.
+`wall_s` includes fresh app-server startup, thread configuration, model work and
+focus-monitor bookends; it excludes fixture setup and the independent final
+verifier. Vault timing additionally includes client-only native binding and
+redaction initialization. `prompt_wall_s` measures `turn/start` to completion:
+Sol totals 81.445 / 82.104 s, Astra 57.169 / 48.231 s per repetition. The
+historical harness has a different startup boundary, so these raw totals do not
+establish a controlled speedup.
 
-The reproducible admission adapter starts **zero model turns**:
+Tokens are reported cumulative thread totals, including cached input. Cached
+input is a subset: Sol 1,257,216; Astra 1,159,808. Astra token sums cover 11/12
+attempts because the failed turn reported no usage. Missing values remain null;
+its true aggregate token total is unavailable. Native context and token
+accounting differ from the baseline planner/selector split.
+
+### Per-task results and variance
+
+Each pair below is repetition 1 / repetition 2. `PASS` requires the task goal,
+zero focus violations, zero focus probe errors, a completed native-agent turn,
+and no actor/model substitution. Focus counts are violating **samples**, not
+separate focus-steal events.
+
+| Task | Arm | Full verdict r1 / r2 | Goal r1 / r2 | Wall seconds r1 / r2 | Native RPCs r1 / r2 | Focus violations r1 / r2 |
+| :--- | :--- | :--- | :--- | ---: | ---: | ---: |
+| T1_calc_arith | Sol Fast | PASS / PASS | yes / yes | 12.147 / 11.717 | 2 / 2 | 0 / 0 |
+| T1_calc_arith | Astra Ultrafast | PASS / PASS | yes / yes | 8.636 / 9.308 | 2 / 2 | 0 / 0 |
+| T2_calc_recovery | Sol Fast | PASS / PASS | yes / yes | 18.216 / 13.866 | 3 / 3 | 0 / 0 |
+| T2_calc_recovery | Astra Ultrafast | PASS / PASS | yes / yes | 10.798 / 9.796 | 3 / 3 | 0 / 0 |
+| T3_appkit_form | Sol Fast | PASS / PASS | yes / yes | 12.851 / 13.234 | 3 / 3 | 0 / 0 |
+| T3_appkit_form | Astra Ultrafast | PASS / PASS | yes / yes | 11.823 / 12.016 | 3 / 3 | 0 / 0 |
+| T4_appkit_dense | Sol Fast | PASS / FAIL | yes / yes | 20.445 / 21.959 | 5 / 5 | 0 / 5 |
+| T4_appkit_dense | Astra Ultrafast | FAIL / FAIL | yes / no | 13.192 / 3.188 | 5 / 0 | 10 / 0 |
+| T5a_mail_triage_draft | Sol Fast | FAIL / FAIL | yes / yes | 14.539 / 14.520 | 3 / 3 | 24 / 3 |
+| T5a_mail_triage_draft | Astra Ultrafast | FAIL / FAIL | yes / yes | 11.042 / 13.202 | 3 / 3 | 1 / 4 |
+| T5b_1password_vault_item | Sol Fast | PASS / PASS | yes / yes | 14.057 / 18.342 | 4 / 5 | 0 / 0 |
+| T5b_1password_vault_item | Astra Ultrafast | PASS / PASS | yes / yes | 12.478 / 13.508 | 5 / 5 | 0 / 0 |
+
+There were zero focus probe errors. Sol's focus-only failures were mail r1,
+dense r2 and mail r2; Astra's were dense r1 and mail r1/r2. Astra dense r2 ended
+with `agent_status=failed`, no native call and null usage. The original observer
+retained status but not its error detail, so that failure's root cause is
+unavailable. It was not retried. Goal-successful dense runs committed exactly
+B2/B5/B8 with zero decoy misclicks.
+
+### Shared authority and stated deviations
+
+The measurement base is merged PR #14,
+`88aa641ef66c4472f53454feb6165be2fb992ea5`. TaskSpec goals, setup, original
+`verify_fn`, `FocusMonitor`, `probe-focus.sh`, fixture Swift source and historical
+baseline metrics are unchanged from that base. Executed byte-equality assertions
+and hashes are in the proof. Dedicated native adapters reuse those authorities
+and `write_benchmark_summary()`.
+
+PR #14 is the approved setup change: the unchanged fixture executable is packaged
+inside `BenchFixture.app`, ad-hoc signed and registered with LaunchServices, with
+bundle ID `com.agycua.benchfixture`. Native admission verifies the bundle inventory
+and that the launched PID is the only fixture process. This resolves the earlier
+unbundled-app blocker recorded in the historical
+[capability probe](../proof/codex-native-20261015-probe.json) and
+[authorized admission](../proof/codex-native-20261015-authorized-admission.json).
+
+The native initial vault AX response contains a masked secure-field marker. The
+original canary guard rejects that marker even though the actual canary prefix
+is absent. Two initial non-inference preflights stopped, then the first run
+measured 20 eligible slots and preserved four blocked vault slots. Those blocked
+admissions are retained as history and are not counted as model attempts.
+
+The four unstarted vault slots were subsequently measured with a stated
+observation deviation: the client selects the native app before inference,
+checks identity and absence of the canary prefix in memory, and initializes
+`safeVaultState()` inside the genuine native `cua_repl`. That helper requests
+`getAXState({emit:false, disableDiffing:true})`, removes secure/password and
+masked-field lines, then emits the remaining native state. It contains no task
+inputs, target indices, verifier information or UI input actions. The solver uses
+the existing `vaultApp` binding, this observation helper and native inputs.
+Filtered output and documentation must pass the **unchanged original canary
+guard before any model turn**. Every measured tool result is audited with that
+same guard. All four final vault verifiers passed, including secret unchanged.
+
+The first 20 attempts executed at `bb7fd6eef2217b1edbb07ec8047b5be750e87e25` (full SHA in proof); the four vault
+attempts executed at `25878d6d9e54dea3889d852780d2491cb40e0bf0` (full SHA in proof). Fresh ephemeral solver threads
+receive only the original TaskSpec prompt plus native-tool and safety instructions;
+no fixture source, state files or verifier evidence is supplied. The implementation
+chat remains ineligible as a solver after its earlier sentinel exposure. Raw
+transport messages are not saved; screenshots/state stay in ignored private run
+directories. No production tuning, system permission change or external send was
+performed.
+
+### What the measurements can explain
+
+Completed native RPC arguments show multiple UI method invocations batched into
+one call, followed by native AX observation. This is visible evidence of batching,
+but the method-name lists are syntactic metadata and do not count dispatched
+actions or helper-internal observations. Goal verification independently confirms
+the final state. The visible batching is consistent with short native task times;
+model/tier, tool context, timing boundaries and focus behavior also differ, so a
+causal batching speedup cannot be isolated here.
+
+Native RPC counts cover model-requested calls and exclude client-only vault setup.
+They are not outer model turns. The app-server does not expose
+internal model-request count, executed action count, provider-transmitted image
+count (including history resends), or comparable step-phase timing. These fields
+remain unavailable. Absence of an explicit screenshot method in recorded code
+cannot establish zero screenshots transmitted.
+
+### Billing and reproduction
+
+Each task requires a ChatGPT account with included quota available before its
+request. These runs used subscription access with zero API-key requests. Marginal
+dollar cost and credit debit are unavailable, not zero; no API price is applied
+to subscription tokens. The issue-wide cap remains $5. See official
+[Codex pricing](https://learn.chatgpt.com/docs/pricing),
+[speed settings](https://learn.chatgpt.com/docs/agent-configuration/speed), and
+[app-server protocol](https://learn.chatgpt.com/docs/app-server).
+
+Use the pinned benchmark venv, with no `.env` bootstrap. The second command
+requires a first summary with exactly 20 unique measured slots and four blocked
+vault slots; all prior failures are carried forward.
 
 ```bash
-python3 scripts/benchmark_codex_native.py --approved-native-apps --max-budget-usd 5
+python3 scripts/run_codex_native_benchmark.py --approved-native-apps --max-budget-usd 5
+python3 scripts/run_codex_native_vault.py --prior-run runs/benchmark-codex-runs/<first-run>/summary.json --approved-native-apps --max-budget-usd 5
 ```
-
-With `BenchFixture.app`, the admission probe exits `0` with
-`"status": "apps_accessible_measurements_not_started"` and `"blocker": null`.
-Saved summaries contain selected metadata and classifications, never arbitrary UI
-state or raw error text. Screenshot pixels and state files stay in ignored private
-evidence.
-
-### Authority, cost and conditions
-
-Frozen benchmark base: PR #11 OPEN at
-`154edf54e6223b4c61543d78206247535b3e2b89`. Executed adapter source:
-`c34d7af21ed4113601b1573d37d4bd39414ed7f8`, branch
-`codex/issue-12-codex-cu`, worktree
-`/Users/bobbybones/Developer/side-quests/agy-cua-worktrees/issue-12-codex-cu`.
-The evidence binds the source, fixture binary and fixture source hashes.
-`TaskSpec`, task goals, setup, verifiers, and focus contracts remain identical;
-executed AST comparisons prove this. The summary serialization statement was
-extracted unchanged into `write_benchmark_summary()` for reuse. The original
-fixture, focus probe and historical baseline summary remain byte-identical.
-Production adapters were not tuned. Local validation: **69 tests passed**,
-ShellCheck passed, diff checks passed.
-
-This resumed admission work made no model request and no paid API request. The
-one earlier subscription capability probe reported 52,830 input tokens (23,296
-cached), 100 output tokens, and unavailable marginal dollar cost/credit debit.
-Those numbers are probe-only, never benchmark results. The total issue cap is
-$5; no paid API/key-backed run is admitted. Native subscription marginal cost
-remains unavailable, not zero. The
-[official Codex pricing](https://learn.chatgpt.com/docs/pricing) and
-[speed documentation](https://learn.chatgpt.com/docs/agent-configuration/speed)
-distinguish included subscription usage from credit/API billing; API prices were
-not applied to subscription usage. The
-[app-server protocol](https://learn.chatgpt.com/docs/app-server) documents the
-native MCP call and human elicitation response used here.
-
-A competing benchmark fixture/worker was observed and left untouched. No
-exclusive desktop interval, task timer or focus monitor was started, so focus
-metrics remain unavailable. A prior source read exposed the fixture sentinel in
-this implementation chat; it cannot serve as a measured solver. Future runs
-require fresh solver contexts without source/verifier evidence, a noncompeting
-desktop interval, the original focus-based pass rule, and every failure retained.
