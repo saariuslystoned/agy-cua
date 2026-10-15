@@ -96,7 +96,7 @@ class FixtureAdmissionTests(unittest.TestCase):
         return Session()
 
     def test_path_success_does_not_persist_ui_or_try_other_targets(self):
-        session = self.session([{"content": [{"type": "text", "text": "PRIVATE_UI_SENTINEL"}]}])
+        session = self.session([{"content": [{"type": "text", "text": 'Window: "AGYCuaBench-form" PRIVATE_UI_SENTINEL'}]}])
         result = runner.probe_fixture(session, "thread", Path("/fixture"), 42)
         self.assertTrue(result["accessible"])
         self.assertEqual(len(session.calls), 1)
@@ -130,11 +130,17 @@ class FixtureAdmissionTests(unittest.TestCase):
             session = self.session([
                 {"isError": True}, {"isError": True},
                 {"content": [{"type": "text", "text": '[{"id":"fixture-only"}]'}]},
-                {"isError": failed},
+                {"isError": failed, "content": [{"type": "text", "text": 'Window: "AGYCuaBench-form"'}]},
             ])
             result = runner.probe_fixture(session, "thread", Path("/fixture"), 42)
             self.assertEqual(result["accessible"], not failed)
             self.assertIn('cua.getApp("fixture-only")', session.calls[-1][1]["arguments"]["code"])
+
+    def test_empty_success_receipt_is_not_fixture_access(self):
+        session = self.session([{}, {}, {"content": [{"type": "text", "text": "[]"}]}])
+        result = runner.probe_fixture(session, "thread", Path("/fixture"), 42)
+        self.assertFalse(result["accessible"])
+        self.assertEqual(result["attempts"][0]["error"], "missing_fixture_ui_evidence")
 
 
 if __name__ == "__main__":

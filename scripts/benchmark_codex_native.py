@@ -150,6 +150,11 @@ def probe_fixture(session, thread_id: str, fixture: Path, window_id: int) -> dic
     def native(code):
         return session.call("mcpServer/tool/call", {"threadId": thread_id, "server": "cua_repl", "tool": "js",
             "arguments": {"code": code, "title": "Check original benchmark fixture native access"}})
+    def fixture_visible(receipt):
+        return not receipt.get("isError") and any(
+            c.get("type") == "text" and 'Window: "AGYCuaBench-form"' in c.get("text", "")
+            for c in receipt.get("content", [])
+        )
     for kind, code in probes:
         receipt = native(code)
         texts = [c.get("text", "") for c in receipt.get("content", []) if c.get("type") == "text"]
@@ -158,7 +163,9 @@ def probe_fixture(session, thread_id: str, fixture: Path, window_id: int) -> dic
         error = "invalid_original_fixture_path" if invalid_path else (
             "macos_requires_app_identity" if unsupported_window else "native_tool_error"
         )
-        failed = bool(receipt.get("isError"))
+        failed = not fixture_visible(receipt)
+        if failed and not receipt.get("isError"):
+            error = "missing_fixture_ui_evidence"
         result["attempts"].append({"target_kind": kind, "is_error": failed, "error": error if failed else None})
         if not failed:
             result.update(accessible=True, accepted_target_kind=kind)
@@ -178,7 +185,7 @@ def probe_fixture(session, thread_id: str, fixture: Path, window_id: int) -> dic
     result["inventory_matches"] = len(matches) if matches is not None else None
     if matches and len(matches) == 1 and isinstance(matches[0], dict) and isinstance(matches[0].get("id"), str):
         receipt = native('var fixtureApp = await cua.getApp(' + json.dumps(matches[0]["id"]) + ');')
-        result["accessible"] = not bool(receipt.get("isError"))
+        result["accessible"] = fixture_visible(receipt)
         result["attempts"].append({"target_kind": "exact_window_inventory_app_id", "is_error": not result["accessible"]})
     return result
 
