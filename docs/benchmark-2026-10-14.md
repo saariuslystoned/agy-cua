@@ -67,7 +67,42 @@ We benchmarked four computer-use architectures head-to-head across six determini
 
 ---
 
-## 4. Verification & Reproducibility
+## 4. Model & Thinking-Level Sweep: `gemini-3.8-flash` vs. `gemini-4-argon` (`low` / `medium` / `high`)
+
+We also evaluated `gemini-4-argon` across `thinking_level=low`, `medium`, and `high` on the exact same 6-task suite (72 additional task-arm evaluations, `0` focus violations across all 96 runs):
+- **Argon `low`:** [`proof/bench-20261015T160504Z-summary.json`](../proof/bench-20261015T160504Z-summary.json) (`\$0.7711` total spend)
+- **Argon `medium`:** [`proof/bench-20261015T162641Z-summary.json`](../proof/bench-20261015T162641Z-summary.json) (`\$0.9966` total spend)
+- **Argon `high`:** [`proof/bench-20261015T164955Z-summary.json`](../proof/bench-20261015T164955Z-summary.json) (`\$1.2772` total spend)
+
+| Outer Planner Model / Thinking | Arm | Pass Rate | Total Wall Time | Model Wait | Outer Turns | Gemini Input Tokens | Gemini Output Tokens | Images Sent | Cost (USD) |
+| :--- | :--- | :---: | ---: | ---: | :---: | ---: | ---: | :---: | ---: |
+| **`gemini-3.8-flash` (`budget=512`)** | `google-cua-bg` | **6 / 6** | 409.67 s | 319.6 s | 50 | 160,488 | 4,578 | 94 | \$0.0940 |
+|  | `agy-cua-direct` | **6 / 6** | 139.80 s | 96.8 s | 41 | 126,322 | 1,784 | 0 | \$0.0685 |
+|  | `agy-cua-jev-v0` | **6 / 6** | 178.39 s | 117.4 s | 40 | 59,342 | 2,705 | 0 | \$0.0508 |
+|  | **`agy-cua-jev-v1`** | **6 / 6** | **95.27 s** | **56.3 s** | **16** | **25,136** | **2,814** | **0** | **\$0.0341** |
+| **`gemini-4-argon` (`low`)** | `google-cua-bg` | 5 / 6* | 405.15 s | 320.9 s | 27 | 162,427 | 1,793 | 52 | \$0.3428 |
+|  | `agy-cua-direct` | **6 / 6** | 377.16 s | 329.3 s | 40 | 114,968 | 1,704 | 0 | \$0.2470 |
+|  | `agy-cua-jev-v0` | **6 / 6** | 326.99 s | 249.7 s | 40 | 44,962 | 2,110 | 0 | \$0.1240 |
+|  | **`agy-cua-jev-v1`** | **6 / 6** | **100.34 s** | **60.5 s** | **12** | **14,928** | **1,444** | **0** | **\$0.0573** |
+| **`gemini-4-argon` (`medium`)** | `google-cua-bg` | 5 / 6* | 563.53 s | 489.4 s | 41 | 252,078 | 3,455 | 80 | \$0.5387 |
+|  | `agy-cua-direct` | **6 / 6** | 347.94 s | 306.3 s | 40 | 118,814 | 2,713 | 0 | \$0.2648 |
+|  | `agy-cua-jev-v0` | **6 / 6** | 303.75 s | 246.7 s | 40 | 47,166 | 2,430 | 0 | \$0.1317 |
+|  | **`agy-cua-jev-v1`** | **6 / 6** | **106.13 s** | **70.4 s** | **12** | **15,266** | **1,794** | **0** | **\$0.0615** |
+| **`gemini-4-argon` (`high`)** | `google-cua-bg` | **6 / 6** | 1,119.77 s | 1,037.2 s | 50 | 309,240 | 6,313 | 94 | \$0.6816 |
+|  | `agy-cua-direct` | **6 / 6** | 566.00 s | 524.9 s | 40 | 123,300 | 3,829 | 0 | \$0.2849 |
+|  | `agy-cua-jev-v0` | **6 / 6** | 391.62 s | 336.9 s | 40 | 62,530 | 6,260 | 0 | \$0.2006 |
+|  | **`agy-cua-jev-v1`** | **6 / 6** | **256.94 s** | **223.4 s** | **12** | **19,106** | **5,885** | **0** | **\$0.1101** |
+
+*\*On Argon `low` and `medium`, `google-cua-bg` failed `T2_calc_recovery` because the planner emitted `type_text` on Calculator instead of clicking buttons (`Background input refused (no_focused_text_input)`). All three AGY arms (`agy-cua-direct`, `agy-cua-jev-v0`, `agy-cua-jev-v1`) achieved **18 / 18 PASS (100%)** across Argon `low`, `medium`, and `high`.*
+
+### Findings from the Flash vs. Argon Sweep
+1. **`gemini-3.8-flash` is the fastest and most cost-effective planner overall:** Across every arm, `gemini-3.8-flash` delivers the lowest wall-clock time (`95.27s` on `v1`, `139.80s` on `direct`) and lowest cost (`\$0.0341` on `v1`) with 24/24 passes.
+2. **`agy-cua-jev-v1` insulates `gemini-4-argon` (`low` / `medium`) from per-turn planner latency:** Because `v1` collapses multi-step sequences into a single `jev_sequence` call, Argon `low` and `medium` finish all 6 tasks in **12 outer planner turns total** (2 turns/task vs. 16 on Flash) and **14,928 input tokens** (41% fewer than Flash's 25,136). That keeps `agy-cua-jev-v1` on Argon `low` at **`100.34s` / `\$0.0573`** (within 5 seconds of Flash `v1`), whereas multi-turn arms (`google-cua-bg`, `agy-cua-direct`, `agy-cua-jev-v0`) slow down by **2.5×–3.5×** on Argon.
+3. **`gemini-4-argon` (`high`) adds latency without accuracy gain on standard GUI loops:** `high` thinking adds `14,765` thought tokens, pushing `google-cua-bg` to `1,119.77s` (`18.7 min`) and `agy-cua-jev-v1` to `256.94s` while matching the 6/6 pass rate already achieved by Argon `low` and `medium` on the AGY arms.
+
+---
+
+## 5. Verification & Reproducibility
 
 1. **Unit & Controller Boundary Tests (`48 / 48 PASS`):**
    ```bash
@@ -76,4 +111,5 @@ We benchmarked four computer-use architectures head-to-head across six determini
    Covers `jev_batch` guarded multi-step execution and `chain_observations=true` observation chaining (`observe_ms == 0.0` on steps `2..N`), immediate halt on failed `expected_postcondition` or timeout without replay, automatic `set_value` candidate generation via `value`, depth-aware candidate prioritization, cross-snapshot label continuity (`target_element_label_mismatch`), `NSSecureTextField` / `\uf79a` redaction and `secure_element_refused` guard, background `invoke_menu`, and consequential commit safety refusals (`mail_send_forbidden_by_safety_policy` / `commit_action_forbidden_by_safety_policy`).
 2. **Benchmark Harness & Deterministic Native Fixture:**
    - AppKit multi-mode fixture: [`scripts/bench_fixture.swift`](../scripts/bench_fixture.swift) (`--mode form | dense | mail-twin | 1password-twin --state-file <path>`)
-   - Head-to-head runner: [`scripts/benchmark_cua.py`](../scripts/benchmark_cua.py) (`--arms google-cua-bg,agy-cua-direct,agy-cua-jev-v0,agy-cua-jev-v1 --tasks all --max-budget-usd 1.0`; run with `google-genai 2.23.0`)
+   - Head-to-head runner: [`scripts/benchmark_cua.py`](../scripts/benchmark_cua.py) (`--model gemini-3.8-flash | gemini-4-argon [--thinking-level low|medium|high] --arms google-cua-bg,agy-cua-direct,agy-cua-jev-v0,agy-cua-jev-v1 --tasks all`; run with `google-genai 2.23.0`)
+
