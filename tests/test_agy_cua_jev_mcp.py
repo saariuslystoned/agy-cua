@@ -3412,7 +3412,7 @@ class StdioEndToEndTest(unittest.TestCase):
             '    - [76] AXButton "Copy"',
             '    - [77] AXPopUpButton (password. More Actions)',
             '    - [80] AXStaticText = "website"',
-            '    - [81] AXStaticText = "https://dashboard.stripe.com/login"',
+            '    - [81] AXStaticText = "https://dashboard.stripe.com/share/delete/send"',
             '    - [82] AXButton "Open"',
             '    - [83] AXStaticText = "Tooltip:"',
             '    - [84] AXStaticText = "Open and Fill"',
@@ -3425,6 +3425,11 @@ class StdioEndToEndTest(unittest.TestCase):
             '    - [95] AXMenuItem "Open and Fill"',
             '    - [96] AXTextField (API Secret) = "plain-api-secret-val"',
             '    - [97] AXButton "••••••••"',
+            '    - [100] AXStaticText = "custom_pin"',
+            '    - [101] AXStaticText = "REVEALED-CUSTOM-PIN-7777"',
+            '    - [102] AXButton "Hide"',
+            '    - [103] AXButton "Copy"',
+            '    - [104] AXPopUpButton (custom_pin. More Actions)',
         ])
         login_obs = jev.extract_window_observation(
             {
@@ -3454,7 +3459,7 @@ class StdioEndToEndTest(unittest.TestCase):
                         {"element_index": 76, "role": "AXButton", "label": "Copy", "parent_index": 1, "actions": ["AXPress"]},
                         {"element_index": 77, "role": "AXPopUpButton", "label": "password. More Actions", "parent_index": 1, "actions": ["AXPress"]},
                         {"element_index": 80, "role": "AXStaticText", "label": None, "value": "website", "parent_index": 1},
-                        {"element_index": 81, "role": "AXStaticText", "label": None, "value": "https://dashboard.stripe.com/login", "parent_index": 1},
+                        {"element_index": 81, "role": "AXStaticText", "label": None, "value": "https://dashboard.stripe.com/share/delete/send", "parent_index": 1},
                         {"element_index": 82, "role": "AXButton", "label": "Open", "parent_index": 1, "actions": ["AXPress"]},
                         {"element_index": 83, "role": "AXStaticText", "label": None, "value": "Tooltip:", "parent_index": 1},
                         {"element_index": 84, "role": "AXStaticText", "label": None, "value": "Open and Fill", "parent_index": 1},
@@ -3467,6 +3472,11 @@ class StdioEndToEndTest(unittest.TestCase):
                         {"element_index": 95, "role": "AXMenuItem", "label": "Open and Fill", "parent_index": 1, "actions": ["AXPress"]},
                         {"element_index": 96, "role": "AXTextField", "label": "API Secret", "value": "plain-api-secret-val", "parent_index": 1, "actions": ["AXPress"]},
                         {"element_index": 97, "role": "AXButton", "label": "••••••••", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 100, "role": "AXStaticText", "label": None, "value": "custom_pin", "parent_index": 1},
+                        {"element_index": 101, "role": "AXStaticText", "label": None, "value": "REVEALED-CUSTOM-PIN-7777", "parent_index": 1},
+                        {"element_index": 102, "role": "AXButton", "label": "Hide", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 103, "role": "AXButton", "label": "Copy", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 104, "role": "AXPopUpButton", "label": "custom_pin. More Actions", "parent_index": 1, "actions": ["AXPress"]},
                     ],
                 },
             },
@@ -3474,12 +3484,13 @@ class StdioEndToEndTest(unittest.TestCase):
             expected_window_id=71766,
         )
 
-        # Multi-node password span redacts [71] despite Watchtower badge [72] and inline button/tooltip [73..75]
+        # Multi-node password span [71] and revealed custom concealed span [101] are redacted
         self.assertNotIn("UNMASKED-SUPER-SECRET-PW-99", login_obs["static_texts"])
+        self.assertNotIn("REVEALED-CUSTOM-PIN-7777", login_obs["static_texts"])
         self.assertIn("Vulnerable", login_obs["static_texts"])
-        self.assertTrue({71, 73, 76, 77, 96, 97}.issubset(login_obs["secure_element_ids"]))
+        self.assertTrue({71, 73, 76, 77, 96, 97, 101, 102, 103, 104}.issubset(login_obs["secure_element_ids"]))
 
-        # Open and Fill controls [82, 91, 95] are synthesized with URL context and promoted to priority_tier=0 (first in auto_candidates)
+        # Open and Fill controls [82, 91, 95] are synthesized with URL context, not blocked by /share/delete/send in URL, and promoted to priority_tier=0
         cand_ids = [c["id"] for c in login_obs["auto_candidates"]]
         self.assertEqual(
             cand_ids[:3],

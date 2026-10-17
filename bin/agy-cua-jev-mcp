@@ -1023,7 +1023,7 @@ def _check_commit_safety_gate(
     is_destructive_app_ctx = is_mail_ctx or is_1password_ctx or any(
         k in app_name or k in win_title for k in ("finder", "messages")
     )
-    norm_desc = label_or_desc.strip().lower()
+    norm_desc = re.sub(r"https?://[^\s)\"']+", "", label_or_desc.strip().lower())
 
     if tool == "invoke_menu":
         raw_path = args.get("path")
@@ -1252,12 +1252,12 @@ def _analyze_window_elements(
         if (
             (role_str in TEXT_INPUT_AX_ROLES or "secure" in role_str.lower())
             and (idx_val in unlabeled_val_ids or is_1password_ctx or "secure" in role_str.lower())
-            and el.get("title") in (None, "")
-            and el.get("description") in (None, "")
             and lbl_str
             and lbl_str == _el_val(el)
         ):
-            return ""
+            alt = el.get("title") if el.get("title") not in (None, "") else el.get("description")
+            alt_str = str(alt or "").replace("\u200e", "").strip()
+            return alt_str if (alt_str and alt_str != lbl_str) else ""
         return lbl_str
 
     # Pass 1: Sibling Tooltip triples ([i] Control, [i+1] AXStaticText="Tooltip:", [i+2] AXStaticText="<tip>")
@@ -1278,7 +1278,7 @@ def _analyze_window_elements(
                 curr_lbl = _el_label(el)
                 if not curr_lbl or curr_lbl.lower() in {"delete", "button", "checkbox", "open"}:
                     synthesized_labels[idx] = t2
-                if re.search(r"\breveal\s+(?:password|secure)", t2, re.IGNORECASE):
+                if re.search(r"\b(?:reveal|hide)\s+(?:password|secure)", t2, re.IGNORECASE):
                     extra_secure_ids.add(idx)
 
     # Pass 2: Lock Screen detection, Touch ID button labeling, and labeled secret text inputs
@@ -1292,14 +1292,18 @@ def _analyze_window_elements(
         role = str(el.get("role") or "").strip()
         lbl = synthesized_labels.get(idx) or _el_label(el)
         val = _el_val(el)
-        if role in TEXT_INPUT_AX_ROLES and (
+        is_placeholder_pw = bool(
             re.search(r"\b(?:enter\s+your\s+password|master\s+(?:vault\s+)?password)\b", f"{lbl} {val}", re.IGNORECASE)
             or re.search(r"\bgenerate\s+password,\s+or\s+type\s+a\s+password\b", lbl, re.IGNORECASE)
-            or (lbl and _SECRET_FIELD_NAME_RE.search(lbl))
+        )
+        if role in TEXT_INPUT_AX_ROLES and (
+            is_placeholder_pw or (lbl and _SECRET_FIELD_NAME_RE.search(lbl))
         ):
             extra_secure_ids.add(idx)
             if not lbl and val:
                 synthesized_labels[idx] = val
+            elif val and not is_placeholder_pw and val.lower() != lbl.lower():
+                redacted_static_values.add(val)
             if is_lock_screen:
                 for look_pos in range(pos + 1, min(pos + 7, len(sorted_ids))):
                     cand_idx = sorted_ids[look_pos]
@@ -1315,7 +1319,7 @@ def _analyze_window_elements(
 
     # Pass 3: 1Password Detail Pane field spans ending at "<field>. More Actions"
     # Handles both 4-tuples ([field, val, Copy, More Actions]) and multi-node spans with
-    # Watchtower badges, inline Reveal/Tooltip triples, or Website Open/Open-and-Fill controls.
+    # Watchtower badges, inline Reveal/Hide/Tooltip triples, or Website Open/Open-and-Fill controls.
     for pos, idx in enumerate(sorted_ids):
         el = by_index[idx]
         role = str(el.get("role") or "").strip()
@@ -1327,31 +1331,45 @@ def _analyze_window_elements(
         field_is_secret = bool(_SECRET_FIELD_NAME_RE.search(field_name))
         field_is_website = bool(_WEBSITE_FIELD_NAME_RE.search(field_name))
 
-        start_pos = max(0, pos - 2)
+        boundary_pos = max(0, pos - 10)
+        matched_header_pos: int | None = None
         for scan_pos in range(pos - 1, max(-1, pos - 11), -1):
             scan_el = by_index[sorted_ids[scan_pos]]
             scan_role = str(scan_el.get("role") or "").strip()
             scan_lbl = _el_label(scan_el)
             scan_txt = (_el_val(scan_el) or scan_lbl).strip()
-            if scan_role == "AXPopUpButton" and _MORE_ACTIONS_RE.match(scan_lbl):
-                start_pos = scan_pos + 1
+            if (scan_role == "AXPopUpButton" and _MORE_ACTIONS_RE.match(scan_lbl)) or scan_role in {
+                "AXSplitter",
+                "AXToolbar",
+                "AXList",
+            }:
+                boundary_pos = scan_pos + 1
                 break
-            if scan_role == "AXStaticText" and scan_txt.lower() == field_name.lower():
-                start_pos = scan_pos
+            if scan_role == "AXStaticText" and scan_txt.rstrip(":").strip().lower() == field_name.lower():
+                matched_header_pos = scan_pos
                 break
+        start_pos = matched_header_pos if matched_header_pos is not None else boundary_pos
 
         span_positions = list(range(start_pos, pos))
         tooltip_positions: set[int] = set()
         for p in span_positions:
-            p_el = by_index[sorted_ids[p]]
-            if str(p_el.get("role") or "").strip() == "AXStaticText":
+            p_idx = sorted_ids[p]
+            p_el = by_index[p_idx]
+            p_role = str(p_el.get("role") or "").strip()
+            if p_role == "AXStaticText":
                 p_txt = (_el_val(p_el) or _el_label(p_el)).strip()
                 if p_txt.lower() == "tooltip:":
                     tooltip_positions.add(p)
                     if p + 1 < pos:
                         tooltip_positions.add(p + 1)
+                        tip_el = by_index[sorted_ids[p + 1]]
+                        tip_txt = (_el_val(tip_el) or _el_label(tip_el)).strip()
+                        if re.search(r"\b(?:reveal|hide)\s+(?:password|secure)", tip_txt, re.IGNORECASE):
+                            field_is_secret = True
                 elif p not in tooltip_positions and _BULLET_MASK_RE.search(p_txt):
                     field_is_secret = True
+            elif p_idx in extra_secure_ids or _el_label(p_el).strip().lower() in {"reveal", "hide"}:
+                field_is_secret = True
 
         if field_is_secret:
             watchtower_badges = {"vulnerable", "weak", "compromised", "reused", "watchtower", "terrible"}
@@ -1364,7 +1382,7 @@ def _analyze_window_elements(
                     if (
                         p not in tooltip_positions
                         and s_txt
-                        and s_txt.lower() != field_name.lower()
+                        and s_txt.rstrip(":").strip().lower() != field_name.lower()
                         and s_txt.lower() not in watchtower_badges
                     ):
                         redacted_static_values.add(s_txt)
@@ -1386,7 +1404,7 @@ def _analyze_window_elements(
                 if (
                     s_role in {"AXStaticText", "AXLink"}
                     and s_txt
-                    and s_txt.lower() != field_name.lower()
+                    and s_txt.rstrip(":").strip().lower() != field_name.lower()
                     and s_txt.lower() not in {"open", "open and fill", "copy", "tooltip:"}
                     and (field_is_website or re.match(r"^https?://", s_txt, re.IGNORECASE))
                 ):
@@ -1426,16 +1444,21 @@ def _analyze_window_elements(
             el2 = by_index[idx2]
             role1 = str(el1.get("role") or "").strip()
             role2 = str(el2.get("role") or "").strip()
+            val2 = _el_val(el2)
             if role1 in TEXT_INPUT_AX_ROLES and role2 in TEXT_INPUT_AX_ROLES:
                 if not _el_label(el1):
                     synthesized_labels.setdefault(idx1, f"Field label ({field_name})")
                 synthesized_labels.setdefault(idx2, field_name)
-                if field_is_secret or _BULLET_MASK_RE.search(_el_val(el2)):
+                if field_is_secret or _BULLET_MASK_RE.search(val2):
                     extra_secure_ids.add(idx2)
+                    if val2 and val2.lower() != field_name.lower():
+                        redacted_static_values.add(val2)
             elif role1 == "AXStaticText" and role2 in TEXT_INPUT_AX_ROLES:
                 synthesized_labels.setdefault(idx2, field_name)
-                if field_is_secret or _BULLET_MASK_RE.search(_el_val(el2)):
+                if field_is_secret or _BULLET_MASK_RE.search(val2):
                     extra_secure_ids.add(idx2)
+                    if val2 and val2.lower() != field_name.lower():
+                        redacted_static_values.add(val2)
         elif is_1password_ctx and role in TEXT_INPUT_AX_ROLES and not lbl and idx not in synthesized_labels:
             next_el = by_index[sorted_ids[pos + 1]] if pos + 1 < len(sorted_ids) else None
             if val.lower().startswith("search in ") or (
@@ -1455,6 +1478,8 @@ def _analyze_window_elements(
                     synthesized_labels[idx] = prev_txt
                     if _SECRET_FIELD_NAME_RE.search(prev_txt):
                         extra_secure_ids.add(idx)
+                        if val and val.lower() != prev_txt.lower():
+                            redacted_static_values.add(val)
 
     # Pass 5: 1Password sidebar tiering (before first AXSplitter: core nav = tier 2, vault/tag lists = tier 3)
     sidebar_tier_by_id: dict[int, int] = {}
@@ -1605,12 +1630,20 @@ def extract_window_observation(
         if (
             (role in TEXT_INPUT_AX_ROLES or is_secure)
             and (idx in md_unlabeled_value_ids or is_1password_ctx or is_secure)
-            and el.get("title") in (None, "")
-            and el.get("description") in (None, "")
             and label
             and label == raw_val_str
         ):
-            label = ""
+            alt = el.get("title") if el.get("title") not in (None, "") else el.get("description")
+            alt_str = str(alt or "").replace("\u200e", "").strip()
+            if (
+                alt_str
+                and alt_str != raw_val_str
+                and not _BULLET_MASK_RE.search(alt_str)
+                and alt_str not in redacted_static_values
+            ):
+                label = alt_str
+            else:
+                label = ""
         value = None if (is_secure or el.get("value") is None) else raw_val_str
         actions, has_explicit_actions = _normalized_actions(el)
         supports_press = _supports_press_action(actions)
