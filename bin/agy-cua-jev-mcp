@@ -1297,11 +1297,17 @@ def _analyze_window_elements(
         role = str(el.get("role") or "").strip()
         subrole = str(el.get("subrole") or "").strip()
         lbl = synthesized_labels.get(idx) or _el_label(el)
+        title_or_desc = f"{el.get('title') or ''} {el.get('description') or ''}".strip()
+        combined_lbl = f"{lbl} {title_or_desc}".strip()
         val = _el_val(el)
         is_val_placeholder = bool(val and _pw_placeholder_re.match(val))
         is_pw_hint = bool(
-            re.search(r"\b(?:enter\s+your\s+password|master\s+(?:vault\s+)?password)\b", f"{lbl} {val}", re.IGNORECASE)
-            or re.search(r"\bgenerate\s+password,\s+or\s+type\s+a\s+password\b", lbl, re.IGNORECASE)
+            re.search(
+                r"\b(?:enter\s+your\s+password|master\s+(?:vault\s+)?password)\b",
+                f"{combined_lbl} {val}",
+                re.IGNORECASE,
+            )
+            or re.search(r"\bgenerate\s+password,\s+or\s+type\s+a\s+password\b", combined_lbl, re.IGNORECASE)
         )
         is_secret_input = (
             "secure" in role.lower()
@@ -1311,7 +1317,7 @@ def _analyze_window_elements(
                 and (
                     is_lock_screen
                     or is_pw_hint
-                    or (lbl and _SECRET_FIELD_NAME_RE.search(lbl))
+                    or bool(combined_lbl and _SECRET_FIELD_NAME_RE.search(combined_lbl))
                     or bool(_BULLET_MASK_RE.search(val))
                 )
             )
@@ -1321,7 +1327,9 @@ def _analyze_window_elements(
             if val and not is_val_placeholder:
                 redacted_static_values.add(val)
             if not lbl:
-                synthesized_labels[idx] = val if is_val_placeholder else "Password"
+                synthesized_labels[idx] = (
+                    val if is_val_placeholder else (title_or_desc if title_or_desc else "Password")
+                )
             if is_lock_screen:
                 for look_pos in range(pos + 1, min(pos + 7, len(sorted_ids))):
                     cand_idx = sorted_ids[look_pos]
@@ -1456,40 +1464,28 @@ def _analyze_window_elements(
         lbl = _el_label(el)
         val = _el_val(el)
         m_drag = _REORDER_HANDLE_RE.match(lbl) if role == "AXButton" else None
-        if m_drag and pos + 1 < len(sorted_ids):
+        if m_drag and pos + 2 < len(sorted_ids):
             field_name = m_drag.group(1).strip()
             field_is_secret = bool(_SECRET_FIELD_NAME_RE.search(field_name))
-            row_input_ids: list[int] = []
-            for fwd_pos in range(pos + 1, min(len(sorted_ids), pos + 6)):
-                fwd_idx = sorted_ids[fwd_pos]
-                fwd_el = by_index[fwd_idx]
-                fwd_role = str(fwd_el.get("role") or "").strip()
-                fwd_lbl = _el_label(fwd_el)
-                if (fwd_role == "AXButton" and _REORDER_HANDLE_RE.match(fwd_lbl)) or fwd_role in {
-                    "AXSplitter",
-                    "AXToolbar",
-                    "AXList",
-                }:
-                    break
-                if fwd_role in TEXT_INPUT_AX_ROLES or "secure" in fwd_role.lower():
-                    row_input_ids.append(fwd_idx)
-                    if len(row_input_ids) == 2:
-                        break
-            if len(row_input_ids) == 2:
-                idx1, idx2 = row_input_ids[0], row_input_ids[1]
-                if not _el_label(by_index[idx1]):
+            idx1 = sorted_ids[pos + 1]
+            idx2 = sorted_ids[pos + 2]
+            el1 = by_index[idx1]
+            el2 = by_index[idx2]
+            role1 = str(el1.get("role") or "").strip()
+            role2 = str(el2.get("role") or "").strip()
+            val1 = _el_val(el1)
+            val2 = _el_val(el2)
+            if role1 in TEXT_INPUT_AX_ROLES and role2 in TEXT_INPUT_AX_ROLES:
+                if not _el_label(el1):
                     synthesized_labels.setdefault(idx1, f"Field label ({field_name})")
                 synthesized_labels[idx2] = field_name
-                val2 = _el_val(by_index[idx2])
-                if field_is_secret or _BULLET_MASK_RE.search(val2):
+                if field_is_secret or _SECRET_FIELD_NAME_RE.search(val1) or _BULLET_MASK_RE.search(val2):
                     extra_secure_ids.add(idx2)
                     if val2 and not _pw_placeholder_re.match(val2):
                         redacted_static_values.add(val2)
-            elif len(row_input_ids) == 1:
-                idx2 = row_input_ids[0]
+            elif role1 == "AXStaticText" and role2 in TEXT_INPUT_AX_ROLES:
                 synthesized_labels[idx2] = field_name
-                val2 = _el_val(by_index[idx2])
-                if field_is_secret or _BULLET_MASK_RE.search(val2):
+                if field_is_secret or _SECRET_FIELD_NAME_RE.search(val1) or _BULLET_MASK_RE.search(val2):
                     extra_secure_ids.add(idx2)
                     if val2 and not _pw_placeholder_re.match(val2):
                         redacted_static_values.add(val2)
