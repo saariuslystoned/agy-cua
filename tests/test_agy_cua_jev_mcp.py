@@ -3157,6 +3157,240 @@ class StdioEndToEndTest(unittest.TestCase):
                 ],
             )
 
+    def test_1password_electron_lock_screen_item_list_secret_4tuple_and_exfiltration_guards(self) -> None:
+        # 1. Lock Screen — 1Password observation
+        lock_md = "\n".join([
+            '- [0] AXWindow "Lock Screen — 1Password"',
+            '  - [1] AXWebArea "Lock Screen — 1Password"',
+            '    - [2] AXButton',
+            '    - [3] AXTextField = "Enter your password"',
+            '    - [4] AXCheckBox',
+            '    - [5] AXStaticText = "Tooltip:"',
+            '    - [6] AXStaticText = "Reveal Password"',
+            '    - [7] AXButton',
+            '    - [8] AXStaticText = "1Password was locked manually."',
+            '    - [11] AXStaticText = "Unlock using Touch ID"',
+        ])
+        lock_obs = jev.extract_window_observation(
+            {
+                "content": [{"type": "text", "text": lock_md}],
+                "structuredContent": {
+                    "pid": 16993,
+                    "window_id": 71766,
+                    "snapshot_id": "s000006b8",
+                    "app_name": "1Password",
+                    "window_title": "Lock Screen — 1Password",
+                    "tree_markdown": lock_md,
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "Lock Screen — 1Password"},
+                        {"element_index": 1, "role": "AXWebArea", "label": "Lock Screen — 1Password", "parent_index": 0},
+                        {"element_index": 2, "role": "AXButton", "label": None, "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 3, "role": "AXTextField", "label": None, "value": "Enter your password", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 4, "role": "AXCheckBox", "label": None, "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 5, "role": "AXStaticText", "label": None, "value": "Tooltip:", "parent_index": 1},
+                        {"element_index": 6, "role": "AXStaticText", "label": None, "value": "Reveal Password", "parent_index": 1},
+                        {"element_index": 7, "role": "AXButton", "label": None, "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 8, "role": "AXStaticText", "label": None, "value": "1Password was locked manually.", "parent_index": 1},
+                        {"element_index": 11, "role": "AXStaticText", "label": None, "value": "Unlock using Touch ID", "parent_index": 1},
+                    ],
+                },
+            },
+            expected_pid=16993,
+            expected_window_id=71766,
+        )
+        self.assertIn(3, lock_obs["secure_element_ids"])
+        self.assertIn(4, lock_obs["secure_element_ids"])
+        self.assertNotIn(7, lock_obs["secure_element_ids"])
+        lock_cand_ids = [c["id"] for c in lock_obs["auto_candidates"]]
+        self.assertIn("ax.7.unlock-using-touch-id", lock_cand_ids)
+        self.assertNotIn("ax.3.enter-your-password", lock_cand_ids)
+        with self.assertRaisesRegex(ValueError, "secure_element_refused"):
+            jev.build_bound_candidates(
+                [{"id": "type.pw", "description": "Type master password", "tool": "set_value", "element_index": 3, "value": "x"}],
+                lock_obs,
+            )
+        with self.assertRaisesRegex(ValueError, "secure_element_refused"):
+            jev.build_bound_candidates(
+                [{"id": "click.reveal", "description": "Toggle reveal", "tool": "click", "element_index": 4}],
+                lock_obs,
+            )
+
+        # 2. Main Vault Window with 35 sidebar tags/vaults, AXToolbar search, AXList AXMenuItem rows, and Detail 4-tuples
+        sidebar_els = [
+            {"element_index": 8, "role": "AXButton", "label": "All Items", "parent_index": 1, "actions": ["AXPress"]},
+            {"element_index": 10, "role": "AXButton", "label": "VAULTS", "parent_index": 1, "actions": ["AXPress"]},
+        ]
+        sidebar_md = [
+            '- [0] AXWindow "SPCLLC — Smoky Ops — 1Password"',
+            '  - [1] AXWebArea "SPCLLC — Smoky Ops — 1Password"',
+            '    - [8] AXButton "All Items"',
+            '    - [10] AXButton "VAULTS"',
+        ]
+        for tag_i in range(12, 47):
+            sidebar_els.append({
+                "element_index": tag_i,
+                "role": "AXButton",
+                "label": f"tag-{tag_i}",
+                "parent_index": 1,
+                "actions": ["AXPress"],
+            })
+            sidebar_md.append(f'    - [{tag_i}] AXButton "tag-{tag_i}"')
+
+        vault_md = "\n".join(sidebar_md + [
+            '    - [53] AXSplitter',
+            '    - [62] AXButton "Share"',
+            '    - [63] AXButton "Edit"',
+            '    - [68] AXStaticText = "credential"',
+            '    - [69] AXStaticText = "••••••••••"',
+            '    - [70] AXButton "Copy"',
+            '    - [71] AXPopUpButton (credential. More Actions)',
+            '    - [72] AXStaticText = "shipper_id"',
+            '    - [73] AXStaticText = "3800272922"',
+            '    - [74] AXButton "Copy"',
+            '    - [75] AXPopUpButton (shipper_id. More Actions)',
+            '    - [80] AXStaticText = "api_key"',
+            '    - [81] AXStaticText = "LEAKED-PLAIN-API-KEY-999"',
+            '    - [82] AXButton "Copy"',
+            '    - [83] AXPopUpButton (api_key. More Actions)',
+            '    - [153] AXToolbar',
+            '      - [155] AXTextField = "Search in SPCLLC"',
+            '      - [157] AXButton "New Item"',
+            '    - [162] AXList (Item list)',
+            '      - [198] AXMenuItem = "Pitney Bowes Shipping API — Sandbox selected"',
+            '- [238] AXMenuBar',
+            '  - [279] AXMenuBarItem "Edit"',
+            '    - [280] AXMenu',
+            '      - [287] AXMenuItem "Search"',
+        ])
+        vault_obs = jev.extract_window_observation(
+            {
+                "content": [{"type": "text", "text": vault_md}],
+                "structuredContent": {
+                    "pid": 16993,
+                    "window_id": 71766,
+                    "snapshot_id": "s000006b3",
+                    "app_name": "1Password",
+                    "window_title": "SPCLLC — Smoky Ops — 1Password",
+                    "tree_markdown": vault_md,
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "SPCLLC — Smoky Ops — 1Password"},
+                        {"element_index": 1, "role": "AXWebArea", "label": "SPCLLC — Smoky Ops — 1Password", "parent_index": 0},
+                        *sidebar_els,
+                        {"element_index": 53, "role": "AXSplitter", "label": None, "parent_index": 1},
+                        {"element_index": 62, "role": "AXButton", "label": "Share", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 63, "role": "AXButton", "label": "Edit", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 68, "role": "AXStaticText", "label": None, "value": "credential", "parent_index": 1},
+                        {"element_index": 69, "role": "AXStaticText", "label": None, "value": "••••••••••", "parent_index": 1},
+                        {"element_index": 70, "role": "AXButton", "label": "Copy", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 71, "role": "AXPopUpButton", "label": "credential. More Actions", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 72, "role": "AXStaticText", "label": None, "value": "shipper_id", "parent_index": 1},
+                        {"element_index": 73, "role": "AXStaticText", "label": None, "value": "3800272922", "parent_index": 1},
+                        {"element_index": 74, "role": "AXButton", "label": "Copy", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 75, "role": "AXPopUpButton", "label": "shipper_id. More Actions", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 80, "role": "AXStaticText", "label": None, "value": "api_key", "parent_index": 1},
+                        {"element_index": 81, "role": "AXStaticText", "label": None, "value": "LEAKED-PLAIN-API-KEY-999", "parent_index": 1},
+                        {"element_index": 82, "role": "AXButton", "label": "Copy", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 83, "role": "AXPopUpButton", "label": "api_key. More Actions", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 153, "role": "AXToolbar", "label": None, "parent_index": 1},
+                        {"element_index": 155, "role": "AXTextField", "label": None, "value": "Search in SPCLLC", "parent_index": 153, "actions": ["AXPress"]},
+                        {"element_index": 157, "role": "AXButton", "label": "New Item", "parent_index": 153, "actions": ["AXPress"]},
+                        {"element_index": 162, "role": "AXList", "label": "Item list", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 198, "role": "AXMenuItem", "label": None, "value": "Pitney Bowes Shipping API — Sandbox selected", "parent_index": 162, "actions": ["AXPress"]},
+                        {"element_index": 238, "role": "AXMenuBar", "label": None, "actions": ["AXCancel"]},
+                        {"element_index": 279, "role": "AXMenuBarItem", "label": "Edit", "parent_index": 238, "actions": ["AXPress"]},
+                        {"element_index": 280, "role": "AXMenu", "label": None, "parent_index": 279, "actions": ["AXCancel"]},
+                        {"element_index": 287, "role": "AXMenuItem", "label": "Search", "parent_index": 280, "actions": ["AXPress"]},
+                    ],
+                },
+            },
+            expected_pid=16993,
+            expected_window_id=71766,
+        )
+        # Bullet mask and revealed secret field values are redacted from static_texts
+        self.assertNotIn("••••••••••", vault_obs["static_texts"])
+        self.assertNotIn("LEAKED-PLAIN-API-KEY-999", vault_obs["static_texts"])
+        self.assertIn("3800272922", vault_obs["static_texts"])
+        # Secret Copy and More Actions controls are marked secure; non-secret Copy is disambiguated and allowed
+        self.assertTrue({70, 71, 82, 83}.issubset(vault_obs["secure_element_ids"]))
+        self.assertNotIn(74, vault_obs["secure_element_ids"])
+        # MenuBar item [287] is excluded, while in-window AXList AXMenuItem [198] is included
+        self.assertNotIn(287, vault_obs["indexed_element_ids"])
+        self.assertIn(198, vault_obs["indexed_element_ids"])
+        # Primary controls (Toolbar [155, 157], Detail [63, 74], Item list [198]) beat the 35 sidebar tags into top 28 auto_candidates
+        vault_cand_ids = [c["id"] for c in vault_obs["auto_candidates"]]
+        self.assertIn("ax.155.search-in-spcllc", vault_cand_ids)
+        self.assertIn("ax.157.new-item", vault_cand_ids)
+        self.assertIn("ax.63.edit", vault_cand_ids)
+        self.assertIn("ax.74.copy-shipper-id", vault_cand_ids)
+        self.assertIn("ax.198.pitney-bowes-shipping-ap", vault_cand_ids)
+        self.assertNotIn("ax.62.share", vault_cand_ids)
+        self.assertNotIn("ax.70.copy-credential", vault_cand_ids)
+
+        # Toolbar Search field [155] keeps stable raw_label="Search" even when cua-driver echoes value into label,
+        # and transient toolbar AXMenuItem autocomplete rows are excluded from auto_candidates
+        post_search_md = vault_md.replace('AXTextField = "Search in SPCLLC"', 'AXTextField = "Sandbox"')
+        post_search_obs = jev.extract_window_observation(
+            {
+                "content": [{"type": "text", "text": post_search_md}],
+                "structuredContent": {
+                    "pid": 16993,
+                    "window_id": 71766,
+                    "snapshot_id": "s000006b4",
+                    "app_name": "1Password",
+                    "window_title": "SPCLLC — Smoky Ops — 1Password",
+                    "tree_markdown": post_search_md,
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "SPCLLC — Smoky Ops — 1Password"},
+                        {"element_index": 1, "role": "AXWebArea", "label": "SPCLLC — Smoky Ops — 1Password", "parent_index": 0},
+                        {"element_index": 153, "role": "AXToolbar", "label": None, "parent_index": 1},
+                        {"element_index": 155, "role": "AXTextField", "label": "Sandbox", "value": "Sandbox", "parent_index": 153, "actions": ["AXPress"]},
+                        {"element_index": 156, "role": "AXButton", "label": "Clear", "parent_index": 153, "actions": ["AXPress"]},
+                        {"element_index": 158, "role": "AXMenuItem", "label": "Sandbox autocomplete row", "value": "Sandbox autocomplete row", "parent_index": 153, "actions": ["AXPress"]},
+                    ],
+                },
+            },
+            expected_pid=16993,
+            expected_window_id=71766,
+        )
+        self.assertNotIn("ax.158.sandbox-autocomplete-row", [c["id"] for c in post_search_obs["auto_candidates"]])
+        changed, met, reason = jev.check_postcondition(
+            {"element_value_equals": "Sandbox"},
+            vault_obs,
+            post_search_obs,
+            target_element_index=155,
+        )
+        self.assertTrue(changed)
+        self.assertTrue(met, reason)
+
+        # Secret exfiltration menu items and hotkeys are refused; Lock and Open and Fill are permitted
+        for bad_menu in (
+            ["View", "Reveal Secure Fields"],
+            ["Edit", "Copy Password"],
+            ["Edit", "Copy One-Time Password"],
+            ["File", "Export"],
+            ["Edit", "Share…"],
+            ["Edit", "Archive Item"],
+        ):
+            with self.assertRaisesRegex(ValueError, "commit_action_forbidden_by_safety_policy"):
+                jev.build_bound_candidates(
+                    [{"id": "bad.menu", "description": "Run menu", "tool": "invoke_menu", "path": bad_menu}],
+                    vault_obs,
+                )
+        for bad_keys in (["cmd", "option", "c"], ["cmd", "option", "r"]):
+            with self.assertRaisesRegex(ValueError, "secret_exfiltration_forbidden_by_safety_policy"):
+                jev.build_bound_candidates(
+                    [{"id": "bad.hk", "description": "Secret hotkey", "tool": "hotkey", "keys": bad_keys}],
+                    vault_obs,
+                )
+        safe_cands = jev.build_bound_candidates(
+            [
+                {"id": "lock.op", "description": "Lock 1Password", "tool": "invoke_menu", "path": ["1Password", "Lock 1Password"]},
+                {"id": "fill.op", "description": "Open and Fill item", "tool": "invoke_menu", "path": ["Edit", "Open and Fill"]},
+            ],
+            vault_obs,
+        )
+        self.assertEqual([c["id"] for c in safe_cands], ["lock.op", "fill.op"])
+
 
 if __name__ == "__main__":
     unittest.main()
