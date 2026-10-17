@@ -3386,10 +3386,239 @@ class StdioEndToEndTest(unittest.TestCase):
             [
                 {"id": "lock.op", "description": "Lock 1Password", "tool": "invoke_menu", "path": ["1Password", "Lock 1Password"]},
                 {"id": "fill.op", "description": "Open and Fill item", "tool": "invoke_menu", "path": ["Edit", "Open and Fill"]},
+                {"id": "item.fill.op", "description": "Item > Open and Fill", "tool": "invoke_menu", "path": ["Item", "Open and Fill"]},
             ],
             vault_obs,
         )
-        self.assertEqual([c["id"] for c in safe_cands], ["lock.op", "fill.op"])
+        self.assertEqual([c["id"] for c in safe_cands], ["lock.op", "fill.op", "item.fill.op"])
+
+    def test_1password_open_and_fill_and_copilot_safety_hardening(self):
+        # Website row with inline Open + Tooltip: Open and Fill, AXLink row, and multi-node secret span with Watchtower badge
+        login_md = "\n".join([
+            '- [0] AXWindow "SPCLLC — 1Password"',
+            '  - [1] AXWebArea "SPCLLC — 1Password"',
+            '    - [10] AXButton "All Items"',
+            '    - [20] AXSplitter',
+            '    - [60] AXStaticText = "username"',
+            '    - [61] AXStaticText = "ops@example.com"',
+            '    - [62] AXButton "Copy"',
+            '    - [63] AXPopUpButton (username. More Actions)',
+            '    - [70] AXStaticText = "password"',
+            '    - [71] AXStaticText = "UNMASKED-SUPER-SECRET-PW-99"',
+            '    - [72] AXStaticText = "Vulnerable"',
+            '    - [73] AXButton "Hide"',
+            '    - [74] AXStaticText = "Tooltip:"',
+            '    - [75] AXStaticText = "Hide Password"',
+            '    - [76] AXButton "Copy"',
+            '    - [77] AXPopUpButton (password. More Actions)',
+            '    - [80] AXStaticText = "website"',
+            '    - [81] AXStaticText = "https://dashboard.stripe.com/share/delete/send"',
+            '    - [82] AXButton "Open"',
+            '    - [83] AXStaticText = "Tooltip:"',
+            '    - [84] AXStaticText = "Open and Fill"',
+            '    - [85] AXButton "Copy"',
+            '    - [86] AXPopUpButton (website. More Actions)',
+            '    - [90] AXStaticText = "login url"',
+            '    - [91] AXLink "https://github.com/login"',
+            '    - [92] AXButton "Copy"',
+            '    - [93] AXPopUpButton (login url. More Actions)',
+            '    - [95] AXMenuItem "Open and Fill"',
+            '    - [96] AXTextField (API Secret) = "plain-api-secret-val"',
+            '    - [97] AXButton "••••••••"',
+            '    - [100] AXStaticText = "custom_pin"',
+            '    - [101] AXStaticText = "REVEALED-CUSTOM-PIN-7777"',
+            '    - [102] AXButton "Hide"',
+            '    - [103] AXButton "Copy"',
+            '    - [104] AXPopUpButton (custom_pin. More Actions)',
+        ])
+        login_obs = jev.extract_window_observation(
+            {
+                "content": [{"type": "text", "text": login_md}],
+                "structuredContent": {
+                    "pid": 16993,
+                    "window_id": 71766,
+                    "snapshot_id": "s000007a1",
+                    "app_name": "1Password",
+                    "window_title": "SPCLLC — 1Password",
+                    "tree_markdown": login_md,
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "SPCLLC — 1Password"},
+                        {"element_index": 1, "role": "AXWebArea", "label": "SPCLLC — 1Password", "parent_index": 0},
+                        {"element_index": 10, "role": "AXButton", "label": "All Items", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 20, "role": "AXSplitter", "label": None, "parent_index": 1},
+                        {"element_index": 60, "role": "AXStaticText", "label": None, "value": "username", "parent_index": 1},
+                        {"element_index": 61, "role": "AXStaticText", "label": None, "value": "ops@example.com", "parent_index": 1},
+                        {"element_index": 62, "role": "AXButton", "label": "Copy", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 63, "role": "AXPopUpButton", "label": "username. More Actions", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 70, "role": "AXStaticText", "label": None, "value": "password", "parent_index": 1},
+                        {"element_index": 71, "role": "AXStaticText", "label": None, "value": "UNMASKED-SUPER-SECRET-PW-99", "parent_index": 1},
+                        {"element_index": 72, "role": "AXStaticText", "label": None, "value": "Vulnerable", "parent_index": 1},
+                        {"element_index": 73, "role": "AXButton", "label": "Hide", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 74, "role": "AXStaticText", "label": None, "value": "Tooltip:", "parent_index": 1},
+                        {"element_index": 75, "role": "AXStaticText", "label": None, "value": "Hide Password", "parent_index": 1},
+                        {"element_index": 76, "role": "AXButton", "label": "Copy", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 77, "role": "AXPopUpButton", "label": "password. More Actions", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 80, "role": "AXStaticText", "label": None, "value": "website", "parent_index": 1},
+                        {"element_index": 81, "role": "AXStaticText", "label": None, "value": "https://dashboard.stripe.com/share/delete/send", "parent_index": 1},
+                        {"element_index": 82, "role": "AXButton", "label": "Open", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 83, "role": "AXStaticText", "label": None, "value": "Tooltip:", "parent_index": 1},
+                        {"element_index": 84, "role": "AXStaticText", "label": None, "value": "Open and Fill", "parent_index": 1},
+                        {"element_index": 85, "role": "AXButton", "label": "Copy", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 86, "role": "AXPopUpButton", "label": "website. More Actions", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 90, "role": "AXStaticText", "label": None, "value": "login url", "parent_index": 1},
+                        {"element_index": 91, "role": "AXLink", "label": "https://github.com/login", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 92, "role": "AXButton", "label": "Copy", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 93, "role": "AXPopUpButton", "label": "login url. More Actions", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 95, "role": "AXMenuItem", "label": "Open and Fill", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 96, "role": "AXTextField", "label": "API Secret", "value": "plain-api-secret-val", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 97, "role": "AXButton", "label": "••••••••", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 100, "role": "AXStaticText", "label": None, "value": "custom_pin", "parent_index": 1},
+                        {"element_index": 101, "role": "AXStaticText", "label": None, "value": "REVEALED-CUSTOM-PIN-7777", "parent_index": 1},
+                        {"element_index": 102, "role": "AXButton", "label": "Hide", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 103, "role": "AXButton", "label": "Copy", "parent_index": 1, "actions": ["AXPress"]},
+                        {"element_index": 104, "role": "AXPopUpButton", "label": "custom_pin. More Actions", "parent_index": 1, "actions": ["AXPress"]},
+                    ],
+                },
+            },
+            expected_pid=16993,
+            expected_window_id=71766,
+        )
+
+        # Multi-node password span [71] and revealed custom concealed span [101] are redacted
+        self.assertNotIn("UNMASKED-SUPER-SECRET-PW-99", login_obs["static_texts"])
+        self.assertNotIn("REVEALED-CUSTOM-PIN-7777", login_obs["static_texts"])
+        self.assertIn("Vulnerable", login_obs["static_texts"])
+        self.assertTrue({71, 73, 76, 77, 96, 97, 101, 102, 103, 104}.issubset(login_obs["secure_element_ids"]))
+
+        # Open and Fill controls [82, 91, 95] are synthesized with URL context, not blocked by /share/delete/send in URL, and promoted to priority_tier=0
+        cand_ids = [c["id"] for c in login_obs["auto_candidates"]]
+        self.assertEqual(
+            cand_ids[:3],
+            [
+                "ax.95.open-and-fill",
+                "ax.82.open-and-fill-https-dash",
+                "ax.91.open-and-fill-https-gith",
+            ],
+        )
+        self.assertIn("ax.85.copy-website", cand_ids)
+        self.assertIn("ax.86.website-more-actions", cand_ids)
+        self.assertIn("ax.62.copy-username", cand_ids)
+
+        # Safety gates: cmd+shift+c (Copy One-Time Password), activation key on secret control, right_click, and Stage 4 element label check
+        with self.assertRaisesRegex(ValueError, "secret_exfiltration_forbidden_by_safety_policy"):
+            jev.build_bound_candidates(
+                [{"id": "hk.totp", "description": "Copy TOTP", "tool": "hotkey", "keys": ["cmd", "shift", "c"]}],
+                login_obs,
+            )
+        with self.assertRaisesRegex(ValueError, "secret_exfiltration_forbidden_by_safety_policy"):
+            jev.build_bound_candidates(
+                [{"id": "rc.share", "description": "Right click Share", "tool": "right_click", "element_index": 62}],
+                login_obs,
+            )
+        # Stage 4 authorize_candidate_dispatch inspects target element label in observation even if candidate description is benign
+        share_obs = jev.extract_window_observation(
+            {
+                "content": [{"type": "text", "text": '- [0] AXWindow "1Password"\n  - [5] AXButton "Share"'}],
+                "structuredContent": {
+                    "pid": 16993,
+                    "window_id": 71766,
+                    "snapshot_id": "s000007a2",
+                    "app_name": "1Password",
+                    "window_title": "1Password",
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "1Password"},
+                        {"element_index": 5, "role": "AXButton", "label": "Share", "parent_index": 0, "actions": ["AXPress"]},
+                    ],
+                },
+            },
+            expected_pid=16993,
+            expected_window_id=71766,
+        )
+        with self.assertRaisesRegex(ValueError, "secret_exfiltration_forbidden_by_safety_policy"):
+            jev.authorize_candidate_dispatch(
+                {"kind": "selected", "selected_id": "benign.desc", "pid": 16993, "window_id": 71766, "snapshot_id": "s000007a2"},
+                [{
+                    "id": "benign.desc",
+                    "description": "Click primary button",
+                    "pid": 16993,
+                    "window_id": 71766,
+                    "snapshot_id": "s000007a2",
+                    "tool": "click",
+                    "arguments": {"pid": 16993, "window_id": 71766, "snapshot_id": "s000007a2", "element_index": 5, "delivery_mode": "background", "scope": "window"},
+                }],
+                expected_pid=16993,
+                expected_window_id=71766,
+                current_snapshot_id="s000007a2",
+                valid_element_indices=share_obs["indexed_element_ids"],
+                observation=share_obs,
+            )
+        with self.assertRaisesRegex(ValueError, "secret_exfiltration_forbidden_by_safety_policy"):
+            jev.authorize_candidate_dispatch(
+                {"kind": "selected", "selected_id": "activate.share", "pid": 16993, "window_id": 71766, "snapshot_id": "s000007a2"},
+                [{
+                    "id": "activate.share",
+                    "description": "Press Return",
+                    "pid": 16993,
+                    "window_id": 71766,
+                    "snapshot_id": "s000007a2",
+                    "tool": "press_key",
+                    "arguments": {"pid": 16993, "window_id": 71766, "snapshot_id": "s000007a2", "element_index": 5, "key": "return", "delivery_mode": "background", "scope": "window"},
+                }],
+                expected_pid=16993,
+                expected_window_id=71766,
+                current_snapshot_id="s000007a2",
+                valid_element_indices=share_obs["indexed_element_ids"],
+                observation=share_obs,
+            )
+
+        # Non-1Password labeled text field whose value equals its label preserves raw_label,
+        # and check_postcondition rejects re-indexing between a labeled and unlabeled element
+        notes_pre = jev.extract_window_observation(
+            {
+                "content": [{"type": "text", "text": '- [0] AXWindow "Notes"\n  - [10] AXTextField (Subject) = "Subject"'}],
+                "structuredContent": {
+                    "pid": 800,
+                    "window_id": 900,
+                    "snapshot_id": "s00000801",
+                    "app_name": "Notes",
+                    "window_title": "Notes",
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "Notes"},
+                        {"element_index": 10, "role": "AXTextField", "label": "Subject", "value": "Subject", "parent_index": 0, "actions": ["AXPress"]},
+                    ],
+                },
+            },
+            expected_pid=800,
+            expected_window_id=900,
+        )
+        notes_post_reindexed = jev.extract_window_observation(
+            {
+                "content": [{"type": "text", "text": '- [0] AXWindow "Notes"\n  - [10] AXTextField = "Subject"'}],
+                "structuredContent": {
+                    "pid": 800,
+                    "window_id": 900,
+                    "snapshot_id": "s00000802",
+                    "app_name": "Notes",
+                    "window_title": "Notes",
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "Notes"},
+                        {"element_index": 10, "role": "AXTextField", "label": "Subject", "value": "Subject", "parent_index": 0, "actions": ["AXPress"]},
+                    ],
+                },
+            },
+            expected_pid=800,
+            expected_window_id=900,
+        )
+        self.assertEqual(notes_pre["elements"][0]["raw_label"], "Subject")
+        self.assertEqual(notes_post_reindexed["elements"][0]["raw_label"], "")
+        _, met, reason = jev.check_postcondition(
+            {"element_value_equals": "Subject"},
+            notes_pre,
+            notes_post_reindexed,
+            target_element_index=10,
+        )
+        self.assertFalse(met)
+        self.assertIn("target_element_label_mismatch", reason)
 
 
 if __name__ == "__main__":

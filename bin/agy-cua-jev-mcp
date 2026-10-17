@@ -805,15 +805,16 @@ _TREE_MD_LINE_RE = re.compile(r"^(\s*)-\s*(?:\[(?:e)?(\d+)\]\s*)?([A-Za-z0-9_]+)
 
 def _parse_markdown_hierarchy(tree_md: str) -> tuple[dict[int, int], set[int]]:
     """Extract element depth and AXToolbar ancestry from tree_markdown indentation."""
-    md_depth, md_toolbar_ids, _ = _parse_markdown_hierarchy_full(tree_md)
+    md_depth, md_toolbar_ids, _, _ = _parse_markdown_hierarchy_full(tree_md)
     return md_depth, md_toolbar_ids
 
 
-def _parse_markdown_hierarchy_full(tree_md: str) -> tuple[dict[int, int], set[int], set[int]]:
-    """Extract element depth, AXToolbar ancestry, and AXMenuBar ancestry from tree_markdown indentation."""
+def _parse_markdown_hierarchy_full(tree_md: str) -> tuple[dict[int, int], set[int], set[int], set[int]]:
+    """Extract element depth, AXToolbar ancestry, AXMenuBar ancestry, and unlabeled value-only row IDs from tree_markdown."""
     md_depth: dict[int, int] = {}
     md_toolbar_ids: set[int] = set()
     md_menubar_ids: set[int] = set()
+    md_unlabeled_value_ids: set[int] = set()
     role_by_level: dict[int, str] = {}
     for line in tree_md.splitlines():
         m = _TREE_MD_LINE_RE.match(line)
@@ -829,11 +830,13 @@ def _parse_markdown_hierarchy_full(tree_md: str) -> tuple[dict[int, int], set[in
             root_at_zero = role_by_level.get(0) in WINDOW_ROOT_ROLES
             eff_depth = level if (root_at_zero or role in WINDOW_ROOT_ROLES) else level + 1
             md_depth[idx] = eff_depth
+            if line[m.end() :].lstrip().startswith("="):
+                md_unlabeled_value_ids.add(idx)
             if any(r == "AXToolbar" for k, r in role_by_level.items() if k <= level):
                 md_toolbar_ids.add(idx)
             if any(r in {"AXMenuBar", "AXMenuBarItem"} for k, r in role_by_level.items() if k <= level):
                 md_menubar_ids.add(idx)
-    return md_depth, md_toolbar_ids, md_menubar_ids
+    return md_depth, md_toolbar_ids, md_menubar_ids, md_unlabeled_value_ids
 
 
 def _element_depth_and_toolbar(
@@ -1020,7 +1023,7 @@ def _check_commit_safety_gate(
     is_destructive_app_ctx = is_mail_ctx or is_1password_ctx or any(
         k in app_name or k in win_title for k in ("finder", "messages")
     )
-    norm_desc = label_or_desc.strip().lower()
+    norm_desc = re.sub(r"https?://[^\s)\"']+", "", label_or_desc.strip().lower())
 
     if tool == "invoke_menu":
         raw_path = args.get("path")
@@ -1092,10 +1095,30 @@ def _check_commit_safety_gate(
                 "commit_action_forbidden_by_safety_policy: "
                 f"{tool} activation key on {label_or_desc!r} targets destructive delete/trash control without WAITING_FOR_HUMAN confirmation"
             )
-        if is_1password_ctx and "cmd" in norm_keys and "option" in norm_keys and ("c" in norm_keys or "r" in norm_keys):
+        if (
+            is_element_addressed
+            and norm_keys & _ACTIVATION_KEYS
+            and (
+                re.search(
+                    r"\b(?:reveal(?:\s+(?:password|secure\s+fields))?|show\s+in\s+large\s+type|"
+                    r"copy\s+(?:password|one-time\s+password|secret(?:\s+key)?|private\s+(?:key|link)|credential|api[_\s-]*key|recovery\s+(?:code|key)))\b",
+                    norm_desc,
+                )
+                or (is_1password_ctx and re.search(r"\b(?:share|export)\b", norm_desc))
+            )
+        ):
             return (
                 "commit_action_forbidden_by_safety_policy (secret_exfiltration_forbidden_by_safety_policy): "
-                f"{tool} cmd+option+{'c' if 'c' in norm_keys else 'r'} attempts 1Password secret copy/reveal without WAITING_FOR_HUMAN confirmation"
+                f"{tool} activation key on {label_or_desc!r} targets secret reveal/copy/share control without WAITING_FOR_HUMAN confirmation"
+            )
+        if is_1password_ctx and "cmd" in norm_keys and (
+            ("option" in norm_keys and ("c" in norm_keys or "r" in norm_keys))
+            or ("shift" in norm_keys and "c" in norm_keys)
+        ):
+            chord = "cmd+shift+c" if "shift" in norm_keys else f"cmd+option+{'c' if 'c' in norm_keys else 'r'}"
+            return (
+                "commit_action_forbidden_by_safety_policy (secret_exfiltration_forbidden_by_safety_policy): "
+                f"{tool} {chord} attempts 1Password secret copy/reveal without WAITING_FOR_HUMAN confirmation"
             )
         if "cmd" in norm_keys and "shift" in norm_keys and "d" in norm_keys:
             return (
@@ -1140,8 +1163,8 @@ def _check_commit_safety_gate(
                 "type_text newline in Messages sends the conversation without WAITING_FOR_HUMAN confirmation"
             )
 
-    if tool in {"click", "double_click"}:
-        if is_destructive_app_ctx and not is_element_addressed:
+    if tool in {"click", "double_click", "right_click", "set_value"}:
+        if tool in {"click", "double_click", "right_click"} and is_destructive_app_ctx and not is_element_addressed:
             # Coordinate clicks have no AX label to gate on; the caller-supplied description is not
             # authority, so refuse them where Send/Delete controls may sit under the pointer.
             return (
@@ -1191,16 +1214,23 @@ def _is_forbidden_mail_send(
     return _check_commit_safety_gate(observation, label_or_desc, tool, args) is not None
 
 
+_WEBSITE_FIELD_NAME_RE = re.compile(
+    r"\b(?:website|url|uri|domain|host(?:name)?|login\s+url|homepage|web\s+address)\b",
+    re.IGNORECASE,
+)
+
+
 def _analyze_window_elements(
     by_index: Mapping[int, Mapping[str, Any]],
     obs_context: Mapping[str, Any],
     raw_static_texts: list[str],
-) -> tuple[dict[int, str], set[int], set[str], set[int]]:
+    md_unlabeled_value_ids: set[int] | None = None,
+) -> tuple[dict[int, str], set[int], set[str], dict[int, int]]:
     """Infer contextual labels, secret/masked controls, redacted static texts, and secondary sidebar IDs."""
     synthesized_labels: dict[int, str] = {}
     extra_secure_ids: set[int] = set()
     redacted_static_values: set[str] = set()
-    sidebar_secondary_ids: set[int] = set()
+    unlabeled_val_ids = md_unlabeled_value_ids or set()
 
     sorted_ids = sorted(by_index.keys())
     app_name = str(obs_context.get("app_name") or "").lower()
@@ -1218,14 +1248,16 @@ def _analyze_window_elements(
         )
         lbl_str = str(raw or "").replace("\u200e", "").strip()
         role_str = str(el.get("role") or "").strip()
+        idx_val = el.get("element_index")
         if (
             (role_str in TEXT_INPUT_AX_ROLES or "secure" in role_str.lower())
-            and el.get("title") in (None, "")
-            and el.get("description") in (None, "")
+            and (idx_val in unlabeled_val_ids or is_1password_ctx or "secure" in role_str.lower())
             and lbl_str
             and lbl_str == _el_val(el)
         ):
-            return ""
+            alt = el.get("title") if el.get("title") not in (None, "") else el.get("description")
+            alt_str = str(alt or "").replace("\u200e", "").strip()
+            return alt_str if (alt_str and alt_str != lbl_str) else ""
         return lbl_str
 
     # Pass 1: Sibling Tooltip triples ([i] Control, [i+1] AXStaticText="Tooltip:", [i+2] AXStaticText="<tip>")
@@ -1244,12 +1276,17 @@ def _analyze_window_elements(
             t2 = (_el_val(el2) or _el_label(el2)).strip()
             if t1.lower() == "tooltip:" and t2:
                 curr_lbl = _el_label(el)
-                if not curr_lbl or curr_lbl.lower() in {"delete", "button", "checkbox"}:
+                if not curr_lbl or curr_lbl.lower() in {"delete", "button", "checkbox", "open"}:
                     synthesized_labels[idx] = t2
-                if re.search(r"\breveal\s+(?:password|secure)", t2, re.IGNORECASE):
+                if re.search(r"\b(?:reveal|hide)\s+(?:password|secure)", t2, re.IGNORECASE):
                     extra_secure_ids.add(idx)
 
-    # Pass 2: Lock Screen detection & Touch ID button labeling
+    _pw_placeholder_re = re.compile(
+        r"^(?:enter\s+your\s+password|master\s+(?:vault\s+)?password|password|generate\s+password,\s+or\s+type\s+a\s+password)$",
+        re.IGNORECASE,
+    )
+
+    # Pass 2: Lock Screen detection, Touch ID button labeling, and labeled/secure text inputs
     touch_id_caption = next(
         (t for t in raw_static_texts if re.search(r"\bunlock\s+(?:using|with)\s+touch\s+id\b", t, re.IGNORECASE)),
         None,
@@ -1258,15 +1295,41 @@ def _analyze_window_elements(
     for pos, idx in enumerate(sorted_ids):
         el = by_index[idx]
         role = str(el.get("role") or "").strip()
+        subrole = str(el.get("subrole") or "").strip()
         lbl = synthesized_labels.get(idx) or _el_label(el)
+        title_or_desc = f"{el.get('title') or ''} {el.get('description') or ''}".strip()
+        combined_lbl = f"{lbl} {title_or_desc}".strip()
         val = _el_val(el)
-        if role in TEXT_INPUT_AX_ROLES and (
-            re.search(r"\b(?:enter\s+your\s+password|master\s+(?:vault\s+)?password)\b", f"{lbl} {val}", re.IGNORECASE)
-            or re.search(r"\bgenerate\s+password,\s+or\s+type\s+a\s+password\b", lbl, re.IGNORECASE)
-        ):
+        is_val_placeholder = bool(val and _pw_placeholder_re.match(val))
+        is_pw_hint = bool(
+            re.search(
+                r"\b(?:enter\s+your\s+password|master\s+(?:vault\s+)?password)\b",
+                f"{combined_lbl} {val}",
+                re.IGNORECASE,
+            )
+            or re.search(r"\bgenerate\s+password,\s+or\s+type\s+a\s+password\b", combined_lbl, re.IGNORECASE)
+        )
+        is_secret_input = (
+            "secure" in role.lower()
+            or "secure" in subrole.lower()
+            or (
+                role in TEXT_INPUT_AX_ROLES
+                and (
+                    is_lock_screen
+                    or is_pw_hint
+                    or bool(combined_lbl and _SECRET_FIELD_NAME_RE.search(combined_lbl))
+                    or bool(_BULLET_MASK_RE.search(val))
+                )
+            )
+        )
+        if is_secret_input:
             extra_secure_ids.add(idx)
-            if not lbl and val:
-                synthesized_labels[idx] = val
+            if val and not is_val_placeholder:
+                redacted_static_values.add(val)
+            if not lbl:
+                synthesized_labels[idx] = (
+                    val if is_val_placeholder else (title_or_desc if title_or_desc else "Password")
+                )
             if is_lock_screen:
                 for look_pos in range(pos + 1, min(pos + 7, len(sorted_ids))):
                     cand_idx = sorted_ids[look_pos]
@@ -1280,7 +1343,9 @@ def _analyze_window_elements(
                         synthesized_labels[cand_idx] = touch_id_caption or "Unlock using Touch ID"
                         break
 
-    # Pass 3: 1Password Detail Pane 4-Tuples ([i] field, [i+1] val, [i+2] Copy, [i+3] "<field>. More Actions")
+    # Pass 3: 1Password Detail Pane field spans ending at "<field>. More Actions"
+    # Handles both 4-tuples ([field, val, Copy, More Actions]) and multi-node spans with
+    # Watchtower badges, inline Reveal/Hide/Tooltip triples, or Website Open/Open-and-Fill controls.
     for pos, idx in enumerate(sorted_ids):
         el = by_index[idx]
         role = str(el.get("role") or "").strip()
@@ -1290,31 +1355,114 @@ def _analyze_window_elements(
             continue
         field_name = m_more.group(1).strip()
         field_is_secret = bool(_SECRET_FIELD_NAME_RE.search(field_name))
-        if pos >= 2:
-            val_idx = sorted_ids[pos - 2]
-            val_el = by_index[val_idx]
-            if str(val_el.get("role") or "").strip() == "AXStaticText":
-                val_txt = _el_val(val_el) or _el_label(val_el)
-                if _BULLET_MASK_RE.search(val_txt):
+        field_is_website = bool(_WEBSITE_FIELD_NAME_RE.search(field_name))
+
+        boundary_pos = max(0, pos - 10)
+        for scan_pos in range(pos - 1, max(-1, pos - 11), -1):
+            scan_el = by_index[sorted_ids[scan_pos]]
+            scan_role = str(scan_el.get("role") or "").strip()
+            scan_lbl = _el_label(scan_el)
+            if (scan_role == "AXPopUpButton" and _MORE_ACTIONS_RE.match(scan_lbl)) or scan_role in {
+                "AXSplitter",
+                "AXToolbar",
+                "AXList",
+            }:
+                boundary_pos = scan_pos + 1
+                break
+        matched_header_pos: int | None = None
+        for fwd_pos in range(boundary_pos, pos):
+            fwd_el = by_index[sorted_ids[fwd_pos]]
+            if str(fwd_el.get("role") or "").strip() == "AXStaticText":
+                fwd_txt = (_el_val(fwd_el) or _el_label(fwd_el)).strip()
+                if fwd_txt.rstrip(":").strip().lower() == field_name.lower():
+                    matched_header_pos = fwd_pos
+                    break
+        start_pos = matched_header_pos if matched_header_pos is not None else boundary_pos
+
+        span_positions = list(range(start_pos, pos))
+        tooltip_positions: set[int] = set()
+        for p in span_positions:
+            p_idx = sorted_ids[p]
+            p_el = by_index[p_idx]
+            p_role = str(p_el.get("role") or "").strip()
+            if p_role == "AXStaticText":
+                p_txt = (_el_val(p_el) or _el_label(p_el)).strip()
+                if p_txt.lower() == "tooltip:":
+                    tooltip_positions.add(p)
+                    if p + 1 < pos:
+                        tooltip_positions.add(p + 1)
+                        tip_el = by_index[sorted_ids[p + 1]]
+                        tip_txt = (_el_val(tip_el) or _el_label(tip_el)).strip()
+                        if re.search(r"\b(?:reveal|hide)\s+(?:password|secure)", tip_txt, re.IGNORECASE):
+                            field_is_secret = True
+                elif p not in tooltip_positions and _BULLET_MASK_RE.search(p_txt):
                     field_is_secret = True
-                if field_is_secret and val_txt:
-                    redacted_static_values.add(val_txt)
-                    extra_secure_ids.add(val_idx)
-        if pos >= 1:
-            copy_idx = sorted_ids[pos - 1]
-            copy_el = by_index[copy_idx]
-            if str(copy_el.get("role") or "").strip() == "AXButton" and _el_label(copy_el).lower() == "copy":
-                synthesized_labels[copy_idx] = f"Copy {field_name}"
-                if field_is_secret:
-                    extra_secure_ids.add(copy_idx)
+            elif p_idx in extra_secure_ids or _el_label(p_el).strip().lower() in {"reveal", "hide"}:
+                field_is_secret = True
+
         if field_is_secret:
+            watchtower_badges = {"vulnerable", "weak", "compromised", "reused", "watchtower", "terrible"}
+            for p in span_positions:
+                s_idx = sorted_ids[p]
+                s_el = by_index[s_idx]
+                s_role = str(s_el.get("role") or "").strip()
+                if s_role == "AXStaticText":
+                    s_txt = (_el_val(s_el) or _el_label(s_el)).strip()
+                    if (
+                        p != matched_header_pos
+                        and p not in tooltip_positions
+                        and s_txt
+                        and s_txt.lower() not in watchtower_badges
+                    ):
+                        redacted_static_values.add(s_txt)
+                        extra_secure_ids.add(s_idx)
+                else:
+                    if s_role == "AXButton" and _el_label(s_el).lower() == "copy":
+                        synthesized_labels[s_idx] = f"Copy {field_name}"
+                    extra_secure_ids.add(s_idx)
             extra_secure_ids.add(idx)
+        else:
+            url_val = ""
+            for p in span_positions:
+                if p == matched_header_pos or p in tooltip_positions:
+                    continue
+                s_idx = sorted_ids[p]
+                s_el = by_index[s_idx]
+                s_role = str(s_el.get("role") or "").strip()
+                s_txt = (_el_val(s_el) or _el_label(s_el)).strip()
+                if (
+                    s_role in {"AXStaticText", "AXLink"}
+                    and s_txt
+                    and s_txt.rstrip(":").strip().lower() != field_name.lower()
+                    and s_txt.lower() not in {"open", "open and fill", "copy", "tooltip:"}
+                    and (field_is_website or re.match(r"^https?://", s_txt, re.IGNORECASE))
+                ):
+                    url_val = s_txt
+                    break
+            for p in span_positions:
+                s_idx = sorted_ids[p]
+                s_el = by_index[s_idx]
+                s_role = str(s_el.get("role") or "").strip()
+                s_lbl = _el_label(s_el)
+                s_synth = synthesized_labels.get(s_idx, "")
+                if s_role == "AXButton" and s_lbl.lower() == "copy":
+                    synthesized_labels[s_idx] = f"Copy {field_name}"
+                elif s_role == "AXButton" and (
+                    s_lbl.lower() in {"open", "open and fill"}
+                    or s_synth.lower() in {"open", "open and fill"}
+                ):
+                    synthesized_labels[s_idx] = f"Open and Fill ({url_val})" if url_val else "Open and Fill"
+                elif s_role == "AXLink" and (field_is_website or url_val):
+                    target_url = url_val or s_lbl or _el_val(s_el)
+                    if target_url and "open and fill" not in target_url.lower():
+                        synthesized_labels[s_idx] = f"Open and Fill ({target_url})"
 
     # Pass 4: 1Password Edit Mode field rows
     for pos, idx in enumerate(sorted_ids):
         el = by_index[idx]
         role = str(el.get("role") or "").strip()
         lbl = _el_label(el)
+        val = _el_val(el)
         m_drag = _REORDER_HANDLE_RE.match(lbl) if role == "AXButton" else None
         if m_drag and pos + 2 < len(sorted_ids):
             field_name = m_drag.group(1).strip()
@@ -1325,16 +1473,22 @@ def _analyze_window_elements(
             el2 = by_index[idx2]
             role1 = str(el1.get("role") or "").strip()
             role2 = str(el2.get("role") or "").strip()
+            val1 = _el_val(el1)
+            val2 = _el_val(el2)
             if role1 in TEXT_INPUT_AX_ROLES and role2 in TEXT_INPUT_AX_ROLES:
                 if not _el_label(el1):
                     synthesized_labels.setdefault(idx1, f"Field label ({field_name})")
-                synthesized_labels.setdefault(idx2, field_name)
-                if field_is_secret or _BULLET_MASK_RE.search(_el_val(el2)):
+                synthesized_labels[idx2] = field_name
+                if field_is_secret or _SECRET_FIELD_NAME_RE.search(val1) or _BULLET_MASK_RE.search(val2):
                     extra_secure_ids.add(idx2)
+                    if val2 and not _pw_placeholder_re.match(val2):
+                        redacted_static_values.add(val2)
             elif role1 == "AXStaticText" and role2 in TEXT_INPUT_AX_ROLES:
-                synthesized_labels.setdefault(idx2, field_name)
-                if field_is_secret or _BULLET_MASK_RE.search(_el_val(el2)):
+                synthesized_labels[idx2] = field_name
+                if field_is_secret or _SECRET_FIELD_NAME_RE.search(val1) or _BULLET_MASK_RE.search(val2):
                     extra_secure_ids.add(idx2)
+                    if val2 and not _pw_placeholder_re.match(val2):
+                        redacted_static_values.add(val2)
         elif is_1password_ctx and role in TEXT_INPUT_AX_ROLES and not lbl and idx not in synthesized_labels:
             next_el = by_index[sorted_ids[pos + 1]] if pos + 1 < len(sorted_ids) else None
             if val.lower().startswith("search in ") or (
@@ -1347,13 +1501,15 @@ def _analyze_window_elements(
                 prev_el = by_index[sorted_ids[pos - 1]]
                 prev_role = str(prev_el.get("role") or "").strip()
                 prev_lbl = _el_label(prev_el)
-                prev_txt = _el_val(prev_el) or prev_lbl
+                prev_txt = (_el_val(prev_el) or prev_lbl).rstrip(":").strip()
                 if prev_role == "AXPopUpButton" and "modify the custom icon" in prev_lbl.lower():
                     synthesized_labels[idx] = "Item Title"
-                elif prev_role == "AXStaticText" and prev_txt and len(prev_txt) <= 32 and not prev_txt.endswith(":"):
+                elif prev_role == "AXStaticText" and prev_txt and len(prev_txt) <= 32:
                     synthesized_labels[idx] = prev_txt
                     if _SECRET_FIELD_NAME_RE.search(prev_txt):
                         extra_secure_ids.add(idx)
+                        if val and not _pw_placeholder_re.match(val):
+                            redacted_static_values.add(val)
 
     # Pass 5: 1Password sidebar tiering (before first AXSplitter: core nav = tier 2, vault/tag lists = tier 3)
     sidebar_tier_by_id: dict[int, int] = {}
@@ -1437,7 +1593,7 @@ def extract_window_observation(
     )
     tree_md = str(sc.get("tree_markdown") or text_blocks or "")
     raw_static_texts = [t.replace("\u200e", "").strip() for t in re.findall(r'AXStaticText = "([^"]*)"', tree_md)]
-    md_depth, md_toolbar_ids, md_menubar_ids = _parse_markdown_hierarchy_full(tree_md)
+    md_depth, md_toolbar_ids, md_menubar_ids, md_unlabeled_value_ids = _parse_markdown_hierarchy_full(tree_md)
 
     by_index: dict[int, Mapping[str, Any]] = {}
     for item in raw_elements:
@@ -1453,14 +1609,12 @@ def extract_window_observation(
         "app_name": sc.get("app_name"),
         "window_title": sc.get("window_title") or win_root_label or None,
     }
+    is_1password_ctx = "1password" in str(obs_context.get("app_name") or "").lower() or "1password" in str(
+        obs_context.get("window_title") or ""
+    ).lower()
     synthesized_labels, extra_secure_ids, redacted_static_values, sidebar_secondary_ids = _analyze_window_elements(
-        by_index, obs_context, raw_static_texts
+        by_index, obs_context, raw_static_texts, md_unlabeled_value_ids
     )
-    static_texts = [
-        t
-        for t in raw_static_texts
-        if not _BULLET_MASK_RE.search(t) and t not in redacted_static_values
-    ]
 
     compact_elements: list[dict[str, Any]] = []
     explicit_target_elements: list[dict[str, Any]] = []
@@ -1491,16 +1645,32 @@ def extract_window_observation(
             "secure" in role.lower()
             or "secure" in subrole.lower()
             or bool(_BULLET_MASK_RE.search(raw_val_str))
+            or bool(_BULLET_MASK_RE.search(label))
+            or (raw_val_str in redacted_static_values and bool(raw_val_str))
+            or (label in redacted_static_values and bool(label))
             or (idx in extra_secure_ids)
         )
+        if _BULLET_MASK_RE.search(label) or (label in redacted_static_values and bool(label)):
+            label = ""
+        if _BULLET_MASK_RE.search(synth_label) or (synth_label in redacted_static_values and bool(synth_label)):
+            synth_label = ""
         if (
             (role in TEXT_INPUT_AX_ROLES or is_secure)
-            and el.get("title") in (None, "")
-            and el.get("description") in (None, "")
+            and (idx in md_unlabeled_value_ids or is_1password_ctx or is_secure)
             and label
             and label == raw_val_str
         ):
-            label = ""
+            alt = el.get("title") if el.get("title") not in (None, "") else el.get("description")
+            alt_str = str(alt or "").replace("\u200e", "").strip()
+            if (
+                alt_str
+                and alt_str != raw_val_str
+                and not _BULLET_MASK_RE.search(alt_str)
+                and alt_str not in redacted_static_values
+            ):
+                label = alt_str
+            else:
+                label = ""
         value = None if (is_secure or el.get("value") is None) else raw_val_str
         actions, has_explicit_actions = _normalized_actions(el)
         supports_press = _supports_press_action(actions)
@@ -1537,7 +1707,10 @@ def extract_window_observation(
         else:
             display_label = eff_label or (value if not is_text_input else "") or role
         raw_label_val = eff_label or (value if not is_text_input else "")
-        priority_tier = 0 if in_toolbar else sidebar_secondary_ids.get(idx, 1)
+        is_open_and_fill_ctrl = is_1password_ctx and bool(
+            re.search(r"\b(?:open\s+and\s+fill|autofill)\b", display_label, re.IGNORECASE)
+        )
+        priority_tier = 0 if (in_toolbar or is_open_and_fill_ctrl) else sidebar_secondary_ids.get(idx, 1)
 
         compact_el: dict[str, Any] = {
             "element_index": idx,
@@ -1557,6 +1730,12 @@ def extract_window_observation(
             compact_elements.append(compact_el)
         else:
             explicit_target_elements.append(compact_el)
+
+    static_texts = [
+        t
+        for t in raw_static_texts
+        if not _BULLET_MASK_RE.search(t) and t not in redacted_static_values
+    ]
 
     # Prioritize toolbar controls first, then primary content controls, then secondary sidebar lists, breaking ties by depth and element_index
     prioritized_elements = sorted(
@@ -1640,7 +1819,10 @@ def extract_window_observation(
         "observation_truncated": observation_truncated,
         "static_texts": static_texts,
         "indexed_element_ids": {e["element_index"] for e in all_elements},
-        "secure_element_ids": {e["element_index"] for e in all_elements if "secure" in str(e.get("state") or "")},
+        "secure_element_ids": {
+            e["element_index"] for e in all_elements if "secure" in str(e.get("state") or "")
+        }
+        | extra_secure_ids,
         "elements": bounded_elements,
         "all_elements": all_elements,
         "auto_candidates": auto_candidates,
@@ -1994,14 +2176,25 @@ def authorize_candidate_dispatch(
                 f"secure_element_refused: candidate {selected_id!r} cannot target secure element_index={args['element_index']}"
             )
 
-    action_gate = _check_commit_safety_gate(
-        observation,
-        str(candidate.get("description") or ""),
-        tool,
-        args,
-    )
-    if action_gate is not None:
-        raise ValueError(f"{action_gate} (candidate={selected_id!r})")
+    gate_labels = [str(candidate.get("description") or "")]
+    if "element_index" in args and observation is not None:
+        obs_els = observation.get("all_elements") or observation.get("elements") or []
+        for obs_el in obs_els:
+            if isinstance(obs_el, Mapping) and obs_el.get("element_index") == args["element_index"]:
+                for lbl_k in ("label", "raw_label"):
+                    el_lbl = str(obs_el.get(lbl_k) or "").strip()
+                    if el_lbl and el_lbl not in gate_labels:
+                        gate_labels.append(el_lbl)
+                break
+    for gate_lbl in gate_labels:
+        action_gate = _check_commit_safety_gate(
+            observation,
+            gate_lbl,
+            tool,
+            args,
+        )
+        if action_gate is not None:
+            raise ValueError(f"{action_gate} (candidate={selected_id!r})")
 
     return {"id": selected_id, "tool": tool, "arguments": args, "description": candidate.get("description")}
 
@@ -2194,7 +2387,7 @@ def check_postcondition(
                 post_lbl = str(
                     (post_el.get("raw_label") if "raw_label" in post_el else post_el.get("label")) or ""
                 ).strip()
-                if pre_lbl and post_lbl and pre_lbl != post_lbl:
+                if (pre_lbl or post_lbl) and pre_lbl != post_lbl:
                     return (
                         state_changed,
                         False,
@@ -3855,59 +4048,6 @@ class JevMcpServer:
                 post_obs,
                 target_element_index=target_el_idx,
             )
-            if (
-                not post_ok
-                and query_val is not None
-                and authorized["tool"] in {"set_value", "type_text"}
-                and verify_reason.startswith("target_element_missing:")
-            ):
-                fallback_post_args = {k: v for k, v in post_obs_args.items() if k != "query"}
-                new_val_q = str(
-                    authorized["arguments"].get("value")
-                    if authorized["tool"] == "set_value"
-                    else (authorized["arguments"].get("text") or "")
-                ).strip()
-                if new_val_q:
-                    fallback_post_args["query"] = new_val_q
-                raw_post_fb = driver.call_tool(
-                    "get_window_state",
-                    fallback_post_args,
-                    timeout_s=obs_call_timeout_s(driver),
-                    deadline_monotonic=_deadline_monotonic,
-                )
-                if not raw_post_fb.get("isError"):
-                    post_obs = extract_window_observation(
-                        raw_post_fb, expected_pid=pid, expected_window_id=window_id
-                    )
-                    state_changed, post_ok, verify_reason = check_postcondition(
-                        expected_post,
-                        pre_obs,
-                        post_obs,
-                        target_element_index=target_el_idx,
-                    )
-            elif (
-                not post_ok
-                and not post_obs["elements"]
-                and not post_obs["static_texts"]
-                and pre_obs["elements"]
-            ):
-                time.sleep(0.2)
-                raw_post_settle = driver.call_tool(
-                    "get_window_state",
-                    post_obs_args,
-                    timeout_s=obs_call_timeout_s(driver),
-                    deadline_monotonic=_deadline_monotonic,
-                )
-                if not raw_post_settle.get("isError"):
-                    post_obs = extract_window_observation(
-                        raw_post_settle, expected_pid=pid, expected_window_id=window_id
-                    )
-                    state_changed, post_ok, verify_reason = check_postcondition(
-                        expected_post,
-                        pre_obs,
-                        post_obs,
-                        target_element_index=target_el_idx,
-                    )
         except Exception as exc:
             verify_ms = round((time.perf_counter() - verify_started) * 1000, 2)
             self.accounting.uncertain_side_effects += 1
