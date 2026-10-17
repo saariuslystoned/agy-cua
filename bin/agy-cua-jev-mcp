@@ -1281,7 +1281,12 @@ def _analyze_window_elements(
                 if re.search(r"\b(?:reveal|hide)\s+(?:password|secure)", t2, re.IGNORECASE):
                     extra_secure_ids.add(idx)
 
-    # Pass 2: Lock Screen detection, Touch ID button labeling, and labeled secret text inputs
+    _pw_placeholder_re = re.compile(
+        r"^(?:enter\s+your\s+password|master\s+(?:vault\s+)?password|password|generate\s+password,\s+or\s+type\s+a\s+password)$",
+        re.IGNORECASE,
+    )
+
+    # Pass 2: Lock Screen detection, Touch ID button labeling, and labeled/secure text inputs
     touch_id_caption = next(
         (t for t in raw_static_texts if re.search(r"\bunlock\s+(?:using|with)\s+touch\s+id\b", t, re.IGNORECASE)),
         None,
@@ -1290,20 +1295,33 @@ def _analyze_window_elements(
     for pos, idx in enumerate(sorted_ids):
         el = by_index[idx]
         role = str(el.get("role") or "").strip()
+        subrole = str(el.get("subrole") or "").strip()
         lbl = synthesized_labels.get(idx) or _el_label(el)
         val = _el_val(el)
-        is_placeholder_pw = bool(
+        is_val_placeholder = bool(val and _pw_placeholder_re.match(val))
+        is_pw_hint = bool(
             re.search(r"\b(?:enter\s+your\s+password|master\s+(?:vault\s+)?password)\b", f"{lbl} {val}", re.IGNORECASE)
             or re.search(r"\bgenerate\s+password,\s+or\s+type\s+a\s+password\b", lbl, re.IGNORECASE)
         )
-        if role in TEXT_INPUT_AX_ROLES and (
-            is_placeholder_pw or (lbl and _SECRET_FIELD_NAME_RE.search(lbl))
-        ):
+        is_secret_input = (
+            "secure" in role.lower()
+            or "secure" in subrole.lower()
+            or (
+                role in TEXT_INPUT_AX_ROLES
+                and (
+                    is_lock_screen
+                    or is_pw_hint
+                    or (lbl and _SECRET_FIELD_NAME_RE.search(lbl))
+                    or bool(_BULLET_MASK_RE.search(val))
+                )
+            )
+        )
+        if is_secret_input:
             extra_secure_ids.add(idx)
-            if not lbl and val:
-                synthesized_labels[idx] = val
-            elif val and not is_placeholder_pw and val.lower() != lbl.lower():
+            if val and not is_val_placeholder:
                 redacted_static_values.add(val)
+            if not lbl:
+                synthesized_labels[idx] = val if is_val_placeholder else "Password"
             if is_lock_screen:
                 for look_pos in range(pos + 1, min(pos + 7, len(sorted_ids))):
                     cand_idx = sorted_ids[look_pos]
@@ -1332,12 +1350,10 @@ def _analyze_window_elements(
         field_is_website = bool(_WEBSITE_FIELD_NAME_RE.search(field_name))
 
         boundary_pos = max(0, pos - 10)
-        matched_header_pos: int | None = None
         for scan_pos in range(pos - 1, max(-1, pos - 11), -1):
             scan_el = by_index[sorted_ids[scan_pos]]
             scan_role = str(scan_el.get("role") or "").strip()
             scan_lbl = _el_label(scan_el)
-            scan_txt = (_el_val(scan_el) or scan_lbl).strip()
             if (scan_role == "AXPopUpButton" and _MORE_ACTIONS_RE.match(scan_lbl)) or scan_role in {
                 "AXSplitter",
                 "AXToolbar",
@@ -1345,9 +1361,14 @@ def _analyze_window_elements(
             }:
                 boundary_pos = scan_pos + 1
                 break
-            if scan_role == "AXStaticText" and scan_txt.rstrip(":").strip().lower() == field_name.lower():
-                matched_header_pos = scan_pos
-                break
+        matched_header_pos: int | None = None
+        for fwd_pos in range(boundary_pos, pos):
+            fwd_el = by_index[sorted_ids[fwd_pos]]
+            if str(fwd_el.get("role") or "").strip() == "AXStaticText":
+                fwd_txt = (_el_val(fwd_el) or _el_label(fwd_el)).strip()
+                if fwd_txt.rstrip(":").strip().lower() == field_name.lower():
+                    matched_header_pos = fwd_pos
+                    break
         start_pos = matched_header_pos if matched_header_pos is not None else boundary_pos
 
         span_positions = list(range(start_pos, pos))
@@ -1380,9 +1401,9 @@ def _analyze_window_elements(
                 if s_role == "AXStaticText":
                     s_txt = (_el_val(s_el) or _el_label(s_el)).strip()
                     if (
-                        p not in tooltip_positions
+                        p != matched_header_pos
+                        and p not in tooltip_positions
                         and s_txt
-                        and s_txt.rstrip(":").strip().lower() != field_name.lower()
                         and s_txt.lower() not in watchtower_badges
                     ):
                         redacted_static_values.add(s_txt)
@@ -1395,7 +1416,7 @@ def _analyze_window_elements(
         else:
             url_val = ""
             for p in span_positions:
-                if p in tooltip_positions:
+                if p == matched_header_pos or p in tooltip_positions:
                     continue
                 s_idx = sorted_ids[p]
                 s_el = by_index[s_idx]
@@ -1435,29 +1456,42 @@ def _analyze_window_elements(
         lbl = _el_label(el)
         val = _el_val(el)
         m_drag = _REORDER_HANDLE_RE.match(lbl) if role == "AXButton" else None
-        if m_drag and pos + 2 < len(sorted_ids):
+        if m_drag and pos + 1 < len(sorted_ids):
             field_name = m_drag.group(1).strip()
             field_is_secret = bool(_SECRET_FIELD_NAME_RE.search(field_name))
-            idx1 = sorted_ids[pos + 1]
-            idx2 = sorted_ids[pos + 2]
-            el1 = by_index[idx1]
-            el2 = by_index[idx2]
-            role1 = str(el1.get("role") or "").strip()
-            role2 = str(el2.get("role") or "").strip()
-            val2 = _el_val(el2)
-            if role1 in TEXT_INPUT_AX_ROLES and role2 in TEXT_INPUT_AX_ROLES:
-                if not _el_label(el1):
+            row_input_ids: list[int] = []
+            for fwd_pos in range(pos + 1, min(len(sorted_ids), pos + 6)):
+                fwd_idx = sorted_ids[fwd_pos]
+                fwd_el = by_index[fwd_idx]
+                fwd_role = str(fwd_el.get("role") or "").strip()
+                fwd_lbl = _el_label(fwd_el)
+                if (fwd_role == "AXButton" and _REORDER_HANDLE_RE.match(fwd_lbl)) or fwd_role in {
+                    "AXSplitter",
+                    "AXToolbar",
+                    "AXList",
+                }:
+                    break
+                if fwd_role in TEXT_INPUT_AX_ROLES or "secure" in fwd_role.lower():
+                    row_input_ids.append(fwd_idx)
+                    if len(row_input_ids) == 2:
+                        break
+            if len(row_input_ids) == 2:
+                idx1, idx2 = row_input_ids[0], row_input_ids[1]
+                if not _el_label(by_index[idx1]):
                     synthesized_labels.setdefault(idx1, f"Field label ({field_name})")
-                synthesized_labels.setdefault(idx2, field_name)
+                synthesized_labels[idx2] = field_name
+                val2 = _el_val(by_index[idx2])
                 if field_is_secret or _BULLET_MASK_RE.search(val2):
                     extra_secure_ids.add(idx2)
-                    if val2 and val2.lower() != field_name.lower():
+                    if val2 and not _pw_placeholder_re.match(val2):
                         redacted_static_values.add(val2)
-            elif role1 == "AXStaticText" and role2 in TEXT_INPUT_AX_ROLES:
-                synthesized_labels.setdefault(idx2, field_name)
+            elif len(row_input_ids) == 1:
+                idx2 = row_input_ids[0]
+                synthesized_labels[idx2] = field_name
+                val2 = _el_val(by_index[idx2])
                 if field_is_secret or _BULLET_MASK_RE.search(val2):
                     extra_secure_ids.add(idx2)
-                    if val2 and val2.lower() != field_name.lower():
+                    if val2 and not _pw_placeholder_re.match(val2):
                         redacted_static_values.add(val2)
         elif is_1password_ctx and role in TEXT_INPUT_AX_ROLES and not lbl and idx not in synthesized_labels:
             next_el = by_index[sorted_ids[pos + 1]] if pos + 1 < len(sorted_ids) else None
@@ -1471,14 +1505,14 @@ def _analyze_window_elements(
                 prev_el = by_index[sorted_ids[pos - 1]]
                 prev_role = str(prev_el.get("role") or "").strip()
                 prev_lbl = _el_label(prev_el)
-                prev_txt = _el_val(prev_el) or prev_lbl
+                prev_txt = (_el_val(prev_el) or prev_lbl).rstrip(":").strip()
                 if prev_role == "AXPopUpButton" and "modify the custom icon" in prev_lbl.lower():
                     synthesized_labels[idx] = "Item Title"
-                elif prev_role == "AXStaticText" and prev_txt and len(prev_txt) <= 32 and not prev_txt.endswith(":"):
+                elif prev_role == "AXStaticText" and prev_txt and len(prev_txt) <= 32:
                     synthesized_labels[idx] = prev_txt
                     if _SECRET_FIELD_NAME_RE.search(prev_txt):
                         extra_secure_ids.add(idx)
-                        if val and val.lower() != prev_txt.lower():
+                        if val and not _pw_placeholder_re.match(val):
                             redacted_static_values.add(val)
 
     # Pass 5: 1Password sidebar tiering (before first AXSplitter: core nav = tier 2, vault/tag lists = tier 3)
@@ -1585,11 +1619,6 @@ def extract_window_observation(
     synthesized_labels, extra_secure_ids, redacted_static_values, sidebar_secondary_ids = _analyze_window_elements(
         by_index, obs_context, raw_static_texts, md_unlabeled_value_ids
     )
-    static_texts = [
-        t
-        for t in raw_static_texts
-        if not _BULLET_MASK_RE.search(t) and t not in redacted_static_values
-    ]
 
     compact_elements: list[dict[str, Any]] = []
     explicit_target_elements: list[dict[str, Any]] = []
@@ -1627,6 +1656,8 @@ def extract_window_observation(
         )
         if _BULLET_MASK_RE.search(label) or (label in redacted_static_values and bool(label)):
             label = ""
+        if _BULLET_MASK_RE.search(synth_label) or (synth_label in redacted_static_values and bool(synth_label)):
+            synth_label = ""
         if (
             (role in TEXT_INPUT_AX_ROLES or is_secure)
             and (idx in md_unlabeled_value_ids or is_1password_ctx or is_secure)
@@ -1703,6 +1734,12 @@ def extract_window_observation(
             compact_elements.append(compact_el)
         else:
             explicit_target_elements.append(compact_el)
+
+    static_texts = [
+        t
+        for t in raw_static_texts
+        if not _BULLET_MASK_RE.search(t) and t not in redacted_static_values
+    ]
 
     # Prioritize toolbar controls first, then primary content controls, then secondary sidebar lists, breaking ties by depth and element_index
     prioritized_elements = sorted(
