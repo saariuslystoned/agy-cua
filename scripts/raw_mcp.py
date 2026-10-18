@@ -10,11 +10,8 @@ import base64
 import json
 import os
 import re
-import queue
 import subprocess
 import sys
-import threading
-import time
 
 DRIVER_CANDIDATES = [
     os.environ.get("AGY_CUA_DRIVER", ""),
@@ -31,35 +28,17 @@ def driver_path():
 
 
 class Session:
-    def __init__(self, timeout_s=15):
-        if not 0 < timeout_s < float("inf"):
-            raise ValueError("timeout_s must be finite and positive")
-        self.timeout_s = timeout_s
-        self.closed = False
-        self.responses = queue.Queue()
+    def __init__(self):
         self.proc = subprocess.Popen(
             [driver_path(), "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
             env={"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"]},
         )
-        self.reader = threading.Thread(target=self._read_responses, daemon=True)
-        self.reader.start()
         self.next_id = 0
-        try:
-            self.request("initialize", {
-                "protocolVersion": "2025-06-18", "capabilities": {},
-                "clientInfo": {"name": "agy-cua-raw", "version": "0"},
-            })
-            self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        except BaseException:
-            self.close()
-            raise
-
-    def _read_responses(self):
-        try:
-            for line in self.proc.stdout:
-                self.responses.put(line)
-        finally:
-            self.responses.put(None)
+        self.request("initialize", {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "agy-cua-raw", "version": "0"},
+        })
+        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
     def _send(self, message):
         self.proc.stdin.write(json.dumps(message) + "\n")
@@ -68,13 +47,8 @@ class Session:
     def request(self, method, params):
         self.next_id += 1
         self._send({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params})
-        deadline = time.monotonic() + self.timeout_s
         while True:
-            try:
-                line = self.responses.get(timeout=max(0, deadline - time.monotonic()))
-            except queue.Empty:
-                self.close()
-                raise TimeoutError("cua-driver MCP request deadline exceeded") from None
+            line = self.proc.stdout.readline()
             if not line:
                 sys.exit(f"cua-driver mcp exited during {method}")
             message = json.loads(line)
@@ -87,23 +61,8 @@ class Session:
         return self.request("tools/call", {"name": tool, "arguments": arguments})
 
     def close(self):
-        if self.closed:
-            return
-        self.closed = True
-        # Only the MCP bridge process created by this Session, never the daemon.
-        if self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait(timeout=2)
-        self.reader.join(timeout=2)
-        for pipe in (self.proc.stdin, self.proc.stdout):
-            try:
-                pipe.close()
-            except (BrokenPipeError, OSError):
-                pass
+        self.proc.stdin.close()
+        self.proc.terminate()
 
 
 def text_of(result):

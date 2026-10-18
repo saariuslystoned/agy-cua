@@ -1,56 +1,74 @@
-# Real TextEdit qualification
+# Real TextEdit qualification recipe — currently blocked
 
-This pilot uses the Antigravity CLI, the installed agy-cua plugin, and the already
-running Cua Driver. It does not qualify the Antigravity IDE or native Codex.
+The October 18 pilot used Antigravity CLI and the installed plugin against real
+TextEdit. It did not qualify the save workflow. See the [retained results](../proof/textedit-20261018.md).
+There is no qualified unattended executor in this change. The experimental runner
+was withdrawn after review found transport-deadline and intermediate-receipt gaps;
+its historical revisions remain in PR history and private run output.
 
-Run `scripts/qualify_textedit.py` from an isolated checkout after approving live
-TextEdit use and model quota. The runner does not install or restart anything.
-It checks the installed plugin against a committed `--plugin-ref`, opens one
-new synthetic seed file, and asks the planner to create and edit a separate
-document through TextEdit controls. A preexisting file is never the output.
+This is the bounded recipe for a future supervised attempt after the menu-context
+blocker is addressed, not a claim of successful replay.
 
-```sh
-python3 scripts/qualify_textedit.py \
-  --model gemini-4-argon-low --repetition 1 \
-  --plugin-ref <installed-plugin-commit> --out runs/textedit-pilot/argon-r1
+1. Use an isolated checkout and a new private directory under ignored `runs/` per
+   attempt. Establish expected seed/final bytes first. Keep `STATE.md`,
+   `events.jsonl`, `heartbeat` and `PROOF.md` during a long run.
+2. Verify `gemini-4-argon-low` with effort `low` and `gemini-3.8-flash-high` with
+   effort `high` in the live `agy models` catalog. Keep plugin/Driver build, task,
+   observation limits and timing boundary constant. Do not relabel old API
+   `thinking_budget=512` results as Flash High.
+3. Open a new synthetic seed with background `launch_app`. Compare window IDs
+   before/after, bind the unique new seed ID to the exact task-created path, and
+   pass `(pid, window_id)` explicitly to the planner. Ambiguous discovery stops
+   before content capture. Matching titles alone do not establish ownership.
+4. Create a new document through native File → New. Discover and inspect its
+   window. Enter the draft below, then change `draft` to `ready`. Use guarded
+   `set_value` on the observed editable field. `AXShowMenu` does not prove that
+   Driver's `AXPress` click can focus a text area.
+5. Compare the new document's formatting with its menu state before conversion.
+   Stop on disagreement. The retained pilot stopped here: the rich-text document
+   and the app-wide Format menu disagreed.
+6. After that blocker is resolved, open Save and query the real sheet with
+   `query: "Save", max_elements: 1`. If incomplete, obtain sufficient bounded
+   evidence before acting. Cancel once, reobserve, reopen Save, and save only to
+   a new unique file under the run root. Never overwrite or replay an uncertain
+   action.
+7. Keep private task-scoped receipts for each intermediate observation: query,
+   budget, target/snapshot IDs, completeness, selection, dispatch and postcondition.
+   Do not archive raw AGY conversations. Final screenshots or summaries without
+   these bindings cannot prove recovery.
+8. Run the independent byte check below. Audit the receipts, focus/pointer samples,
+   prohibited actions, cancellation and model configuration separately. Correct
+   file bytes alone cannot certify UI recovery or overall qualification.
+
+Seed, including a final newline:
+
+```text
+Everyday workflow qualification
+Status: draft
+Next: review the synthetic note
 ```
 
-Use `gemini-3.8-flash-high` with effort `high` for the other arm. The runner sets
-effort `low` for Argon Low. Use the same recipe for two repetitions of each arm,
-reversing arm order in the second pair. Keep diagnostic attempts made before a
-recipe change separate and retain their failures. Do not combine these timings
-with the API fixtures or earlier six-task native Codex measurements.
+The final note changes only `Status: ready`. Exact UTF-8 constants are in
+[`scripts/verify_textedit.py`](../scripts/verify_textedit.py).
 
-The expected note is established before the run. Acceptance requires all of:
+```sh
+python3 scripts/verify_textedit.py \
+  --seed runs/<attempt>/seed.txt --note runs/<attempt>/note.txt
+```
 
-- The new output's bytes exactly match `NOTE`; the seed still matches `SEED`.
-- Fresh target observations establish the new document and actual save sheet.
-- The deliberately restricted save-sheet query is reported incomplete, followed
-  by a sufficient observation before action. The first sheet is cancelled and
-  the next save completes. Window discovery alone cannot satisfy this check.
-- No uncertain action is replayed, no halted controller is bypassed, and the
-  target is never brought to the foreground by an action.
-- The chosen model IDs match the live CLI catalog; the configured effort and
-  provider/deterministic decisions are reported honestly.
+This verifier reads only the two supplied files, emits hashes and boolean checks,
+and writes nothing. Failed byte checks exit nonzero; symlinks are rejected;
+`ui_recovery_verified` is always null.
 
-The runner always emits `NEEDS_EVIDENCE_REVIEW`, even if its byte check passes.
-Review the private observations, controller receipts and screenshots before
-assigning a final verdict. An agent's `SUCCESS` response is not acceptance.
-`STATE.md`, `events.jsonl`, `heartbeat` and `PROOF.md` live with each attempt.
-Keep those artifacts, screenshots and raw controller receipts under ignored
-`runs/`; publish only sanitized measurements and reproducible source.
+For a future comparison, use two fresh repetitions per arm and reverse their
+order in the second pair. Preserve failures and separate recipe changes. Restore
+equivalent task-owned window state without touching user documents. Do not mix
+these results with old API fixtures or native Codex timings.
 
-The installed controller limits Jev to four calls per attempt with no automatic
-retry. At the [published Jev 1.13 price and 64k context limit](https://docs.typesafe.ai/models),
-that is at most $0.010752 per attempt, including uncertain calls conservatively
-reserved at full context. Output is free. Limit a qualification batch to four
-attempts and at most one retained diagnostic ($0.05376 upper bound). Actual
-billing receipts are not exposed, so reported actual dollars are null. Antigravity
-CLI subscription usage is separate; this runner does not enable paid overages or
-use the Gemini API. Stop on an actual quota/billing refusal.
-
-Planner-only latency, image delivery/replay counts and provider-side model
-identity are unavailable in the current CLI summary. Keep them null rather than
-inferring them from total time, requested settings or screenshot file counts.
-Focus and pointer samples include operator activity; movement alone cannot be
-attributed to the agent. Preserve those limits in the report.
+The pilot capped Jev at four calls per attempt and retained five attempts. At the
+[published Jev 1.13 price and 64k context limit](https://docs.typesafe.ai/models),
+that ceiling was $0.05376; output is free. All retained attempts recorded zero Jev
+provider calls. Actual billing receipts were unavailable. CLI subscription usage
+is separate; no paid-overage setting changed. Future runs need their own approved
+spend/attempt envelope and cumulative accounting across every accounting-bearing
+receipt, including selections that fail or abstain.
