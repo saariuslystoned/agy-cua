@@ -3911,57 +3911,73 @@ class StdioEndToEndTest(unittest.TestCase):
                 canvas_obs,
             )
 
-        # Valid Retina screenshot coordinate candidate with source_snapshot_id rebinding in jev_step
+        # Valid Retina screenshot coordinate candidate with source_snapshot_id provenance/freshness/scope checks
         with tempfile.TemporaryDirectory() as tmp:
+            driver_log = os.path.join(tmp, "coord-calls.jsonl")
             coord_driver = os.path.join(tmp, "coord-driver")
             with open(coord_driver, "w", encoding="utf-8") as handle:
-                handle.write(textwrap.dedent("""\
+                handle.write(textwrap.dedent(f"""\
                     #!/usr/bin/env python3
                     import json, sys
                     obs_n = 0
+                    activated = False
+                    log_path = {driver_log!r}
                     for line in sys.stdin:
                         msg = json.loads(line)
                         if "id" not in msg:
                             continue
                         method = msg.get("method")
                         if method == "initialize":
-                            print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": "2025-06-18"}}), flush=True)
+                            print(json.dumps({{"jsonrpc": "2.0", "id": msg["id"], "result": {{"protocolVersion": "2025-06-18"}}}}), flush=True)
                         elif method == "tools/call":
                             name = msg["params"]["name"]
-                            args = msg["params"].get("arguments", {})
+                            args = msg["params"].get("arguments", {{}})
+                            with open(log_path, "a", encoding="utf-8") as lf:
+                                lf.write(json.dumps({{"name": name, "args": args}}) + "\\n")
                             if name == "get_window_state":
                                 obs_n += 1
-                                snap = f"s0000040{obs_n}"
-                                txt = 'AXStaticText = "Canvas Activated"' if obs_n >= 2 else 'AXStaticText = "Canvas Idle"'
-                                sc = {
+                                wid = int(args.get("window_id") or 100)
+                                snap = f"s0000040{{obs_n}}"
+                                txt = 'AXStaticText = "Canvas Activated"' if activated else 'AXStaticText = "Canvas Idle"'
+                                sc = {{
                                     "pid": 42,
-                                    "window_id": 100,
+                                    "window_id": wid,
                                     "snapshot_id": snap,
                                     "elements_complete": False,
                                     "truncated": False,
-                                    "window_bounds": {"x": 0, "y": 0, "width": 720, "height": 532},
+                                    "window_bounds": {{"x": 0, "y": 0, "width": 720, "height": 532}},
                                     "screenshot_width": 1366,
                                     "screenshot_height": 1009,
-                                    "elements": [{"element_index": 0, "role": "AXWindow", "label": "Canvas"}],
-                                }
-                                res = {"content": [{"type": "text", "text": txt}], "structuredContent": sc}
+                                    "elements": [{{"element_index": 0, "role": "AXWindow", "label": "Canvas"}}],
+                                }}
+                                content = [{{"type": "text", "text": txt}}]
+                                if args.get("include_screenshot"):
+                                    content.append({{"type": "image", "mimeType": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="}})
+                                res = {{"content": content, "structuredContent": sc}}
                             elif name == "click":
-                                res = {"content": [{"type": "text", "text": f"clicked ({args.get('x')}, {args.get('y')})"}]}
+                                activated = True
+                                res = {{"content": [{{"type": "text", "text": f"clicked ({{args.get('x')}}, {{args.get('y')}})"}}]}}
                             else:
-                                res = {"content": [{"type": "text", "text": "[]"}], "structuredContent": {"windows": []}}
-                            print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": res}), flush=True)
+                                res = {{"content": [{{"type": "text", "text": "[]"}}], "structuredContent": {{"windows": []}}}}
+                            print(json.dumps({{"jsonrpc": "2.0", "id": msg["id"], "result": res}}), flush=True)
                 """))
             os.chmod(coord_driver, os.stat(coord_driver).st_mode | stat.S_IEXEC)
+
+            def read_logged_clicks() -> list[dict]:
+                if not os.path.exists(driver_log):
+                    return []
+                with open(driver_log, "r", encoding="utf-8") as lf:
+                    return [json.loads(ln) for ln in lf if ln.strip() and json.loads(ln)["name"] == "click"]
 
             server = jev.JevMcpServer(
                 env={"AGY_CUA_DRIVER": coord_driver, "TYPESAFE_API_KEY": "test-key"},
                 keychain_reader=lambda _: None,
             )
             try:
-                # Candidate bound to prior visual inspection snapshot s00000400 with source_snapshot_id
-                resp = server.handle_message({
+                # 1. Unknown source_snapshot_id refused before dispatch
+                resp_unk = server.handle_message({
                     "jsonrpc": "2.0",
-                    "id": 1,
+                    "id": 10,
                     "method": "tools/call",
                     "params": {
                         "name": "jev_step",
@@ -3970,11 +3986,126 @@ class StdioEndToEndTest(unittest.TestCase):
                             "pid": 42,
                             "window_id": 100,
                             "mode": "deterministic",
-                            "source_snapshot_id": "s00000400",
+                            "source_snapshot_id": "s00009999",
                             "candidates": [{
                                 "id": "canvas.hit",
                                 "description": "Click custom canvas control at (950, 720)",
-                                "snapshot_id": "s00000400",
+                                "snapshot_id": "s00009999",
+                                "tool": "click",
+                                "x": 950,
+                                "y": 720,
+                            }],
+                        },
+                    },
+                })
+                sc_unk = resp_unk["result"]["structuredContent"]
+                self.assertTrue(resp_unk["result"]["isError"])
+                self.assertEqual(sc_unk["status"], "stale_snapshot")
+                self.assertFalse(sc_unk["action_dispatched"])
+                self.assertIn("unknown_source_snapshot_id", sc_unk["reason"])
+                self.assertEqual(len(read_logged_clicks()), 0)
+
+                # 2. Observe visual snapshot on (pid=42, window_id=100), then attempt to use it on wrong window_id=200
+                obs1 = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 11,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_observe",
+                        "arguments": {"pid": 42, "window_id": 100, "include_screenshot": True},
+                    },
+                })
+                snap_w100_old = obs1["result"]["structuredContent"]["snapshot_id"]
+                resp_wrong_win = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 12,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {
+                            "goal": "Click custom canvas target on wrong window",
+                            "pid": 42,
+                            "window_id": 200,
+                            "mode": "deterministic",
+                            "source_snapshot_id": snap_w100_old,
+                            "candidates": [{
+                                "id": "canvas.hit",
+                                "description": "Click custom canvas control at (950, 720)",
+                                "snapshot_id": snap_w100_old,
+                                "tool": "click",
+                                "x": 950,
+                                "y": 720,
+                            }],
+                        },
+                    },
+                })
+                sc_wrong = resp_wrong_win["result"]["structuredContent"]
+                self.assertTrue(resp_wrong_win["result"]["isError"])
+                self.assertEqual(sc_wrong["status"], "out_of_scope_target")
+                self.assertFalse(sc_wrong["action_dispatched"])
+                self.assertIn("out_of_scope_target", sc_wrong["reason"])
+                self.assertEqual(len(read_logged_clicks()), 0)
+
+                # 3. Observe a newer visual snapshot on (pid=42, window_id=100), then verify stale snap_w100_old is refused
+                obs2 = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 13,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_observe",
+                        "arguments": {"pid": 42, "window_id": 100, "include_screenshot": True},
+                    },
+                })
+                snap_w100_latest = obs2["result"]["structuredContent"]["snapshot_id"]
+                self.assertNotEqual(snap_w100_old, snap_w100_latest)
+
+                resp_stale = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 14,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {
+                            "goal": "Click custom canvas target using stale visual snapshot",
+                            "pid": 42,
+                            "window_id": 100,
+                            "mode": "deterministic",
+                            "source_snapshot_id": snap_w100_old,
+                            "candidates": [{
+                                "id": "canvas.hit",
+                                "description": "Click custom canvas control at (950, 720)",
+                                "snapshot_id": snap_w100_old,
+                                "tool": "click",
+                                "x": 950,
+                                "y": 720,
+                            }],
+                        },
+                    },
+                })
+                sc_stale = resp_stale["result"]["structuredContent"]
+                self.assertTrue(resp_stale["result"]["isError"])
+                self.assertEqual(sc_stale["status"], "stale_snapshot")
+                self.assertFalse(sc_stale["action_dispatched"])
+                self.assertIn("stale_snapshot_id", sc_stale["reason"])
+                self.assertEqual(len(read_logged_clicks()), 0)
+
+                # 4. Valid candidate bound to latest visual inspection snapshot snap_w100_latest
+                resp = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 15,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_step",
+                        "arguments": {
+                            "goal": "Click custom canvas target at Retina pixel (950, 720)",
+                            "pid": 42,
+                            "window_id": 100,
+                            "mode": "deterministic",
+                            "source_snapshot_id": snap_w100_latest,
+                            "candidates": [{
+                                "id": "canvas.hit",
+                                "description": "Click custom canvas control at (950, 720)",
+                                "snapshot_id": snap_w100_latest,
                                 "tool": "click",
                                 "x": 950,
                                 "y": 720,
@@ -3989,11 +4120,16 @@ class StdioEndToEndTest(unittest.TestCase):
             sc = resp["result"]["structuredContent"]
             self.assertFalse(resp["result"]["isError"])
             self.assertEqual(sc["status"], "verified")
-            self.assertEqual(sc["pre_snapshot_id"], "s00000401")
-            self.assertEqual(sc["post_snapshot_id"], "s00000402")
+            self.assertTrue(sc["action_dispatched"])
+            self.assertTrue(sc["point_fallback_used"])
+            self.assertEqual(sc["source_snapshot_id"], snap_w100_latest)
             self.assertEqual(sc["dispatched_arguments"]["x"], 950)
             self.assertEqual(sc["dispatched_arguments"]["y"], 720)
             self.assertEqual(sc["dispatched_arguments"]["delivery_mode"], "background")
+            clicks = read_logged_clicks()
+            self.assertEqual(len(clicks), 1)
+            self.assertEqual(clicks[0]["args"]["x"], 950)
+            self.assertEqual(clicks[0]["args"]["y"], 720)
 
     def test_cross_window_same_pid_discovery_t7a_stdio(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4398,6 +4534,115 @@ class StdioEndToEndTest(unittest.TestCase):
         bool_cands = jev.build_bound_candidates(None, obs, action_value="true")
         bool_ids = [c["id"] for c in bool_cands]
         self.assertIn("sv.8.require-touch-id-prompt", bool_ids)
+
+    def test_observe_refuses_screenshot_on_secure_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sec_driver = os.path.join(tmp, "sec-driver")
+            with open(sec_driver, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent("""\
+                    #!/usr/bin/env python3
+                    import json, sys
+                    for line in sys.stdin:
+                        msg = json.loads(line)
+                        if "id" not in msg:
+                            continue
+                        method = msg.get("method")
+                        if method == "initialize":
+                            print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": "2025-06-18"}}), flush=True)
+                        elif method == "tools/call":
+                            name = msg["params"]["name"]
+                            if name == "get_window_state":
+                                sc = {
+                                    "pid": 77,
+                                    "window_id": 501,
+                                    "snapshot_id": "s00001a99",
+                                    "elements_complete": True,
+                                    "truncated": False,
+                                    "elements": [
+                                        {"element_index": 0, "role": "AXWindow", "label": "1Password Vault"},
+                                        {"element_index": 1, "role": "AXSecureTextField", "label": "Master Vault Password", "value": "CANARY-VAULT-SECRET"},
+                                    ],
+                                }
+                                content = [
+                                    {"type": "text", "text": 'AXStaticText = "Vault"\\n- [1] AXSecureTextField (Master Vault Password) = "CANARY-VAULT-SECRET"'},
+                                    {"type": "image", "mimeType": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="},
+                                ]
+                                res = {"content": content, "structuredContent": sc}
+                            else:
+                                res = {"content": [{"type": "text", "text": "[]"}], "structuredContent": {"windows": []}}
+                            print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": res}), flush=True)
+                """))
+            os.chmod(sec_driver, os.stat(sec_driver).st_mode | stat.S_IEXEC)
+
+            server = jev.JevMcpServer(
+                env={"AGY_CUA_DRIVER": sec_driver, "TYPESAFE_API_KEY": "test-key"},
+                keychain_reader=lambda _: None,
+            )
+            try:
+                resp = server.handle_message({
+                    "jsonrpc": "2.0",
+                    "id": 91,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "jev_observe",
+                        "arguments": {"pid": 77, "window_id": 501, "include_screenshot": True},
+                    },
+                })
+            finally:
+                server.close()
+
+            self.assertTrue(resp["result"]["isError"])
+            sc = resp["result"]["structuredContent"]
+            self.assertEqual(sc["status"], "screenshot_refused_secure_window")
+            self.assertEqual(sc["secure_fields_redacted_count"], 1)
+            image_blocks = [c for c in resp["result"]["content"] if c.get("type") == "image"]
+            self.assertEqual(len(image_blocks), 0)
+
+    def test_benchmark_resume_key_and_focus_monitor_browser_tracking(self) -> None:
+        bench_path = os.path.join(ROOT, "scripts", "benchmark_cua.py")
+        loader = importlib.machinery.SourceFileLoader("benchmark_cua_test_mod", bench_path)
+        spec = importlib.util.spec_from_loader("benchmark_cua_test_mod", loader)
+        assert spec is not None
+        bench_mod = importlib.util.module_from_spec(spec)
+        sys.modules["benchmark_cua_test_mod"] = bench_mod
+        loader.exec_module(bench_mod)
+
+        # Thread 5: completed failures across ANY arm are preserved on resume, while fatal error aborts without arm_failed are not
+        self.assertTrue(bench_mod.is_resumable_completed_row({"arm": "agy-cua-direct", "passed": False}))
+        self.assertTrue(bench_mod.is_resumable_completed_row({"arm": "agy-cua-jev-v0", "passed": False, "arm_failed": True, "error": "ArmActionError: boom"}))
+        self.assertFalse(bench_mod.is_resumable_completed_row({"arm": "agy-cua-jev-v1", "passed": False, "error": "RuntimeError: budget ceiling exceeded"}))
+
+        # Thread 6: resume key includes thinking_level / thinking_budget and rejects legacy rows missing both
+        k_low = bench_mod.extract_prior_row_resume_key({"repetition": 1, "model": "gemini-4-argon", "thinking_level": "low", "task_id": "T1", "arm": "agy-cua-jev-v1"})
+        k_high = bench_mod.extract_prior_row_resume_key({"repetition": 1, "model": "gemini-4-argon", "thinking_level": "high", "task_id": "T1", "arm": "agy-cua-jev-v1"})
+        k_budget = bench_mod.extract_prior_row_resume_key(
+            {"repetition": 1, "model": "gemini-3.8-flash", "thinking_level": None, "thinking_budget": 512, "task_id": "T1", "arm": "agy-cua-jev-v1"}
+        )
+        k_legacy = bench_mod.extract_prior_row_resume_key({"repetition": 1, "model": "gemini-3.8-flash", "task_id": "T1", "arm": "agy-cua-jev-v1"})
+        self.assertEqual(k_low, (1, "gemini-4-argon", "level:low", "T1", "agy-cua-jev-v1"))
+        self.assertEqual(k_high, (1, "gemini-4-argon", "level:high", "T1", "agy-cua-jev-v1"))
+        self.assertNotEqual(k_low, k_high)
+        self.assertEqual(k_budget, (1, "gemini-3.8-flash", "budget:512", "T1", "agy-cua-jev-v1"))
+        self.assertIsNone(k_legacy)
+
+        # Thread 7: FocusMonitor detects isolated browser PID or newly foregrounded browser bundle while preserving operator's initial frontmost app
+        mon = bench_mod.FocusMonitor(target_pid=100, target_bundle="com.agycua.benchfixture", monitor_browser=True)
+        mon.register_pid(250)
+        samples_seq = [
+            (900, "com.apple.Terminal"),     # initial operator frontmost app: 0 violations
+            (250, "org.chromium.Chromium"),  # registered isolated browser PID becomes frontmost: violation!
+            (900, "com.apple.Terminal"),     # back to operator app: 0 new violations
+            (333, "org.chromium.Chromium"),  # unregistered Chromium PID steals focus from Terminal: violation!
+        ]
+        orig_sample = bench_mod.sample_frontmost_info
+        try:
+            it = iter(samples_seq)
+            bench_mod.sample_frontmost_info = lambda: next(it)
+            for _ in samples_seq:
+                mon.sample_once()
+        finally:
+            bench_mod.sample_frontmost_info = orig_sample
+        self.assertEqual(mon.violations, 2)
 
 
 if __name__ == "__main__":

@@ -410,15 +410,33 @@ def sample_frontmost_info() -> tuple[int | None, str | None]:
 class FocusMonitor:
     """Polls frontmost app PID and bundle ID before, during, and after an arm."""
 
-    def __init__(self, target_pid: int, target_bundle: str, interval_s: float = 0.15) -> None:
+    def __init__(
+        self,
+        target_pid: int,
+        target_bundle: str,
+        interval_s: float = 0.15,
+        *,
+        monitor_browser: bool = False,
+    ) -> None:
         self.target_pid = target_pid
         self.target_bundle = target_bundle
         self.interval_s = interval_s
+        self.monitor_browser = monitor_browser
+        self.extra_pids: set[int] = set()
+        self.extra_bundles: set[str] = set()
+        self.initial_front_pid: int | None = None
+        self.initial_front_bundle: str | None = None
         self.violations = 0
         self.probe_errors = 0
         self.samples = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+
+    def register_pid(self, pid: int | None, bundle_id: str | None = None) -> None:
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+            self.extra_pids.add(pid)
+        if isinstance(bundle_id, str) and bundle_id.strip():
+            self.extra_bundles.add(bundle_id.strip())
 
     def sample_once(self) -> None:
         self.samples += 1
@@ -426,7 +444,17 @@ class FocusMonitor:
         if f_pid is None:
             self.probe_errors += 1
             return
-        if f_pid == self.target_pid or (self.target_bundle and f_bundle == self.target_bundle):
+        if self.initial_front_pid is None:
+            self.initial_front_pid = f_pid
+            self.initial_front_bundle = f_bundle
+        monitored_pids = {self.target_pid, *self.extra_pids}
+        monitored_bundles = ({self.target_bundle} if self.target_bundle else set()) | self.extra_bundles
+        is_target = f_pid in monitored_pids or (bool(f_bundle) and f_bundle in monitored_bundles)
+        if not is_target and self.monitor_browser and f_bundle:
+            b_low = f_bundle.lower()
+            if any(tok in b_low for tok in ("chromium", "chrome", "webkit", "safari")) and f_pid != self.initial_front_pid:
+                is_target = True
+        if is_target:
             self.violations += 1
 
     def _run(self) -> None:
@@ -1176,6 +1204,7 @@ def run_arm_agy_cua_direct(
     spend: SpendTracker,
     *,
     portal_url: str | None = None,
+    focus_mon: FocusMonitor | None = None,
 ) -> dict[str, Any]:
     active_wid = window_id
     t_obs0 = time.perf_counter()
@@ -1352,6 +1381,8 @@ def run_arm_agy_cua_direct(
 
     outer_turns = 0
     actions_dispatched = 0
+    prepared_browser_target_id: str | None = None
+    prepared_browser_tab_id: str | None = None
     model_latencies_ms: list[float] = []
     observe_latencies_ms: list[float] = [obs0_ms]
     dispatch_latencies_ms: list[float] = []
@@ -1394,14 +1425,14 @@ def run_arm_agy_cua_direct(
                 dispatch_latencies_ms.append(round((time.perf_counter() - t_d) * 1000, 2))
                 act_txt = "".join(c.get("text", "") for c in (res.get("content") or []) if isinstance(c, Mapping))
             elif name == "click_coordinates":
-                res = driver.call_tool(
+                actions_dispatched += 1
+                res = checked_call(
+                    driver,
                     "click",
                     {"pid": pid, "window_id": active_wid, "x": int(args.get("x", 0)), "y": int(args.get("y", 0)), "delivery_mode": "background"},
                 )
                 dispatch_latencies_ms.append(round((time.perf_counter() - t_d) * 1000, 2))
                 act_txt = "".join(c.get("text", "") for c in (res.get("content") or []) if isinstance(c, Mapping))
-                if not res.get("isError"):
-                    actions_dispatched += 1
             elif name == "set_element_value":
                 actions_dispatched += 1
                 res = checked_call(
@@ -1440,6 +1471,8 @@ def run_arm_agy_cua_direct(
                     prep_res = driver.call_tool("browser_prepare", {"allow_launch": True, "profile": {"mode": "isolated_new"}, "url": b_url}, timeout_s=15.0)
                     psc = prep_res.get("structuredContent") or {}
                     bpid = int(psc.get("prepared_pid") or psc.get("pid") or (psc.get("endpoint_ownership") or {}).get("owner_pid") or 0)
+                    if focus_mon is not None and bpid > 0:
+                        focus_mon.register_pid(bpid)
                     bwid = psc.get("window_id")
                     if not bwid and bpid:
                         for _ in range(10):
@@ -1456,9 +1489,14 @@ def run_arm_agy_cua_direct(
                     gsc = gbs.get("structuredContent") or {}
                     btid = str(gsc.get("target_id") or gsc.get("browser_target_id") or "isolated")
                     btab = str(gsc.get("tab_id") or gsc.get("active_tab_id") or ((gsc.get("tabs") or [{}])[0]).get("tab_id") or "tab-1")
+                    prepared_browser_target_id = btid
+                    prepared_browser_tab_id = btab
                     driver.call_tool("browser_navigate", {"target_id": btid, "tab_id": btab, "url": b_url}, timeout_s=15.0)
                     gbs2 = driver.call_tool("get_browser_state", {"target_id": btid, "tab_id": btab, "include_screenshot": False, "snapshot_format": "semantic_v2"}, timeout_s=15.0)
-                    bobs = jev_mod.extract_browser_observation(gbs2, expected_target_id=btid, expected_tab_id=btab)
+                    try:
+                        bobs = jev_mod.extract_browser_observation(gbs2, expected_target_id=btid, expected_tab_id=btab)
+                    except ValueError as exc:
+                        raise ArmActionError(str(exc)) from exc
                     observe_latencies_ms.append(round((time.perf_counter() - t_d) * 1000, 2))
                     step_latencies_ms.append(round((time.perf_counter() - step_t0) * 1000, 2))
                     trace_events.append({"step": step_idx, "tool": name, "target_id": btid, "tab_id": btab})
@@ -1476,17 +1514,40 @@ def run_arm_agy_cua_direct(
                     )
                     continue
                 elif name == "browser_type":
+                    if not prepared_browser_target_id or not prepared_browser_tab_id:
+                        raise ArmActionError("browser_target_not_prepared: call browser_prepare before browser_type")
+                    req_tid = str(args.get("target_id") or prepared_browser_target_id)
+                    req_tab = str(args.get("tab_id") or prepared_browser_tab_id)
+                    if req_tid != prepared_browser_target_id or req_tab != prepared_browser_tab_id:
+                        raise ArmActionError(
+                            f"browser_target_mismatch: expected ({prepared_browser_target_id!r}, {prepared_browser_tab_id!r}), "
+                            f"got ({req_tid!r}, {req_tab!r})"
+                        )
+                    btid = prepared_browser_target_id
+                    btab = prepared_browser_tab_id
+                    ref = str(args.get("ref", "")).strip()
+                    pre_gbs = driver.call_tool("get_browser_state", {"target_id": btid, "tab_id": btab, "include_screenshot": False, "snapshot_format": "semantic_v2"})
+                    try:
+                        pre_bobs = jev_mod.extract_browser_observation(pre_gbs, expected_target_id=btid, expected_tab_id=btab)
+                    except ValueError as exc:
+                        raise ArmActionError(str(exc)) from exc
+                    if not ref or ref not in pre_bobs["valid_refs"]:
+                        raise ArmActionError(f"unknown_browser_ref: {ref!r}")
+                    if ref in pre_bobs["secure_refs"]:
+                        raise ArmActionError(f"refused_secure_browser_field: {ref!r}")
                     actions_dispatched += 1
-                    btid = str(args.get("target_id", ""))
-                    btab = str(args.get("tab_id", ""))
-                    checked_call(driver, "browser_type", {"target_id": btid, "tab_id": btab, "ref": str(args.get("ref", "")), "text": str(args.get("text", "")), "replace": True})
+                    t_d = time.perf_counter()
+                    checked_call(driver, "browser_type", {"target_id": btid, "tab_id": btab, "ref": ref, "text": str(args.get("text", "")), "replace": True})
                     dispatch_latencies_ms.append(round((time.perf_counter() - t_d) * 1000, 2))
                     t_o = time.perf_counter()
                     gbs = driver.call_tool("get_browser_state", {"target_id": btid, "tab_id": btab, "include_screenshot": False, "snapshot_format": "semantic_v2"})
-                    bobs = jev_mod.extract_browser_observation(gbs, expected_target_id=btid, expected_tab_id=btab)
+                    try:
+                        bobs = jev_mod.extract_browser_observation(gbs, expected_target_id=btid, expected_tab_id=btab)
+                    except ValueError as exc:
+                        raise ArmActionError(str(exc)) from exc
                     observe_latencies_ms.append(round((time.perf_counter() - t_o) * 1000, 2))
                     step_latencies_ms.append(round((time.perf_counter() - step_t0) * 1000, 2))
-                    trace_events.append({"step": step_idx, "tool": name, "ref": args.get("ref"), "post_snapshot": bobs["snapshot_id"]})
+                    trace_events.append({"step": step_idx, "tool": name, "ref": ref, "post_snapshot": bobs["snapshot_id"]})
                     f_responses.append(
                         types.FunctionResponse(
                             name=name,
@@ -1495,17 +1556,40 @@ def run_arm_agy_cua_direct(
                     )
                     continue
                 elif name == "browser_click":
+                    if not prepared_browser_target_id or not prepared_browser_tab_id:
+                        raise ArmActionError("browser_target_not_prepared: call browser_prepare before browser_click")
+                    req_tid = str(args.get("target_id") or prepared_browser_target_id)
+                    req_tab = str(args.get("tab_id") or prepared_browser_tab_id)
+                    if req_tid != prepared_browser_target_id or req_tab != prepared_browser_tab_id:
+                        raise ArmActionError(
+                            f"browser_target_mismatch: expected ({prepared_browser_target_id!r}, {prepared_browser_tab_id!r}), "
+                            f"got ({req_tid!r}, {req_tab!r})"
+                        )
+                    btid = prepared_browser_target_id
+                    btab = prepared_browser_tab_id
+                    ref = str(args.get("ref", "")).strip()
+                    pre_gbs = driver.call_tool("get_browser_state", {"target_id": btid, "tab_id": btab, "include_screenshot": False, "snapshot_format": "semantic_v2"})
+                    try:
+                        pre_bobs = jev_mod.extract_browser_observation(pre_gbs, expected_target_id=btid, expected_tab_id=btab)
+                    except ValueError as exc:
+                        raise ArmActionError(str(exc)) from exc
+                    if not ref or ref not in pre_bobs["valid_refs"]:
+                        raise ArmActionError(f"unknown_browser_ref: {ref!r}")
+                    if ref in pre_bobs["secure_refs"]:
+                        raise ArmActionError(f"refused_secure_browser_field: {ref!r}")
                     actions_dispatched += 1
-                    btid = str(args.get("target_id", ""))
-                    btab = str(args.get("tab_id", ""))
-                    checked_call(driver, "browser_click", {"target_id": btid, "tab_id": btab, "ref": str(args.get("ref", "")), "delivery_mode": "background", "input_route": "dom_event"})
+                    t_d = time.perf_counter()
+                    checked_call(driver, "browser_click", {"target_id": btid, "tab_id": btab, "ref": ref, "delivery_mode": "background", "input_route": "dom_event"})
                     dispatch_latencies_ms.append(round((time.perf_counter() - t_d) * 1000, 2))
                     t_o = time.perf_counter()
                     gbs = driver.call_tool("get_browser_state", {"target_id": btid, "tab_id": btab, "include_screenshot": False, "snapshot_format": "semantic_v2"})
-                    bobs = jev_mod.extract_browser_observation(gbs, expected_target_id=btid, expected_tab_id=btab)
+                    try:
+                        bobs = jev_mod.extract_browser_observation(gbs, expected_target_id=btid, expected_tab_id=btab)
+                    except ValueError as exc:
+                        raise ArmActionError(str(exc)) from exc
                     observe_latencies_ms.append(round((time.perf_counter() - t_o) * 1000, 2))
                     step_latencies_ms.append(round((time.perf_counter() - step_t0) * 1000, 2))
-                    trace_events.append({"step": step_idx, "tool": name, "ref": args.get("ref"), "post_snapshot": bobs["snapshot_id"]})
+                    trace_events.append({"step": step_idx, "tool": name, "ref": ref, "post_snapshot": bobs["snapshot_id"]})
                     f_responses.append(
                         types.FunctionResponse(
                             name=name,
@@ -1586,6 +1670,7 @@ def run_arm_agy_cua_jev(
     *,
     hillclimbed_v1: bool,
     portal_url: str | None = None,
+    focus_mon: FocusMonitor | None = None,
 ) -> dict[str, Any]:
     env = dict(os.environ)
     if not hillclimbed_v1:
@@ -1895,6 +1980,7 @@ def run_arm_agy_cua_jev(
 
         outer_turns = 0
         actions_dispatched = 0
+        uncertain_actions_dispatched = 0
         model_latencies_ms: list[float] = []
         observe_latencies_ms: list[float] = [obs0_ms]
         jev_latencies_ms: list[float] = []
@@ -1939,7 +2025,10 @@ def run_arm_agy_cua_jev(
                     if contains_secret_canary(json.dumps(sc, ensure_ascii=False)):
                         canary_leaked = True
                     for sr in sc.get("steps") or []:
-                        actions_dispatched += 1
+                        if sr.get("action_dispatched") is True or sr.get("status") in {"verified", "verification_failed", "dispatch_failed"}:
+                            actions_dispatched += 1
+                        if sr.get("uncertain_side_effect") is True:
+                            uncertain_actions_dispatched += 1
                         tm = sr.get("timings_ms") or {}
                         observe_latencies_ms.append(float(tm.get("observe_ms", 0.0)))
                         jev_latencies_ms.append(float(tm.get("provider_ms", 0.0)))
@@ -1984,8 +2073,11 @@ def run_arm_agy_cua_jev(
                     sc = res.get("structuredContent") or {}
                     if contains_secret_canary(json.dumps(sc, ensure_ascii=False)):
                         canary_leaked = True
-                    tm = sc.get("timings_ms") or {}
-                    observe_latencies_ms.append(float(tm.get("observe_ms", 0.0)))
+                    obs_ms_val = sc.get("observe_ms")
+                    if obs_ms_val is None and isinstance(sc.get("timings_ms"), Mapping):
+                        obs_ms_val = sc["timings_ms"].get("observe_ms")
+                    if isinstance(obs_ms_val, (int, float)) and not isinstance(obs_ms_val, bool):
+                        observe_latencies_ms.append(float(obs_ms_val))
                     fr_parts: list[types.FunctionResponsePart] = []
                     for c in res.get("content") or []:
                         if isinstance(c, Mapping) and c.get("type") == "image" and c.get("data"):
@@ -2032,6 +2124,9 @@ def run_arm_agy_cua_jev(
                         "url": str(raw_args.get("url") or portal_url or ""),
                     })
                     b_sc = b_res.get("structuredContent") or {}
+                    b_pid = b_sc.get("prepared_pid") or b_sc.get("pid")
+                    if focus_mon is not None and isinstance(b_pid, int) and not isinstance(b_pid, bool) and b_pid > 0:
+                        focus_mon.register_pid(b_pid)
                     trace_events.append({
                         "turn": turn_idx,
                         "tool": "jev_browser_prepare",
@@ -2067,17 +2162,28 @@ def run_arm_agy_cua_jev(
                     b_sc = b_res.get("structuredContent") or {}
                     if contains_secret_canary(json.dumps(b_sc, ensure_ascii=False)):
                         canary_leaked = True
-                    actions_dispatched += 1
+                    if b_sc.get("action_dispatched") is True:
+                        actions_dispatched += 1
+                    if b_sc.get("uncertain_side_effect") is True:
+                        uncertain_actions_dispatched += 1
                     tm = b_sc.get("timings_ms") or {}
-                    observe_latencies_ms.append(float(tm.get("observe_ms", 0.0)))
-                    jev_latencies_ms.append(float(tm.get("provider_ms", 0.0)))
-                    dispatch_latencies_ms.append(float(tm.get("dispatch_ms", 0.0)))
-                    verify_latencies_ms.append(float(tm.get("verify_ms", 0.0)))
-                    step_latencies_ms.append(float(tm.get("total_ms", 0.0)))
+                    if "observe_ms" in tm:
+                        observe_latencies_ms.append(float(tm.get("observe_ms", 0.0)))
+                    if "provider_ms" in tm:
+                        jev_latencies_ms.append(float(tm.get("provider_ms", 0.0)))
+                    if "dispatch_ms" in tm:
+                        dispatch_latencies_ms.append(float(tm.get("dispatch_ms", 0.0)))
+                    if "verify_ms" in tm:
+                        verify_latencies_ms.append(float(tm.get("verify_ms", 0.0)))
+                    if "total_ms" in tm:
+                        step_latencies_ms.append(float(tm.get("total_ms", 0.0)))
                     trace_events.append({
                         "turn": turn_idx,
                         "tool": "jev_browser_step",
                         "status": b_sc.get("status"),
+                        "verification_outcome": b_sc.get("verification_outcome"),
+                        "action_dispatched": bool(b_sc.get("action_dispatched", False)),
+                        "uncertain_side_effect": bool(b_sc.get("uncertain_side_effect", False)),
                         "selected_id": b_sc.get("selected_id"),
                         "verified": b_sc.get("verified"),
                         "post_static_texts": b_sc.get("post_static_texts"),
@@ -2088,8 +2194,11 @@ def run_arm_agy_cua_jev(
                             name=name,
                             response={
                                 "status": b_sc.get("status"),
+                                "verification_outcome": b_sc.get("verification_outcome"),
+                                "action_dispatched": bool(b_sc.get("action_dispatched", False)),
+                                "uncertain_side_effect": bool(b_sc.get("uncertain_side_effect", False)),
                                 "verified": b_sc.get("verified"),
-                                "verification_reason": b_sc.get("verification_reason"),
+                                "verification_reason": b_sc.get("verification_reason") or b_sc.get("reason"),
                                 "selected_id": b_sc.get("selected_id"),
                                 "post_static_texts": b_sc.get("post_static_texts"),
                             },
@@ -2122,17 +2231,27 @@ def run_arm_agy_cua_jev(
                         canary_leaked = True
                     if task.task_id == "T7a_cross_window" and sc.get("newly_opened_windows"):
                         time.sleep(0.5)
-                    actions_dispatched += 1
+                    if sc.get("action_dispatched") is True:
+                        actions_dispatched += 1
+                    if sc.get("uncertain_side_effect") is True:
+                        uncertain_actions_dispatched += 1
                     tm = sc.get("timings_ms") or {}
-                    observe_latencies_ms.append(float(tm.get("observe_ms", 0.0)))
-                    jev_latencies_ms.append(float(tm.get("provider_ms", 0.0)))
-                    dispatch_latencies_ms.append(float(tm.get("dispatch_ms", 0.0)))
-                    verify_latencies_ms.append(float(tm.get("verify_ms", 0.0)))
-                    step_latencies_ms.append(float(tm.get("total_ms", 0.0)))
+                    if "observe_ms" in tm:
+                        observe_latencies_ms.append(float(tm.get("observe_ms", 0.0)))
+                    if "provider_ms" in tm:
+                        jev_latencies_ms.append(float(tm.get("provider_ms", 0.0)))
+                    if "dispatch_ms" in tm:
+                        dispatch_latencies_ms.append(float(tm.get("dispatch_ms", 0.0)))
+                    if "verify_ms" in tm:
+                        verify_latencies_ms.append(float(tm.get("verify_ms", 0.0)))
+                    if "total_ms" in tm:
+                        step_latencies_ms.append(float(tm.get("total_ms", 0.0)))
                     trace_events.append({
                         "turn": turn_idx,
                         "tool": "jev_step",
                         "status": sc.get("status"),
+                        "action_dispatched": bool(sc.get("action_dispatched", False)),
+                        "uncertain_side_effect": bool(sc.get("uncertain_side_effect", False)),
                         "selected_id": sc.get("selected_id"),
                         "verified": sc.get("verified"),
                         "post_static_texts": sc.get("post_static_texts"),
@@ -2141,6 +2260,8 @@ def run_arm_agy_cua_jev(
                     })
                     step_resp: dict[str, Any] = {
                         "status": sc.get("status"),
+                        "action_dispatched": bool(sc.get("action_dispatched", False)),
+                        "uncertain_side_effect": bool(sc.get("uncertain_side_effect", False)),
                         "verified": sc.get("verified"),
                         "verification_reason": sc.get("verification_reason") or sc.get("reason"),
                         "selected_id": sc.get("selected_id"),
@@ -2167,6 +2288,7 @@ def run_arm_agy_cua_jev(
         return {
             "outer_turns": outer_turns,
             "actions_dispatched": actions_dispatched,
+            "uncertain_actions_dispatched": uncertain_actions_dispatched,
             "model_ms_total": round(sum(model_latencies_ms), 2),
             "observe_ms_total": round(sum(observe_latencies_ms), 2),
             "jev_ms_total": round(sum(jev_latencies_ms), 2),
@@ -2245,6 +2367,62 @@ def parse_model_schedule(model_arg: str, thinking_level_arg: str | None, models_
     return schedule
 
 
+def make_resume_row_key(
+    rep: int,
+    model: str,
+    thinking_level: str | None,
+    thinking_budget: int | None,
+    task_id: str,
+    arm_id: str,
+) -> tuple[int, str, str, str, str] | None:
+    """Build a 5-tuple resume identity key including effective reasoning config, or None if unknown."""
+    if isinstance(thinking_level, str) and thinking_level.strip():
+        t_key = f"level:{thinking_level.strip().lower()}"
+    elif isinstance(thinking_budget, int) and not isinstance(thinking_budget, bool) and thinking_budget >= 0:
+        t_key = f"budget:{thinking_budget}"
+    else:
+        return None
+    return (int(rep), str(model), t_key, str(task_id), str(arm_id))
+
+
+def extract_prior_row_resume_key(
+    row: Mapping[str, Any],
+    summary_meta: Mapping[str, Any] | None = None,
+) -> tuple[int, str, str, str, str] | None:
+    """Extract the resume identity key from a persisted row, rejecting legacy rows without reasoning metadata."""
+    if not isinstance(row, Mapping):
+        return None
+    if "thinking_level" not in row and "thinking_budget" not in row:
+        return None
+    t_level = row.get("thinking_level")
+    t_budget = row.get("thinking_budget")
+    if t_level is None and t_budget is None and isinstance(summary_meta, Mapping):
+        if summary_meta.get("planner_thinking_level") is None:
+            t_budget = summary_meta.get("planner_thinking_budget")
+    return make_resume_row_key(
+        int(row.get("repetition", 1)),
+        str(row.get("model", "")),
+        t_level if isinstance(t_level, str) else None,
+        t_budget if isinstance(t_budget, int) and not isinstance(t_budget, bool) else None,
+        str(row.get("task_id", "")),
+        str(row.get("arm", "")),
+    )
+
+
+def is_resumable_completed_row(row: Mapping[str, Any]) -> bool:
+    """Return True when a prior benchmark row represents a completed attempt (pass or completed failure)
+    for ANY arm, so failed attempts are never silently dropped or replaced on resume."""
+    if not isinstance(row, Mapping):
+        return False
+    if row.get("passed") is True:
+        return True
+    if row.get("arm_failed") is True:
+        return True
+    if isinstance(row.get("passed"), bool) and not row.get("error"):
+        return True
+    return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark AGY-CUA vs Upstream Google Computer Use API")
     parser.add_argument("--model", default="gemini-3.8-flash", help="Outer Gemini model (e.g. gemini-3.8-flash or gemini-4-argon)")
@@ -2275,7 +2453,7 @@ def main() -> int:
     parser.add_argument(
         "--resume-from",
         default=None,
-        help="Optional path to a prior summary.json to resume passed (repetition, model, task_id, arm) rows while preserving cumulative spend under --max-budget-usd",
+        help="Optional path to a prior summary.json to resume completed (repetition, model, thinking, task_id, arm) rows while preserving cumulative spend under --max-budget-usd",
     )
     args = parser.parse_args()
     global PLANNER_THINKING_LEVEL, PRICE_PER_1M_INPUT_USD, PRICE_PER_1M_OUTPUT_USD, _ACTIVE_PORTAL_STATE
@@ -2296,7 +2474,7 @@ def main() -> int:
     client = make_genai_client()
     spend = SpendTracker(max_budget_usd=args.max_budget_usd)
 
-    passed_rows_by_key: dict[tuple[int, str, str, str], dict[str, Any]] = {}
+    passed_rows_by_key: dict[tuple[int, str, str, str, str], dict[str, Any]] = {}
     resumed_from_path: str | None = None
     if args.resume_from:
         resume_paths = [Path(p.strip()).expanduser().resolve() for p in args.resume_from.split(",") if p.strip()]
@@ -2322,17 +2500,10 @@ def main() -> int:
             for r in prior_summary.get("results", []):
                 if not isinstance(r, Mapping):
                     continue
-                is_completed_cua = r.get("arm") == "google-cua-bg" and (
-                    not r.get("error") or r.get("arm_failed") is True
-                )
-                if r.get("passed") is True or is_completed_cua:
-                    key = (
-                        int(r.get("repetition", 1)),
-                        str(r.get("model", "")),
-                        str(r.get("task_id", "")),
-                        str(r.get("arm", "")),
-                    )
-                    passed_rows_by_key[key] = dict(r)
+                if is_resumable_completed_row(r):
+                    key = extract_prior_row_resume_key(r, prior_summary)
+                    if key is not None:
+                        passed_rows_by_key[key] = dict(r)
         spend.screenshots_sent = sum(int(r.get("screenshots_sent", 0)) for r in passed_rows_by_key.values())
 
     all_tasks = build_tasks()
@@ -2386,7 +2557,7 @@ def main() -> int:
     sched_desc = ", ".join(f"{m}({tl or f'budget={PLANNER_THINKING_BUDGET}'})" for m, tl in base_schedule)
     print(f"=== AGY-CUA Benchmark Suite ({stamp}) | Models: {sched_desc} | Reps: {repetitions} | Budget Cap: ${args.max_budget_usd:.2f} ===", flush=True)
     if resumed_from_path:
-        print(f"=== Resuming from {resumed_from_path}: {len(passed_rows_by_key)} passed rows carried over | Prior spend: ${spend.total_usd:.4f} ===", flush=True)
+        print(f"=== Resuming from {resumed_from_path}: {len(passed_rows_by_key)} completed rows carried over | Prior spend: ${spend.total_usd:.4f} ===", flush=True)
 
     try:
         for rep in range(1, repetitions + 1):
@@ -2394,13 +2565,21 @@ def main() -> int:
             for active_model, active_thinking in rep_schedule:
                 PLANNER_THINKING_LEVEL = active_thinking
                 PRICE_PER_1M_INPUT_USD, PRICE_PER_1M_OUTPUT_USD = MODEL_PRICING_USD_PER_1M[active_model]
+                effective_budget = None if active_thinking else PLANNER_THINKING_BUDGET
                 if repetitions > 1 or len(base_schedule) > 1:
                     print(f"\n================ Rep {rep}/{repetitions} | Model: {active_model} (thinking={active_thinking or PLANNER_THINKING_BUDGET}) ================", flush=True)
                 for task in tasks:
                     print(f"\n--- Task [{task.task_id}] {task.title} (rep={rep}, model={active_model}) ---", flush=True)
                     for arm_id in arms:
-                        resume_key = (rep, active_model, task.task_id, arm_id)
-                        if resume_key in passed_rows_by_key:
+                        resume_key = make_resume_row_key(
+                            rep,
+                            active_model,
+                            active_thinking,
+                            effective_budget,
+                            task.task_id,
+                            arm_id,
+                        )
+                        if resume_key is not None and resume_key in passed_rows_by_key:
                             prior_row = passed_rows_by_key[resume_key]
                             results.append(prior_row)
                             v_str = "PASS" if prior_row.get("passed") else "FAIL"
@@ -2439,7 +2618,7 @@ def main() -> int:
                             if task.setup_fn is not None:
                                 task.setup_fn(harness_driver, pid, wid)
                             t_start = time.perf_counter()
-                            with FocusMonitor(pid, target_bundle) as focus_mon:
+                            with FocusMonitor(pid, target_bundle, monitor_browser=bool(task.use_loopback_portal)) as focus_mon:
                                 if arm_id == "google-cua-bg":
                                     arm_metrics = run_arm_google_cua_bg(
                                         client, active_model, task, harness_driver, pid, wid, spend,
@@ -2450,16 +2629,19 @@ def main() -> int:
                                     arm_metrics = run_arm_agy_cua_direct(
                                         client, active_model, task, harness_driver, pid, wid, spend,
                                         portal_url=portal.url if portal else None,
+                                        focus_mon=focus_mon,
                                     )
                                 elif arm_id == "agy-cua-jev-v0":
                                     arm_metrics = run_arm_agy_cua_jev(
                                         client, active_model, task, pid, wid, spend, hillclimbed_v1=False,
                                         portal_url=portal.url if portal else None,
+                                        focus_mon=focus_mon,
                                     )
                                 elif arm_id == "agy-cua-jev-v1":
                                     arm_metrics = run_arm_agy_cua_jev(
                                         client, active_model, task, pid, wid, spend, hillclimbed_v1=True,
                                         portal_url=portal.url if portal else None,
+                                        focus_mon=focus_mon,
                                     )
                                 else:
                                     raise ValueError(f"Unknown arm: {arm_id}")
@@ -2492,11 +2674,13 @@ def main() -> int:
                                 "arm": arm_id,
                                 "model": active_model,
                                 "thinking_level": active_thinking,
+                                "thinking_budget": effective_budget,
                                 "passed": passed,
                                 "verify_summary": verify_summary,
                                 "wall_s": wall_s,
                                 "outer_turns": arm_metrics["outer_turns"],
                                 "actions_dispatched": arm_metrics["actions_dispatched"],
+                                "uncertain_actions_dispatched": arm_metrics.get("uncertain_actions_dispatched", 0),
                                 "step_median_ms": arm_metrics["step_median_ms"],
                                 "model_ms_total": arm_metrics["model_ms_total"],
                                 "observe_ms_total": arm_metrics["observe_ms_total"],
@@ -2536,6 +2720,7 @@ def main() -> int:
                                 "arm": arm_id,
                                 "model": active_model,
                                 "thinking_level": active_thinking,
+                                "thinking_budget": effective_budget,
                                 "passed": False,
                                 "verify_summary": f"aborted: {err_text}",
                                 "error": err_text,

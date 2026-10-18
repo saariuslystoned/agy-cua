@@ -4325,6 +4325,9 @@ class JevMcpServer:
         self._closed = False
         self._owned_targets: set[tuple[int, int]] = set()
         self._last_observations: dict[tuple[int, int], dict[str, Any]] = {}
+        self._visual_snapshots: dict[tuple[int, int], str] = {}
+        self._visual_snapshot_targets: dict[str, tuple[int, int]] = {}
+        self._snapshot_targets: dict[str, tuple[int, int]] = {}
 
     def _get_driver(self) -> DriverClient:
         if self._driver_client is not None:
@@ -4793,6 +4796,7 @@ class JevMcpServer:
                         pre_obs["window_bounds"] = cur_wb
                 if not pre_obs.get("query_incomplete"):
                     self._last_observations[(pid, window_id)] = pre_obs
+                self._snapshot_targets[pre_obs["snapshot_id"]] = (pid, window_id)
             except Exception as exc:
                 release_if_unowned()
                 obs_ms = round((time.perf_counter() - obs_started) * 1000, 2)
@@ -4805,6 +4809,7 @@ class JevMcpServer:
                     "window_id": window_id,
                     "session_id": self.session_id,
                     "verified": False,
+                    "action_dispatched": False,
                     "uncertain_side_effect": False,
                     "timings_ms": {
                         "observe_ms": obs_ms,
@@ -4842,6 +4847,7 @@ class JevMcpServer:
                 "pre_snapshot_id": pre_obs["snapshot_id"],
                 "pre_static_texts": pre_obs["static_texts"],
                 "verified": False,
+                "action_dispatched": False,
                 "uncertain_side_effect": False,
                 "timings_ms": {
                     "observe_ms": obs_ms,
@@ -4856,16 +4862,16 @@ class JevMcpServer:
             return _format_tool_result(payload, is_error=True)
 
         if source_snap is not None:
-            cached_base = prev_cached_obs if not (_chained_obs is not None and not needs_pixel_anchor) else self._last_observations.get((pid, window_id))
-            if cached_base is not None and cached_base.get("snapshot_id") not in {source_snap, pre_obs["snapshot_id"]}:
+            known_target = self._visual_snapshot_targets.get(source_snap) or self._snapshot_targets.get(source_snap)
+            if known_target is not None and known_target != (pid, window_id):
                 release_if_unowned()
                 payload = {
                     "schema": "agy_cua.jev_step_v1",
-                    "status": "stale_snapshot",
+                    "status": "out_of_scope_target",
                     "verification_outcome": "not_executed",
                     "reason": (
-                        f"stale_snapshot_id: source_snapshot_id={source_snap!r} does not match "
-                        f"last observed snapshot {cached_base.get('snapshot_id')!r}"
+                        f"out_of_scope_target: source_snapshot_id={source_snap!r} belongs to "
+                        f"(pid={known_target[0]}, window_id={known_target[1]}), expected (pid={pid}, window_id={window_id})"
                     ),
                     "pid": pid,
                     "window_id": window_id,
@@ -4873,6 +4879,42 @@ class JevMcpServer:
                     "pre_snapshot_id": pre_obs["snapshot_id"],
                     "pre_static_texts": pre_obs["static_texts"],
                     "verified": False,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": False,
+                    "timings_ms": {
+                        "observe_ms": obs_ms,
+                        "provider_ms": 0.0,
+                        "dispatch_ms": 0.0,
+                        "verify_ms": 0.0,
+                        "total_ms": round((time.perf_counter() - step_started) * 1000, 2),
+                    },
+                    "accounting": self.accounting.to_dict(),
+                }
+                self._record_trace(payload)
+                return _format_tool_result(payload, is_error=True)
+            latest_visual_snap = self._visual_snapshots.get((pid, window_id))
+            if source_snap not in self._visual_snapshot_targets or latest_visual_snap != source_snap:
+                release_if_unowned()
+                reason_code = (
+                    f"unknown_source_snapshot_id: source_snapshot_id={source_snap!r} was not observed via jev_observe(include_screenshot=true)"
+                    if source_snap not in self._visual_snapshot_targets
+                    else (
+                        f"stale_snapshot_id: source_snapshot_id={source_snap!r} does not match "
+                        f"last observed visual snapshot {latest_visual_snap!r}"
+                    )
+                )
+                payload = {
+                    "schema": "agy_cua.jev_step_v1",
+                    "status": "stale_snapshot",
+                    "verification_outcome": "not_executed",
+                    "reason": reason_code,
+                    "pid": pid,
+                    "window_id": window_id,
+                    "session_id": self.session_id,
+                    "pre_snapshot_id": pre_obs["snapshot_id"],
+                    "pre_static_texts": pre_obs["static_texts"],
+                    "verified": False,
+                    "action_dispatched": False,
                     "uncertain_side_effect": False,
                     "timings_ms": {
                         "observe_ms": obs_ms,
@@ -5201,6 +5243,7 @@ class JevMcpServer:
             )
 
         dispatch_started = time.perf_counter()
+        self._visual_snapshots.pop((pid, window_id), None)
         try:
             dispatch_res = driver.call_tool(
                 authorized["tool"],
@@ -5308,6 +5351,7 @@ class JevMcpServer:
                 )
             if not post_obs.get("query_incomplete"):
                 self._last_observations[(pid, window_id)] = post_obs
+            self._snapshot_targets[post_obs["snapshot_id"]] = (pid, window_id)
             state_changed, post_ok, verify_reason = check_postcondition(
                 expected_post,
                 pre_obs,
@@ -5336,6 +5380,7 @@ class JevMcpServer:
                 "confidence": decision.get("confidence"),
                 "probabilities": decision.get("probabilities"),
                 "verified": False,
+                "action_dispatched": True,
                 "uncertain_side_effect": True,
                 "timings_ms": {
                     "observe_ms": obs_ms,
@@ -5409,11 +5454,14 @@ class JevMcpServer:
             ),
         }
 
+        point_fallback_used = bool(target_el_idx is None and ("x" in driver_args or "y" in driver_args))
         payload = {
             "schema": "agy_cua.jev_step_v1",
             "status": step_status,
             "verification_outcome": verification_outcome,
             "verified": post_ok,
+            "action_dispatched": True,
+            "point_fallback_used": point_fallback_used,
             "uncertain_side_effect": False,
             "verification_reason": verify_reason,
             "state_changed": state_changed,
@@ -5421,6 +5469,7 @@ class JevMcpServer:
             "window_id": window_id,
             "session_id": self.session_id,
             "mode": mode,
+            "source_snapshot_id": source_snap,
             "pre_snapshot_id": pre_obs["snapshot_id"],
             "post_snapshot_id": post_obs["snapshot_id"],
             "pre_static_texts": pre_obs["static_texts"],
@@ -5532,6 +5581,7 @@ class JevMcpServer:
                 )
             if not obs.get("query_incomplete"):
                 self._last_observations[(pid, window_id)] = obs
+            self._snapshot_targets[obs["snapshot_id"]] = (pid, window_id)
             discovered_windows: list[dict[str, Any]] = []
             if bool(args.get("discover_windows", True)):
                 discovered_windows = _discover_same_pid_windows(driver, pid, window_id)
@@ -5544,9 +5594,39 @@ class JevMcpServer:
                     "pid": pid,
                     "window_id": window_id,
                     "session_id": self.session_id,
+                    "observe_ms": round((time.perf_counter() - obs_started) * 1000, 2),
                 },
                 is_error=True,
             )
+
+        secure_redacted_count = len(obs.get("secure_element_ids") or ())
+        if want_screenshot and secure_redacted_count > 0:
+            refused_payload = {
+                "schema": "agy_cua.jev_observe_v1",
+                "status": "screenshot_refused_secure_window",
+                "reason": (
+                    "screenshot_refused_secure_window: cannot return window screenshot when secure fields are present"
+                ),
+                "pid": pid,
+                "window_id": window_id,
+                "session_id": self.session_id,
+                "snapshot_id": obs["snapshot_id"],
+                "secure_fields_redacted_count": secure_redacted_count,
+                "observe_ms": round((time.perf_counter() - obs_started) * 1000, 2),
+            }
+            self._record_trace(refused_payload)
+            return _format_tool_result(refused_payload, is_error=True)
+
+        image_blocks = [
+            dict(item)
+            for item in (raw_obs.get("content") or [])
+            if isinstance(item, Mapping) and item.get("type") == "image" and item.get("data")
+        ]
+        if want_screenshot and image_blocks:
+            self._visual_snapshots[(pid, window_id)] = obs["snapshot_id"]
+            self._visual_snapshot_targets[obs["snapshot_id"]] = (pid, window_id)
+        elif not want_screenshot and not obs.get("query_incomplete"):
+            self._visual_snapshots.pop((pid, window_id), None)
 
         payload = {
             "schema": "agy_cua.jev_observe_v1",
@@ -5564,6 +5644,7 @@ class JevMcpServer:
             "omitted_elements_count": obs["omitted_elements_count"],
             "omitted_candidates_count": obs["omitted_candidates_count"],
             "observation_truncated": obs["observation_truncated"],
+            "secure_fields_redacted_count": secure_redacted_count,
             "query": obs.get("query"),
             "matched_elements_count": obs.get("matched_elements_count"),
             "query_status": obs.get("query_status"),
@@ -5577,10 +5658,8 @@ class JevMcpServer:
             "observe_ms": round((time.perf_counter() - obs_started) * 1000, 2),
         }
         res_out = _format_tool_result(payload, is_error=False)
-        if want_screenshot:
-            for item in raw_obs.get("content") or []:
-                if isinstance(item, Mapping) and item.get("type") == "image" and item.get("data"):
-                    res_out.setdefault("content", []).append(dict(item))
+        if want_screenshot and image_blocks:
+            res_out.setdefault("content", []).extend(image_blocks)
         return res_out
 
     def handle_browser_prepare(self, args: Mapping[str, Any]) -> dict[str, Any]:
@@ -5696,7 +5775,7 @@ class JevMcpServer:
         step_started = time.perf_counter()
         if not isinstance(args, Mapping):
             return _format_tool_result(
-                {"schema": "agy_cua.jev_browser_step_v1", "status": "refused", "reason": "invalid_arguments"},
+                {"schema": "agy_cua.jev_browser_step_v1", "status": "refused", "reason": "invalid_arguments", "action_dispatched": False},
                 is_error=True,
             )
         if self.accounting.halted:
@@ -5706,6 +5785,8 @@ class JevMcpServer:
                     "status": "halted",
                     "reason": self.accounting.halt_reason or "session_halted",
                     "session_id": self.session_id,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": False,
                     "accounting": self.accounting.to_dict(),
                 },
                 is_error=True,
@@ -5714,14 +5795,14 @@ class JevMcpServer:
             _reject_binary_or_image_payload(args, "jev_browser_step")
         except ValueError as exc:
             return _format_tool_result(
-                {"schema": "agy_cua.jev_browser_step_v1", "status": "refused", "reason": str(exc)},
+                {"schema": "agy_cua.jev_browser_step_v1", "status": "refused", "reason": str(exc), "action_dispatched": False},
                 is_error=True,
             )
 
         goal = args.get("goal")
         if not isinstance(goal, str) or not goal.strip():
             return _format_tool_result(
-                {"schema": "agy_cua.jev_browser_step_v1", "status": "refused", "reason": "invalid_goal"},
+                {"schema": "agy_cua.jev_browser_step_v1", "status": "refused", "reason": "invalid_goal", "action_dispatched": False},
                 is_error=True,
             )
         target_id = str(args.get("target_id") or "isolated").strip()
@@ -5761,6 +5842,8 @@ class JevMcpServer:
                     "tab_id": tab_id,
                     "session_id": self.session_id,
                     "verified": False,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": False,
                 },
                 is_error=True,
             )
@@ -5778,6 +5861,8 @@ class JevMcpServer:
                     "pre_snapshot_id": pre_obs["snapshot_id"],
                     "session_id": self.session_id,
                     "verified": False,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": False,
                 },
                 is_error=True,
             )
@@ -5800,6 +5885,8 @@ class JevMcpServer:
                     "pre_snapshot_id": pre_obs["snapshot_id"],
                     "session_id": self.session_id,
                     "verified": False,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": False,
                 },
                 is_error=True,
             )
@@ -5814,6 +5901,8 @@ class JevMcpServer:
                         "target_id": target_id,
                         "tab_id": tab_id,
                         "verified": False,
+                        "action_dispatched": False,
+                        "uncertain_side_effect": False,
                     },
                     is_error=True,
                 )
@@ -5868,6 +5957,8 @@ class JevMcpServer:
                     "pre_snapshot_id": pre_obs["snapshot_id"],
                     "selected_id": decision.get("selected_id"),
                     "verified": False,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": False,
                     "accounting": self.accounting.to_dict(),
                 },
                 is_error=(decision["kind"] == "error"),
@@ -5893,6 +5984,8 @@ class JevMcpServer:
                     "tab_id": tab_id,
                     "pre_snapshot_id": pre_obs["snapshot_id"],
                     "verified": False,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": False,
                 },
                 is_error=True,
             )
@@ -5922,6 +6015,7 @@ class JevMcpServer:
                     "tab_id": tab_id,
                     "pre_snapshot_id": pre_obs["snapshot_id"],
                     "verified": False,
+                    "action_dispatched": False,
                     "uncertain_side_effect": True,
                     "accounting": self.accounting.to_dict(),
                 },
@@ -5969,6 +6063,7 @@ class JevMcpServer:
                     "tab_id": tab_id,
                     "pre_snapshot_id": pre_obs["snapshot_id"],
                     "verified": False,
+                    "action_dispatched": True,
                     "uncertain_side_effect": True,
                     "accounting": self.accounting.to_dict(),
                 },
@@ -5998,6 +6093,7 @@ class JevMcpServer:
             "status": step_status,
             "verification_outcome": verification_outcome,
             "verified": post_ok,
+            "action_dispatched": True,
             "uncertain_side_effect": False,
             "verification_reason": verify_reason,
             "state_changed": state_changed,
