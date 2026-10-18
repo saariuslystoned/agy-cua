@@ -242,7 +242,7 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=False)
     try:
         run(out, args.model, args.repetition, args.plugin_ref)
-    except Exception as error:
+    except (Exception, SystemExit) as error:
         if out.is_dir():
             # No exception message: third-party errors can contain private paths.
             write_json(out / "blocker.json", {"phase": "runner", "exception_type": type(error).__name__})

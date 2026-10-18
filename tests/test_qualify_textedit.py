@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -13,6 +14,18 @@ spec.loader.exec_module(pilot)
 
 
 class FileOracleTest(unittest.TestCase):
+    def test_driver_system_exit_records_blocker_without_private_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            out = root / "runs" / "failed"
+            with patch.object(pilot, "ROOT", root), patch.object(pilot, "run", side_effect=SystemExit("PRIVATE_SENTINEL")):
+                with self.assertRaises(SystemExit):
+                    pilot.main(["--model", pilot.MODELS[0], "--repetition", "1", "--out", str(out)])
+            self.assertEqual(json.loads((out / "blocker.json").read_text())["exception_type"], "SystemExit")
+            self.assertIn("blocked", (out / "STATE.md").read_text())
+            self.assertTrue((out / "PROOF.md").is_file())
+            self.assertNotIn("PRIVATE_SENTINEL", "".join(p.read_text() for p in out.iterdir()))
+
     def test_inspection_excludes_preexisting_document_content(self):
         class Session:
             inspected = []
