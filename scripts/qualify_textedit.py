@@ -47,7 +47,16 @@ def event(out, phase):
         f.write(json.dumps({"time": time.time(), "phase": phase}) + "\n")
 
 
-def inspect(out, pid, prefix, *, allowed_ids=(), allowed_titles=()):
+def new_seed_window_id(prior_windows, current_windows, title):
+    prior_ids = {w["window_id"] for w in prior_windows}
+    matches = [w["window_id"] for w in current_windows
+               if w.get("title") == title and w["window_id"] not in prior_ids]
+    if len(matches) != 1:
+        raise RuntimeError("New task seed window is missing or ambiguous")
+    return matches[0]
+
+
+def inspect(out, pid, prefix, *, allowed_ids=()):
     """Read pixels/content only for task-owned windows; list metadata to discover."""
     session = raw_mcp.Session()
     try:
@@ -55,7 +64,7 @@ def inspect(out, pid, prefix, *, allowed_ids=(), allowed_titles=()):
         write_json(out / f"{prefix}-windows.private.json", result)
         windows = (result.get("structuredContent") or {}).get("windows", [])
         for i, window in enumerate(windows):
-            if window.get("window_id") not in allowed_ids and window.get("title") not in allowed_titles:
+            if window.get("window_id") not in allowed_ids:
                 continue
             state = session.call("get_window_state", {
                 "pid": pid, "window_id": window["window_id"],
@@ -72,7 +81,6 @@ def inspect(out, pid, prefix, *, allowed_ids=(), allowed_titles=()):
 
 
 def run(out, model, repetition, plugin_ref="HEAD"):
-    out.mkdir(parents=True, exist_ok=False)
     event(out, "prepare")
     installed = Path.home() / ".gemini/config/plugins/agy-cua"
     installed_hashes = {}
@@ -92,14 +100,18 @@ def run(out, model, repetition, plugin_ref="HEAD"):
     write_json(out / "expected.json", {"seed": SEED, "note": NOTE, "target": str(target)})
     session = raw_mcp.Session()
     try:
+        initial = session.call("launch_app", {"bundle_id": "com.apple.TextEdit"})
+        prior_windows = (initial.get("structuredContent") or {}).get("windows", [])
         launch = session.call("launch_app", {"bundle_id": "com.apple.TextEdit", "urls": [str(seed)]})
+        pid = (launch.get("structuredContent") or {})["pid"]
+        current = session.call("list_windows", {"pid": pid})
+        seed_id = new_seed_window_id(prior_windows,
+            (current.get("structuredContent") or {}).get("windows", []), seed.name)
     finally:
         session.close()
     write_json(out / "launch.private.json", launch)
     pid = (launch.get("structuredContent") or {})["pid"]
-    before = inspect(out, pid, "before", allowed_titles={seed.name})
-    if not any(w.get("title") == seed.name for w in before):
-        raise RuntimeError("Task-owned seed window not found; no model launched")
+    before = inspect(out, pid, "before", allowed_ids={seed_id})
 
     workspace = out / "workspace"
     (workspace / ".agents/skills/cua-computer-use").mkdir(parents=True)
@@ -190,7 +202,7 @@ transitions and verification. Do not close windows or quit TextEdit. No external
     steps = [e for e in traces if e.get("schema") == "agy_cua.jev_step_v1"]
     prior_ids = {w["window_id"] for w in before}
     task_ids = {e.get("window_id") for e in steps if e.get("pid") == pid} - prior_ids
-    inspect(out, pid, "after", allowed_ids=task_ids, allowed_titles={seed.name, target.name})
+    inspect(out, pid, "after", allowed_ids=task_ids | {seed_id})
     observations = [e for e in metadata.get("jev_entries", []) if e.get("schema") == "agy_cua.jev_observe_v1"]
     result = {"model": model, "effort": effort, "repetition": repetition,
               "surface": "Antigravity CLI", "duration_s": round(duration, 3),
@@ -215,16 +227,19 @@ transitions and verification. Do not close windows or quit TextEdit. No external
     print(json.dumps({k: result[k] for k in ("model", "duration_s", "file", "seed_unchanged", "exit_code", "final_status", "verdict")}))
 
 
-if __name__ == "__main__":
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", choices=MODELS, required=True)
     parser.add_argument("--repetition", type=int, choices=(1, 2), required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--plugin-ref", default="HEAD", help="Committed revision the installed plugin must match")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     out = args.out.resolve()
     if not out.is_relative_to(ROOT / "runs"):
         parser.error("output must be a new directory under this checkout's ignored runs/")
+    # Establish exclusive ownership before any exception handler can write here.
+    # An existing attempt must remain byte-for-byte intact, including status files.
+    out.mkdir(parents=True, exist_ok=False)
     try:
         run(out, args.model, args.repetition, args.plugin_ref)
     except Exception as error:
@@ -234,3 +249,7 @@ if __name__ == "__main__":
             event(out, "blocked")
             (out / "PROOF.md").write_text("Runner stopped; no qualification PASS. See blocker.json.\n")
         raise
+
+
+if __name__ == "__main__":
+    main()
