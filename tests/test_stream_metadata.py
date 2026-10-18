@@ -11,6 +11,27 @@ spec.loader.exec_module(metadata)
 
 
 class StreamMetadataTest(unittest.TestCase):
+    def test_retains_real_recovery_discriminators_without_window_content(self):
+        payload = {"schema": "agy_cua.jev_observe_v1", "status": "ok",
+                   "query_status": "truncated_before_match", "query_incomplete": True,
+                   "search_complete": False, "diff_fallback_used": True,
+                   "is_diff": False, "observe_ms": 17.2,
+                   "discovered_windows": [{"window_id": 123, "title": "PRIVATE_SENTINEL"}],
+                   "window_title": "PRIVATE_SENTINEL", "elements": ["PRIVATE_SENTINEL"],
+                   "pid": 123, "image": "PRIVATE_SENTINEL"}
+        result = metadata.summarize([json.dumps({"step_update": {
+            "step_type": "tool", "step_index": 1, "state": "DONE",
+            "tool_info": {"parameters": {"ServerName": "agy-cua-jev", "ToolName": "jev_observe"},
+                          "output": json.dumps(payload)}}})])
+        entry = result["jev_entries"][0]
+        self.assertTrue(entry["query_incomplete"])
+        self.assertFalse(entry["search_complete"])
+        self.assertTrue(entry["diff_fallback_used"])
+        self.assertEqual(entry["query_status"], "truncated_before_match")
+        self.assertEqual(entry["discovered_windows_count"], 1)
+        self.assertNotIn("PRIVATE_SENTINEL", json.dumps(result))
+        self.assertNotIn("pid", entry)
+
     def test_deduplicates_updates_without_retaining_arguments_or_outputs(self):
         events = [
             {

@@ -1,0 +1,332 @@
+{
+  "schema": "agy_cua.textedit_qualification_v1",
+  "date": "2026-10-18",
+  "verdict": "FAIL",
+  "surface": "Antigravity CLI",
+  "preflight": {
+    "base": "7f1153f40bf918f58acffdf92ac550fac22c1d2a",
+    "cli_version": "1.4.2",
+    "driver_version": "cua-driver 0.35.4",
+    "installed_sha256": {
+      "bin/agy-cua-mcp": "4ce4b64f37bd683c1dc9875104120fc62b552f703eb31e94c88d4539b0db5135",
+      "bin/agy-cua-jev-mcp": "316c7ba479ad4b58ec98a6a917830e1352856f9730049b02be728c4218139956",
+      "skills/cua-computer-use/SKILL.md": "937ba80bce0b240b61cc664be2949762b3cee04ed0d16346c652852b78ed2c2a"
+    },
+    "requested_models": [
+      "gemini-4-argon-low",
+      "gemini-3.8-flash-high"
+    ],
+    "api_budget_usd": 1,
+    "max_attempts": 5,
+    "max_jev_calls_per_attempt": 4,
+    "jev_price_input_per_million_usd": 0.042,
+    "jev_price_source": "https://docs.typesafe.ai/models",
+    "jev_default_context_tokens": 64000,
+    "conservative_api_budget_upper_bound_usd": 0.05376,
+    "actual_api_billing_receipt": null,
+    "driver_restarted": false,
+    "plugin_reinstalled": false
+  },
+  "recipe2_goal_successes": 0,
+  "recipe2_attempts": 4,
+  "diagnostic_attempts": 1,
+  "rows": [
+    {
+      "comparison": false,
+      "configured_model": "gemini-4-argon-low",
+      "configured_effort": "low",
+      "repetition": 1,
+      "recipe": 1,
+      "normalized_prompt_sha256": "3679878b403ce5f5b99780c99a6fc5d58eab757c18626ca5aa106de3623decd3",
+      "goal_success": false,
+      "acceptance": "FAIL",
+      "cli_wall_s": 63.365,
+      "total_wall_s": 69.779,
+      "setup_wall_s": 5.698,
+      "readback_wall_s": 0.716,
+      "token_usage": {
+        "input_tokens": 40135,
+        "output_tokens": 1928,
+        "thinking_tokens": 0,
+        "cache_read_tokens": 157047,
+        "total_tokens": 42063
+      },
+      "provider_model_echo": null,
+      "planner_inference_ms": null,
+      "images_transmitted": null,
+      "focus_samples": 91,
+      "target_frontmost_samples": 0,
+      "focus_probe_errors": 0,
+      "pointer_positions_changed": true,
+      "pointer_change_attribution": null,
+      "direct_mutation_tool_calls": 1,
+      "guarded_step_attempts": 1,
+      "guarded_verified_steps": 0,
+      "guarded_result": "dispatch_failed",
+      "uncertain_side_effects": 1,
+      "halted": true,
+      "provider_selection": "deterministic-controller",
+      "jev_calls": 0,
+      "jev_usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "controller_timings_ms": {
+        "observe_ms": 85.49,
+        "provider_ms": 0.0,
+        "dispatch_ms": 442.19,
+        "verify_ms": 0.0,
+        "total_ms": 528.81
+      },
+      "actual_api_cost_usd": null,
+      "save_cancel_recovery_verified": false,
+      "output_exists": false,
+      "seed_unchanged": true,
+      "failure": "text_area_AXShowMenu_advertised_as_click",
+      "image_evidence": []
+    },
+    {
+      "comparison": true,
+      "configured_model": "gemini-3.8-flash-high",
+      "configured_effort": "high",
+      "repetition": 1,
+      "recipe": 2,
+      "normalized_prompt_sha256": "edbf22c566e1fba52b32b71f33bcde286e4964390d457e1591bfeb83e2d9ef62",
+      "goal_success": false,
+      "acceptance": "FAIL",
+      "cli_wall_s": 117.164,
+      "total_wall_s": 128.056,
+      "setup_wall_s": 8.828,
+      "readback_wall_s": 2.057,
+      "token_usage": {
+        "input_tokens": 140187,
+        "output_tokens": 15954,
+        "thinking_tokens": 12442,
+        "cache_read_tokens": 1067969,
+        "total_tokens": 156141
+      },
+      "provider_model_echo": null,
+      "planner_inference_ms": null,
+      "images_transmitted": null,
+      "focus_samples": 167,
+      "target_frontmost_samples": 0,
+      "focus_probe_errors": 0,
+      "pointer_positions_changed": true,
+      "pointer_change_attribution": null,
+      "direct_mutation_tool_calls": 1,
+      "guarded_step_attempts": 1,
+      "guarded_verified_steps": 0,
+      "guarded_result": "dispatch_failed",
+      "uncertain_side_effects": 1,
+      "halted": true,
+      "provider_selection": "deterministic-controller",
+      "jev_calls": 0,
+      "jev_usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "controller_timings_ms": {
+        "observe_ms": 175.12,
+        "provider_ms": 0.0,
+        "dispatch_ms": 66.11,
+        "verify_ms": 0.0,
+        "total_ms": 278.79
+      },
+      "actual_api_cost_usd": null,
+      "save_cancel_recovery_verified": false,
+      "output_exists": false,
+      "seed_unchanged": true,
+      "failure": "menu_format_context_mismatch",
+      "image_evidence": [
+        {
+          "role": "new_document_rich_text_empty",
+          "sha256": "4e30d2e97bbd7c8750c69d4dae0ad858e3b3cdbb8ca051a4f67e9840583cf2d7"
+        }
+      ]
+    },
+    {
+      "comparison": true,
+      "configured_model": "gemini-4-argon-low",
+      "configured_effort": "low",
+      "repetition": 1,
+      "recipe": 2,
+      "normalized_prompt_sha256": "edbf22c566e1fba52b32b71f33bcde286e4964390d457e1591bfeb83e2d9ef62",
+      "goal_success": false,
+      "acceptance": "FAIL",
+      "cli_wall_s": 76.588,
+      "total_wall_s": 85.471,
+      "setup_wall_s": 6.453,
+      "readback_wall_s": 2.427,
+      "token_usage": {
+        "input_tokens": 53087,
+        "output_tokens": 2486,
+        "thinking_tokens": 0,
+        "cache_read_tokens": 268181,
+        "total_tokens": 55573
+      },
+      "provider_model_echo": null,
+      "planner_inference_ms": null,
+      "images_transmitted": null,
+      "focus_samples": 118,
+      "target_frontmost_samples": 0,
+      "focus_probe_errors": 0,
+      "pointer_positions_changed": true,
+      "pointer_change_attribution": null,
+      "direct_mutation_tool_calls": 1,
+      "guarded_step_attempts": 1,
+      "guarded_verified_steps": 0,
+      "guarded_result": "dispatch_failed",
+      "uncertain_side_effects": 1,
+      "halted": true,
+      "provider_selection": "deterministic-controller",
+      "jev_calls": 0,
+      "jev_usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "controller_timings_ms": {
+        "observe_ms": 156.83,
+        "provider_ms": 0.0,
+        "dispatch_ms": 36.08,
+        "verify_ms": 0.0,
+        "total_ms": 195.13
+      },
+      "actual_api_cost_usd": null,
+      "save_cancel_recovery_verified": false,
+      "output_exists": false,
+      "seed_unchanged": true,
+      "failure": "menu_format_context_mismatch",
+      "image_evidence": [
+        {
+          "role": "new_document_rich_text_empty",
+          "sha256": "c7496ea99825f822e60fdab57640d2ce03516fd0231a050ba9eba81ef604edc0"
+        }
+      ]
+    },
+    {
+      "comparison": true,
+      "configured_model": "gemini-4-argon-low",
+      "configured_effort": "low",
+      "repetition": 2,
+      "recipe": 2,
+      "normalized_prompt_sha256": "edbf22c566e1fba52b32b71f33bcde286e4964390d457e1591bfeb83e2d9ef62",
+      "goal_success": false,
+      "acceptance": "FAIL",
+      "cli_wall_s": 86.983,
+      "total_wall_s": 98.151,
+      "setup_wall_s": 8.198,
+      "readback_wall_s": 2.967,
+      "token_usage": {
+        "input_tokens": 54006,
+        "output_tokens": 2469,
+        "thinking_tokens": 0,
+        "cache_read_tokens": 270866,
+        "total_tokens": 56475
+      },
+      "provider_model_echo": null,
+      "planner_inference_ms": null,
+      "images_transmitted": null,
+      "focus_samples": 134,
+      "target_frontmost_samples": 0,
+      "focus_probe_errors": 0,
+      "pointer_positions_changed": true,
+      "pointer_change_attribution": null,
+      "direct_mutation_tool_calls": 1,
+      "guarded_step_attempts": 1,
+      "guarded_verified_steps": 0,
+      "guarded_result": "dispatch_failed",
+      "uncertain_side_effects": 1,
+      "halted": true,
+      "provider_selection": "deterministic-controller",
+      "jev_calls": 0,
+      "jev_usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "controller_timings_ms": {
+        "observe_ms": 155.99,
+        "provider_ms": 0.0,
+        "dispatch_ms": 74.19,
+        "verify_ms": 0.0,
+        "total_ms": 232.49
+      },
+      "actual_api_cost_usd": null,
+      "save_cancel_recovery_verified": false,
+      "output_exists": false,
+      "seed_unchanged": true,
+      "failure": "menu_format_context_mismatch",
+      "image_evidence": [
+        {
+          "role": "new_document_rich_text_empty",
+          "sha256": "2150fb7add00bb2bde414875de1edffb80ecca2c7f1a7d28c816394287423633"
+        }
+      ]
+    },
+    {
+      "comparison": true,
+      "configured_model": "gemini-3.8-flash-high",
+      "configured_effort": "high",
+      "repetition": 2,
+      "recipe": 2,
+      "normalized_prompt_sha256": "edbf22c566e1fba52b32b71f33bcde286e4964390d457e1591bfeb83e2d9ef62",
+      "goal_success": false,
+      "acceptance": "FAIL",
+      "cli_wall_s": 164.573,
+      "total_wall_s": 176.406,
+      "setup_wall_s": 8.265,
+      "readback_wall_s": 3.595,
+      "token_usage": {
+        "input_tokens": 221992,
+        "output_tokens": 23668,
+        "thinking_tokens": 18131,
+        "cache_read_tokens": 2593746,
+        "total_tokens": 245660
+      },
+      "provider_model_echo": null,
+      "planner_inference_ms": null,
+      "images_transmitted": null,
+      "focus_samples": 257,
+      "target_frontmost_samples": 0,
+      "focus_probe_errors": 0,
+      "pointer_positions_changed": true,
+      "pointer_change_attribution": null,
+      "direct_mutation_tool_calls": 1,
+      "guarded_step_attempts": 1,
+      "guarded_verified_steps": 0,
+      "guarded_result": "dispatch_failed",
+      "uncertain_side_effects": 1,
+      "halted": true,
+      "provider_selection": "deterministic-controller",
+      "jev_calls": 0,
+      "jev_usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "controller_timings_ms": {
+        "observe_ms": 153.38,
+        "provider_ms": 0.0,
+        "dispatch_ms": 43.69,
+        "verify_ms": 0.0,
+        "total_ms": 226.69
+      },
+      "actual_api_cost_usd": null,
+      "save_cancel_recovery_verified": false,
+      "output_exists": false,
+      "seed_unchanged": true,
+      "failure": "menu_format_context_mismatch",
+      "image_evidence": [
+        {
+          "role": "new_document_rich_text_empty",
+          "sha256": "500dbf16a813f9a9607990971aa060c641f8d8a85056d3c38a569273cfc0dace"
+        }
+      ]
+    }
+  ],
+  "limits": [
+    "No successful note edit/save or save-cancel recovery.",
+    "No IDE qualification, visual-fallback qualification, or successful-latency comparison.",
+    "Provider-side model echo, image transmission counts, isolated inference timing, and billing receipts unavailable.",
+    "Pointer movement is sampled with operator activity; attribution unavailable.",
+    "Installed plugin remained at the PR20 merge; the click-support repair has unit proof only."
+  ]
+}

@@ -4,7 +4,7 @@ import json
 import sys
 
 JEV_SERVERS = {"agy-cua-jev", "agy-cua_agy-cua-jev"}
-JEV_SCHEMAS = {"agy_cua.jev_step_v1", "agy_cua.jev_batch_v1", "agy_cua.jev_select_action_v1"}
+JEV_SCHEMAS = {"agy_cua.jev_step_v1", "agy_cua.jev_batch_v1", "agy_cua.jev_select_action_v1", "agy_cua.jev_observe_v1"}
 
 
 def _sanitize_timings(timings):
@@ -110,6 +110,24 @@ def _extract_sanitized_jev_entry(raw_output):
         "timings_ms": _sanitize_timings(parsed_obj.get("timings_ms")),
         "post_static_texts": _sanitize_static_texts(parsed_obj.get("post_static_texts")),
     }
+    # Recovery evidence must survive reduction, without copying window titles,
+    # elements, IDs, paths, image data, or provider error bodies.
+    for key in ("query_incomplete", "search_complete", "observation_truncated",
+                "diff_fallback_used", "is_diff", "visual_fallback_recommended",
+                "action_dispatched", "uncertain_side_effect", "point_fallback_used"):
+        if isinstance(parsed_obj.get(key), bool):
+            entry[key] = parsed_obj[key]
+    for key in ("query_status", "mode"):
+        if isinstance(parsed_obj.get(key), str):
+            entry[key] = parsed_obj[key]
+    for key in ("observe_ms", "matched_elements_count", "omitted_elements_count",
+                "omitted_candidates_count", "secure_fields_redacted_count"):
+        value = parsed_obj.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            entry[key] = value
+    for key in ("discovered_windows", "newly_opened_windows"):
+        if isinstance(parsed_obj.get(key), list):
+            entry[key + "_count"] = len(parsed_obj[key])
     for int_key in ("completed_count", "total_steps"):
         val = parsed_obj.get(int_key)
         if isinstance(val, int) and not isinstance(val, bool):

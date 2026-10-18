@@ -1871,6 +1871,23 @@ class StdioEndToEndTest(unittest.TestCase):
         self.assertFalse(md_only_obs["elements"][2]["in_toolbar"])
         self.assertEqual(md_only_obs["elements"][2]["depth"], 4)
 
+    def test_textedit_show_menu_is_not_press_support(self):
+        def observe(actions):
+            return jev.extract_window_observation({"structuredContent": {
+                "pid": 501, "window_id": 2001, "snapshot_id": "s0000cafe",
+                "elements": [{"element_index": 1, "role": "AXTextArea", "label": "Note",
+                              "value": "draft", "actions": actions}]}},
+                expected_pid=501, expected_window_id=2001)
+        show_menu = observe(["AXShowMenu"])
+        self.assertNotIn("click", show_menu["elements"][0]["supported_actions"])
+        with self.assertRaisesRegex(ValueError, "unsupported_element_action"):
+            jev.build_bound_candidates([{"id": "focus", "description": "Focus note",
+                                         "tool": "click", "element_index": 1}], show_menu)
+        self.assertEqual(jev.build_bound_candidates(None, show_menu, action_value="ready")[0]["tool"], "set_value")
+        pressable = observe(["AXPress"])
+        self.assertEqual(jev.build_bound_candidates([{"id": "focus", "description": "Focus note",
+                                                    "tool": "click", "element_index": 1}], pressable)[0]["tool"], "click")
+
     def test_mail_role_and_action_support_filtering_for_search_link_and_cell(self):
         obs = jev.extract_window_observation(
             {
