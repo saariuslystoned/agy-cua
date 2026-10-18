@@ -4728,6 +4728,20 @@ class StdioEndToEndTest(unittest.TestCase):
             self.assertEqual(spend_chained.gemini_input_tokens, 1800)
             self.assertEqual(spend_chained.screenshots_sent, 5)
 
+            spend_reversed = bench_mod.SpendTracker(max_budget_usd=5.0)
+            rows_reversed = bench_mod.restore_resume_state([p_b_chained, p_a], spend_reversed)
+            self.assertEqual(len(rows_reversed), 2)
+            self.assertAlmostEqual(spend_reversed.total_usd, 2.00, places=5)
+            self.assertEqual(spend_reversed.gemini_input_tokens, 1800)
+            self.assertEqual(spend_reversed.screenshots_sent, 5)
+
+            spend_repeated = bench_mod.SpendTracker(max_budget_usd=5.0)
+            rows_repeated = bench_mod.restore_resume_state([p_a, p_a], spend_repeated)
+            self.assertEqual(len(rows_repeated), 1)
+            self.assertAlmostEqual(spend_repeated.total_usd, 1.25, places=5)
+            self.assertEqual(spend_repeated.gemini_input_tokens, 1000)
+            self.assertEqual(spend_repeated.screenshots_sent, 2)
+
             spend_indep = bench_mod.SpendTracker(max_budget_usd=5.0)
             rows_indep = bench_mod.restore_resume_state([p_a, p_b_indep], spend_indep)
             self.assertEqual(len(rows_indep), 2)

@@ -2462,31 +2462,56 @@ def restore_resume_state(
 ) -> dict[tuple[int, str, str, str, str], dict[str, Any]]:
     """Restore completed rows and cumulative spend across one or more --resume-from summaries.
 
-    If summary B explicitly lists summary A in its ``resumed_from`` chain (directly or transitively),
-    B already carries A's cumulative spend, so only leaf summaries contribute to restored token/USD
-    totals, while independent summaries sum their spend.
+    Resolved paths are deduplicated first, and superseding is computed across all supplied inputs
+    regardless of argument order: if summary B lists summary A in its ``resumed_from`` chain
+    (directly or transitively), A is superseded even when passed as ``--resume-from B,A``.
     """
-    loaded: list[tuple[Path, dict[str, Any]]] = [
-        (rp.resolve(), json.loads(rp.read_text(encoding="utf-8"))) for rp in resume_paths
-    ]
-    ancestors_by_idx: dict[int, set[Path]] = {}
-    superseded_indices: set[int] = set()
-    for j, (_, summary_j) in enumerate(loaded):
-        resumed_raw = str(summary_j.get("resumed_from") or "")
-        chain_paths = {
+    unique_paths: list[Path] = list(dict.fromkeys(rp.expanduser().resolve() for rp in resume_paths))
+    loaded_by_path: dict[Path, dict[str, Any]] = {
+        rp: json.loads(rp.read_text(encoding="utf-8")) for rp in unique_paths
+    }
+    ancestors_by_path: dict[Path, set[Path]] = {}
+    for rp, summary in loaded_by_path.items():
+        resumed_raw = str(summary.get("resumed_from") or "")
+        ancestors_by_path[rp] = {
             Path(p.strip()).expanduser().resolve()
             for p in resumed_raw.split(",")
             if p.strip()
-        }
-        for i in range(j):
-            if loaded[i][0] in chain_paths:
-                chain_paths |= ancestors_by_idx.get(i, set())
-        ancestors_by_idx[j] = chain_paths
-        for i in range(j):
-            if loaded[i][0] in chain_paths:
-                superseded_indices.add(i)
+        } - {rp}
 
-    leaf_summaries = [s for idx, (_, s) in enumerate(loaded) if idx not in superseded_indices]
+    visited_disk: set[Path] = set(ancestors_by_path.keys())
+    changed = True
+    while changed:
+        changed = False
+        for rp, anc in list(ancestors_by_path.items()):
+            expanded = set(anc)
+            for a in list(anc):
+                if a not in ancestors_by_path and a not in visited_disk and a.exists():
+                    visited_disk.add(a)
+                    try:
+                        disk_summary = json.loads(a.read_text(encoding="utf-8"))
+                        disk_raw = str(disk_summary.get("resumed_from") or "")
+                        ancestors_by_path[a] = {
+                            Path(p.strip()).expanduser().resolve()
+                            for p in disk_raw.split(",")
+                            if p.strip()
+                        } - {a}
+                    except Exception:
+                        pass
+                if a in ancestors_by_path:
+                    expanded |= ancestors_by_path[a]
+            expanded.discard(rp)
+            if expanded != anc:
+                ancestors_by_path[rp] = expanded
+                changed = True
+
+    superseded_paths: set[Path] = set()
+    for rp, anc in ancestors_by_path.items():
+        for other in unique_paths:
+            if other != rp and other in anc:
+                superseded_paths.add(other)
+
+    leaf_summaries = [loaded_by_path[rp] for rp in unique_paths if rp not in superseded_paths]
     spend.gemini_input_tokens = sum(int(s.get("gemini_input_tokens", 0)) for s in leaf_summaries)
     spend.gemini_output_tokens = sum(int(s.get("gemini_output_tokens", 0)) for s in leaf_summaries)
     spend.gemini_thought_tokens = sum(int(s.get("gemini_thought_tokens", 0)) for s in leaf_summaries)
@@ -2499,8 +2524,12 @@ def restore_resume_state(
     prior_jev_usd = (spend.jev_input_tokens + spend.jev_output_tokens) * (JEV_PRICE_PER_1M_USD / 1_000_000.0)
     spend.gemini_spent_usd = max(0.0, round(prior_total_usd - prior_jev_usd - spend.reserved_usd, 6))
 
+    ordered_paths = [rp for rp in unique_paths if rp in superseded_paths] + [
+        rp for rp in unique_paths if rp not in superseded_paths
+    ]
     passed_rows_by_key: dict[tuple[int, str, str, str, str], dict[str, Any]] = {}
-    for _, prior_summary in loaded:
+    for rp in ordered_paths:
+        prior_summary = loaded_by_path[rp]
         for r in prior_summary.get("results", []):
             if not isinstance(r, Mapping):
                 continue
@@ -2569,7 +2598,13 @@ def main() -> int:
     passed_rows_by_key: dict[tuple[int, str, str, str, str], dict[str, Any]] = {}
     resumed_from_path: str | None = None
     if args.resume_from:
-        resume_paths = [Path(p.strip()).expanduser().resolve() for p in args.resume_from.split(",") if p.strip()]
+        resume_paths = list(
+            dict.fromkeys(
+                Path(p.strip()).expanduser().resolve()
+                for p in args.resume_from.split(",")
+                if p.strip()
+            )
+        )
         for rp in resume_paths:
             if not rp.exists():
                 sys.stderr.write(f"ERROR: --resume-from file not found: {rp}\n")
