@@ -15,13 +15,13 @@ Use this skill when reviewing pull requests in `saariuslystoned/agy-cua`. Focus 
    - Do not add Jev logic or extra dependencies to `bin/agy-cua-mcp`.
 
 2. **[`bin/agy-cua-jev-mcp`](file:///bin/agy-cua-jev-mcp) (Bounded Jev Action Selection MCP Server):**
-   - Pure Python 3 standard-library stdio MCP server (`jev_status`, `jev_select_action`, `jev_step`). No third-party pip dependencies are allowed.
+   - Pure Python 3 standard-library stdio MCP server (`jev_status`, `jev_select_action`, `jev_observe`, `jev_step`, `jev_batch`, `jev_browser_prepare`, `jev_browser_step`). No third-party pip dependencies are allowed.
    - `stdout` is reserved exclusively for JSON-RPC 2.0 messages (`Content-Length` framed or newline-delimited JSON matching client framing). Never print debug logs or diagnostics to `stdout`.
 
 3. **Cua Driver `0.35.4+` Wire Contract:**
    - `get_window_state` must be called with `tree_format: "both"` when both `structuredContent.elements` and `tree_markdown` are needed (`0.35.4` defaults to `"markdown"`).
-   - Element-addressed background actions (`click`, `double_click`, `right_click`, `set_value`, `type_text`, `press_key`, `hotkey`, `scroll`) require `element_token: "<snapshot_id>:<element_index>"` on the Cua Driver wire call.
-   - All mutating actions must stay scoped to the explicit `(pid, window_id)` target with `delivery_mode: "background"` (except `set_value`, which is AX-direct and does not accept `delivery_mode`). Foreground delivery, desktop-wide actions (`get_desktop_state`, `bring_to_front`, `drag`), `clipboard_*`, `kill_app`, `set_config`, and `browser_*` are forbidden in `agy-cua-jev-mcp`.
+   - Element-addressed background actions (`click`, `double_click`, `right_click`, `set_value`, `type_text`, `press_key`, `hotkey`, `scroll`) require `element_token: "<snapshot_id>:<element_index>"` on the Cua Driver wire call (except explicit zero-AX visual coordinate fallback when `actionable_elements == 0` and `secure_fields_redacted_count == 0`).
+   - All mutating native actions must stay scoped to the explicit `(pid, window_id)` target with `delivery_mode: "background"` (except `set_value`, which is AX-direct and does not accept `delivery_mode`). Isolated browser actions (`jev_browser_prepare`, `jev_browser_step`) must stay scoped to `(target_id, tab_id, ref)` with `profile_mode` in `{"isolated_new", "isolated_named"}`, `delivery_mode` in `{"background", "dom_event"}`, and loopback/synthetic origins (`http://127.0.0.1`, `http://localhost`, `http://[::1]`, `about:blank`). Foreground delivery, desktop-wide actions (`get_desktop_state`, `bring_to_front`, `drag`), `clipboard_*`, `kill_app`, `set_config`, `browser_download`, `browser_set_input_files`, `existing_profile`, and non-loopback browser URLs are forbidden in `agy-cua-jev-mcp`.
 
 4. **Pinned Jev (`jev-1.13.0`) & Verification Invariants:**
    - Jev is text-only (`jev-1.13.0`). Never send screenshots, base64 images, or unredacted secrets to Jev.

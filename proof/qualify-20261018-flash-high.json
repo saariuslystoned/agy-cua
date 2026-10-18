@@ -1,0 +1,63 @@
+{
+  "source": "workspace",
+  "model": "gemini-3.8-flash-high",
+  "agy_exit": 0,
+  "duration_s": 96,
+  "expected": "1584",
+  "display": "1,584",
+  "display_matches": true,
+  "tool_calls": 31,
+  "errors": 0,
+  "mcp_servers_used": [
+    "agy-cua",
+    "agy-cua-jev"
+  ],
+  "skill_file_read": true,
+  "result_seen": true,
+  "stream_parse_errors": 0,
+  "token_usage": {
+    "input_tokens": 157696,
+    "output_tokens": 11432,
+    "thinking_tokens": 7896,
+    "cache_read_tokens": 1585916,
+    "total_tokens": 169128
+  },
+  "final_status": "SUCCESS",
+  "focus_samples": 147,
+  "unidentified_focus_samples": 0,
+  "calculator_frontmost_samples": 0,
+  "jev": {
+    "required": true,
+    "used": true,
+    "calls": 7,
+    "batches": 1,
+    "min_steps_required": 7,
+    "direct_cua_mutations": 0,
+    "all_steps_verified": true,
+    "sequence_complete": true,
+    "returned_models": [
+      "jev-1.13.0"
+    ],
+    "sdk_identities": [
+      "agy-cua-jev-stdlib/0.2.0"
+    ],
+    "selected_ids": [
+      "ax.2.all-clear",
+      "ax.14.2",
+      "ax.9.4",
+      "ax.8.multiply",
+      "ax.11.6",
+      "ax.11.6",
+      "ax.20.equals"
+    ],
+    "timings_ms": {
+      "observe_total_ms": 997.89,
+      "provider_total_ms": 1648.1,
+      "dispatch_total_ms": 3329.42,
+      "verify_total_ms": 943.37,
+      "provider_median_ms": 227.84,
+      "dispatch_median_ms": 467.65
+    }
+  },
+  "verdict": "PASS"
+}

@@ -278,3 +278,77 @@ vault slots; all prior failures are carried forward.
 python3 scripts/run_codex_native_benchmark.py --approved-native-apps --max-budget-usd 5
 python3 scripts/run_codex_native_vault.py --prior-run runs/benchmark-codex-runs/<first-run>/summary.json --approved-native-apps --max-budget-usd 5
 ```
+
+---
+
+## 7. Issue #19 — 10-Task Observation, Recovery & Cross-Window/Browser Benchmark (`gemini-4-argon:low` + `gemini-3.8-flash:high`, 2026-10-18)
+
+We expanded `bin/agy-cua-jev-mcp`, `scripts/bench_fixture.swift`, and `scripts/benchmark_cua.py` across three slices and evaluated all **four contender arms** across **10 tasks (`T1`–`T7b`) × 2 models (`gemini-4-argon:low` and `gemini-3.8-flash:high`) × 2 alternating repetitions = 160 task-arm runs** under a hard **`\$5.00`** USD cap:
+
+- **Raw API Benchmark Proof:** [`proof/bench-20261018T131504Z-summary.json`](../proof/bench-20261018T131504Z-summary.json) (`total_spend_usd = \$4.6817`, `reserved_usd = \$0.0000`, `focus_violations = 0` across all 160 runs, `canary_leaked = false` across all runs)
+- **Headless `agy -p` CLI Qualification Proofs (separate from API benchmark):**
+  - `gemini-4-argon-low` (`agy 1.4.2`): [`proof/qualify-20261018-argon-low.json`](../proof/qualify-20261018-argon-low.json)
+  - `gemini-3.8-flash-high` (`agy 1.4.2`): [`proof/qualify-20261018-flash-high.json`](../proof/qualify-20261018-flash-high.json)
+
+### 7.1 What Changed in Slices 1–3
+1. **Slice 1 (Fixture & Multi-Model Alternation):**
+   - Updated [`scripts/bench_fixture.swift`](../scripts/bench_fixture.swift) (`form`, `mail-twin`, `1password-twin`) so `NSTextField.placeholderString` carries a realistic hint distinct from `accessibilityLabel`, and verified `runs/.cache/BenchFixture.app` (`com.agycua.benchfixture`).
+   - Added `--models gemini-4-argon:low,gemini-3.8-flash:high --repetitions 2` with alternating model order per repetition (`Rep 1: Argon Low -> Flash High`, `Rep 2: Flash High -> Argon Low`) and `--resume-from` cumulative spend preservation in [`scripts/benchmark_cua.py`](../scripts/benchmark_cua.py).
+2. **Slice 2 (Observation & Recovery — `T6a_ax_incomplete` & `T6b_visual_canvas`):**
+   - Added read-only `jev_observe` (`snapshot_id`, structured `elements`, `query_status`, `omitted_elements_count`, optional `include_screenshot` with automatic `secure_fields_redacted_count > 0` refusal) and `query_status` diagnostics (`not_filtered`, `matched`, `zero_matches_in_window`, `all_matches_filtered_by_role_or_bounds`) in [`bin/agy-cua-jev-mcp`](../bin/agy-cua-jev-mcp).
+   - Added explicit zero-AX visual coordinate fallback (`custom_candidates` with `(x, y)` inside `window_bounds` when `actionable_elements == 0` and `secure_fields_redacted_count == 0`, with `point_fallback_used: true` receipt).
+3. **Slice 3 (Cross-Window Discovery & Isolated Loopback Browser — `T7a_cross_window` & `T7b_1password_browser`):**
+   - Added `newly_opened_windows` and `discovered_windows` (`discover_windows: true`) on `jev_step` / `jev_batch` so sheet/dialog workflows re-bind `(pid, window_id)` cleanly.
+   - Added `jev_browser_prepare` (`isolated_new` / `isolated_named` only; refuses `existing_profile` and `foreground`) and `jev_browser_step` (`navigate`, `click`, `type`, `observe` strictly bound to `(target_id, tab_id, ref)` and restricted to loopback/synthetic origins `http://127.0.0.1`, `http://localhost`, `http://[::1]`, `about:blank`; refuses `file://`, `data:`, external URLs, `browser_download`, and `browser_set_input_files`).
+
+### 7.2 Aggregate 10-Task Results (2 Repetitions per Model Spec, 160 Total Runs)
+
+| Outer Planner Model (`thinking_level`) | Contender Arm | Pass Rate (2 Reps) | Rep 1 Wall (10 Tasks) | Rep 2 Wall (10 Tasks) | Mean ± SD per 10-Task Rep | Outer Turns (20 Runs) | Dispatched Actions | Images Sent | Gemini Input Tokens | Gemini Output + Thought Tokens | Jev Tokens | Total Cost (20 Runs) | Focus Violations |
+| :--- | :--- | :---: | ---: | ---: | :---: | :---: | :---: | :---: | ---: | ---: | ---: | ---: | :---: |
+| **`gemini-4-argon` (`low`)** | `google-cua-bg` | 17 / 20 (`85%`)* | 1,000.50 s | 785.55 s | 893.02 ± 151.99 s | 106 | 90 | 206 | 641,268 | 5,363 | 0 | \$1.3362 | 0 |
+|  | `agy-cua-direct` | **20 / 20 (`100%`)** | 808.49 s | 741.98 s | 775.24 ± 47.03 s | 112 | 84 | 4 | 335,629 | 6,088 | 0 | \$0.7321 | 0 |
+|  | `agy-cua-jev-v0` | **20 / 20 (`100%`)** | 565.56 s | 1,000.02 s | 782.79 ± 307.21 s | 113 | 91 | 4 | 167,229 | 6,875 | 165,783 | \$0.4364 | 0 |
+|  | **`agy-cua-jev-v1`** | **20 / 20 (`100%`)** | **430.82 s** | **485.43 s** | **458.12 ± 38.62 s** | **59** | **93** | **4** | **112,393** | **6,819** | **171,048** | **\$0.3272** | **0** |
+| **`gemini-3.8-flash` (`high`)** | `google-cua-bg` | 18 / 20 (`90%`)* | 496.91 s | 515.42 s | 506.16 ± 13.09 s | 121 | 103 | 222 | 491,515 | 39,145 | 0 | \$0.3632 | 0 |
+|  | **`agy-cua-direct`** | **20 / 20 (`100%`)** | **246.00 s** | **251.92 s** | **248.96 ± 4.19 s** | 118 | 88 | **4** | 464,089 | 20,398 | 0 | **\$0.2933** | **0** |
+|  | `agy-cua-jev-v0` | **20 / 20 (`100%`)** | 388.01 s | 481.32 s | 434.66 ± 65.98 s | 122 | 94 | 4 | 488,124 | 49,309 | 173,812 | \$0.4268 | 0 |
+|  | `agy-cua-jev-v1` | **20 / 20 (`100%`)** | 426.94 s | 518.47 s | 472.71 ± 64.72 s | **79** | 99 | 4 | **428,369** | 89,969 | 180,090 | \$0.5201 | 0 |
+
+*\*Why `google-cua-bg` failed 3/20 on Argon Low and 2/20 on Flash High: `google-cua-bg` is scoped to a single native `(pid, window_id)` pixel stream and has no isolated browser CDP tools (`browser_prepare` / `browser_navigate` / `browser_click` / `browser_type`), so it fails `T7b_1password_browser` on both repetitions for both models (`open_and_fill=True`, `portal_signed_in=False`). On Argon Low Rep 2 `T2_calc_recovery`, `google-cua-bg` also aborted when Calculator's window bounds/capture scale mismatched during a pixel click (`ArmActionError`, `13` PNGs sent, `\$0.0821` spend).*
+
+### 7.3 Four-Arm Capability & Trade-Off Matrix
+
+| Capability / Surface | `google-cua-bg` | `agy-cua-direct` | `agy-cua-jev-v0` | `agy-cua-jev-v1` |
+| :--- | :---: | :---: | :---: | :---: |
+| **Standard Native AX (`T1`–`T5b`)** | 23 / 24 PASS (PNG per turn) | **24 / 24 PASS** (0 PNGs) | **24 / 24 PASS** (0 PNGs) | **24 / 24 PASS** (0 PNGs, lowest turns) |
+| **Truncated AX Recovery (`T6a_ax_incomplete`)** | 4 / 4 PASS (via PNG) | **4 / 4 PASS** (narrow `query` recovery, 0 PNGs) | **4 / 4 PASS** (`jev_observe` + narrow `query`, 0 PNGs) | **4 / 4 PASS** (`jev_observe` + narrow `query`, 0 PNGs) |
+| **Zero-AX Custom Canvas (`T6b_visual_canvas`)** | 4 / 4 PASS (3 PNGs/run) | **4 / 4 PASS** (2 PNGs/run, coordinate fallback) | **4 / 4 PASS** (2 PNGs/run, `point_fallback_used=true`) | **4 / 4 PASS** (2 PNGs/run, `point_fallback_used=true`) |
+| **Cross-Window Sheet/Dialog (`T7a_cross_window`)** | 4 / 4 PASS (9–11 PNGs/run) | **4 / 4 PASS** (`list_windows` handoff, 0 PNGs) | **4 / 4 PASS** (`newly_opened_windows` handoff, 0 PNGs) | **4 / 4 PASS** (`newly_opened_windows` handoff, 0 PNGs) |
+| **Native + Isolated Browser (`T7b_1password_browser`)** | 0 / 4 FAIL (no isolated browser CDP) | **4 / 4 PASS** (`browser_*` loopback, 0 PNGs) | **4 / 4 PASS** (`jev_browser_*` loopback, 0 PNGs) | **4 / 4 PASS** (`jev_browser_*` loopback, 0 PNGs) |
+| **Secret Redaction (`T5b`, `T7b`)** | Exposes window PNGs to model | Redacted in AX (`0` PNGs) | Hardware-enforced `secure_element_refused` (`0` PNGs) | Hardware-enforced `secure_element_refused` (`0` PNGs) |
+| **Best Planner Pairing** | Baseline reference | **`gemini-3.8-flash:high`** (`248.96s` / 10 tasks, `\$0.2933`) | Step-by-step Jev baseline | **`gemini-4-argon:low`** (`458.12s` / 10 tasks, `\$0.3272`, 59 turns) |
+
+### 7.4 Per-Task Breakdown Across Repetitions (`r1 / r2`)
+
+| Task ID | Arm | `gemini-4-argon:low` Verdict (`r1/r2`) | `gemini-4-argon:low` Wall (`r1 / r2`) | `gemini-4-argon:low` Turns (`r1/r2`) | `gemini-4-argon:low` PNGs (`r1/r2`) | `gemini-4-argon:low` 2-Rep Cost | `gemini-3.8-flash:high` Verdict (`r1/r2`) | `gemini-3.8-flash:high` Wall (`r1 / r2`) | `gemini-3.8-flash:high` Turns (`r1/r2`) | `gemini-3.8-flash:high` PNGs (`r1/r2`) | `gemini-3.8-flash:high` 2-Rep Cost |
+| :--- | :--- | :---: | :---: | :---: | :---: | ---: | :---: | :---: | :---: | :---: | ---: |
+| **`T1_calc_arith`** | `google-cua-bg`<br>`agy-cua-direct`<br>`agy-cua-jev-v0`<br>**`agy-cua-jev-v1`** | PASS/PASS<br>PASS/PASS<br>PASS/PASS<br>**PASS/PASS** | 75.83 / 158.00s<br>39.25 / 80.04s<br>78.84 / 113.35s<br>**16.95 / 19.61s** | 7/7<br>7/7<br>7/7<br>**2/2** | 13/13<br>0/0<br>0/0<br>**0/0** | \$0.1640<br>\$0.1057<br>\$0.0425<br>**\$0.0207** | PASS/PASS<br>**PASS/PASS**<br>PASS/PASS<br>PASS/PASS | 51.43 / 51.34s<br>**33.24 / 29.55s**<br>41.72 / 37.29s<br>51.31 / 54.56s | 8/8<br>8/8<br>7/7<br>**3/3** | 15/15<br>0/0<br>0/0<br>0/0 | \$0.0375<br>\$0.0457<br>\$0.0362<br>\$0.0531 |
+| **`T2_calc_recovery`** | `google-cua-bg`<br>`agy-cua-direct`<br>`agy-cua-jev-v0`<br>**`agy-cua-jev-v1`** | PASS/FAIL*<br>PASS/PASS<br>PASS/PASS<br>**PASS/PASS** | 25.51s / abort*<br>115.53 / 51.24s<br>80.89 / 88.91s<br>**26.96 / 55.80s** | 3/0<br>8/8<br>8/8<br>**2/2** | 5/13<br>0/0<br>0/0<br>**0/0** | \$0.1174<br>\$0.1345<br>\$0.0506<br>**\$0.0222** | PASS/PASS<br>**PASS/PASS**<br>PASS/PASS<br>PASS/PASS | 62.10 / 54.33s<br>**31.48 / 28.65s**<br>41.74 / 36.09s<br>42.08 / 53.09s | 8/8<br>8/8<br>8/8<br>**2/2** | 15/15<br>0/0<br>0/0<br>0/0 | \$0.0431<br>\$0.0445<br>\$0.0366<br>\$0.0489 |
+| **`T3_appkit_form`** | `google-cua-bg`<br>`agy-cua-direct`<br>`agy-cua-jev-v0`<br>**`agy-cua-jev-v1`** | PASS/PASS<br>PASS/PASS<br>PASS/PASS<br>**PASS/PASS** | 183.40 / 116.85s<br>53.58 / 120.31s<br>72.25 / 141.22s<br>**75.50 / 84.52s** | 8/8<br>6/6<br>7/6<br>**7/4** | 15/15<br>0/0<br>0/0<br>**0/0** | \$0.1907<br>\$0.0554<br>\$0.0387<br>**\$0.0533** | PASS/PASS<br>**PASS/PASS**<br>PASS/PASS<br>PASS/PASS | 74.12 / 52.79s<br>**25.08 / 22.85s**<br>59.22 / 83.19s<br>51.06 / 168.61s | 8/8<br>**6/6**<br>8/8<br>7/7 | 15/15<br>0/0<br>0/0<br>0/0 | \$0.0351<br>**\$0.0239**<br>\$0.0832<br>\$0.1451 |
+| **`T4_appkit_dense`** | `google-cua-bg`<br>`agy-cua-direct`<br>`agy-cua-jev-v0`<br>**`agy-cua-jev-v1`** | PASS/PASS<br>PASS/PASS<br>PASS/PASS<br>**PASS/PASS** | 118.34 / 52.73s<br>32.22 / 51.65s<br>96.85 / 48.29s<br>**11.98 / 96.20s** | 5/5<br>5/5<br>5/5<br>**2/2** | 9/9<br>0/0<br>0/0<br>**0/0** | \$0.1139<br>\$0.0626<br>\$0.0313<br>**\$0.0180** | PASS/PASS<br>**PASS/PASS**<br>PASS/PASS<br>PASS/PASS | 42.76 / 46.55s<br>**16.94 / 18.22s**<br>22.46 / 23.55s<br>22.65 / 41.81s | 5/5<br>5/5<br>5/5<br>**2/2** | 9/9<br>0/0<br>0/0<br>0/0 | \$0.0392<br>\$0.0215<br>**\$0.0197**<br>\$0.0309 |
+| **`T5a_mail_triage_draft`** | `google-cua-bg`<br>`agy-cua-direct`<br>`agy-cua-jev-v0`<br>**`agy-cua-jev-v1`** | PASS/PASS<br>PASS/PASS<br>PASS/PASS<br>**PASS/PASS** | 253.46 / 140.07s<br>126.05 / 62.45s<br>88.24 / 82.78s<br>**49.18 / 18.85s** | 12/12<br>8/8<br>10/8<br>**4/2** | 23/23<br>0/0<br>0/0<br>**0/0** | \$0.2964<br>\$0.1185<br>\$0.0707<br>**\$0.0353** | PASS/PASS<br>**PASS/PASS**<br>PASS/PASS<br>PASS/PASS | 91.00 / 82.92s<br>**31.94 / 35.22s**<br>84.70 / 114.59s<br>120.93 / 71.27s | 12/12<br>8/8<br>10/10<br>**7/6** | 23/23<br>0/0<br>0/0<br>0/0 | \$0.0694<br>**\$0.0482**<br>\$0.1310<br>\$0.1242 |
+| **`T5b_1password_vault_item`** | `google-cua-bg`<br>`agy-cua-direct`<br>`agy-cua-jev-v0`<br>**`agy-cua-jev-v1`** | PASS/PASS<br>PASS/PASS<br>PASS/PASS<br>**PASS/PASS** | 116.75 / 121.51s<br>161.74 / 106.18s<br>56.15 / 253.49s<br>**112.27 / 59.11s** | 9/9<br>6/6<br>6/6<br>**2/2** | 17/17<br>0/0<br>0/0<br>**0/0** | \$0.2157<br>\$0.0735<br>\$0.0422<br>**\$0.0198** | PASS/PASS<br>**PASS/PASS**<br>PASS/PASS<br>PASS/PASS | 89.11 / 137.52s<br>24.61 / 25.44s<br>36.51 / 73.20s<br>**22.47 / 19.55s** | 9/10<br>6/6<br>6/6<br>**2/2** | 17/19<br>0/0<br>0/0<br>0/0 | \$0.0889<br>\$0.0296<br>\$0.0258<br>**\$0.0170** |
+| **`T6a_ax_incomplete`** | `google-cua-bg`<br>`agy-cua-direct`<br>`agy-cua-jev-v0`<br>**`agy-cua-jev-v1`** | PASS/PASS<br>PASS/PASS<br>PASS/PASS<br>**PASS/PASS** | 33.61 / 51.95s<br>104.99 / 36.80s<br>15.00 / 73.39s<br>**15.11 / 15.58s** | 2/2<br>3/3<br>3/3<br>**3/3** | 3/3<br>0/0<br>0/0<br>**0/0** | \$0.0428<br>**\$0.0284**<br>\$0.0405<br>\$0.0441 | PASS/PASS<br>**PASS/PASS**<br>PASS/PASS<br>PASS/PASS | 18.73 / 17.71s<br>**11.98 / 14.23s**<br>17.86 / 20.77s<br>17.14 / 29.50s | 2/2<br>3/3<br>3/3<br>3/5 | 3/3<br>0/0<br>0/0<br>0/0 | \$0.0108<br>**\$0.0105**<br>\$0.0195<br>\$0.0256 |
+| **`T6b_visual_canvas`** | `google-cua-bg`<br>`agy-cua-direct`<br>`agy-cua-jev-v0`<br>**`agy-cua-jev-v1`** | PASS/PASS<br>PASS/PASS<br>**PASS/PASS**<br>PASS/PASS | 78.73 / 26.70s<br>46.58 / 40.13s<br>**19.03 / 23.78s**<br>64.91 / 41.57s | 2/2<br>3/3<br>3/3<br>3/3 | 3/3<br>2/2<br>2/2<br>2/2 | \$0.0433<br>**\$0.0242**<br>\$0.0297<br>\$0.0330 | PASS/PASS<br>**PASS/PASS**<br>PASS/PASS<br>PASS/PASS | 18.42 / 20.40s<br>**18.58 / 18.95s**<br>23.81 / 26.04s<br>24.51 / 25.92s | 2/2<br>3/3<br>3/3<br>3/3 | 3/3<br>2/2<br>2/2<br>2/2 | \$0.0092<br>**\$0.0131**<br>\$0.0192<br>\$0.0221 |
+| **`T7a_cross_window`** | `google-cua-bg`<br>`agy-cua-direct`<br>`agy-cua-jev-v0`<br>**`agy-cua-jev-v1`** | PASS/PASS<br>PASS/PASS<br>PASS/PASS<br>**PASS/PASS** | 99.18 / 105.80s<br>93.73 / 52.33s<br>23.51 / 82.83s<br>**22.99 / 41.55s** | 5/6<br>5/5<br>4/4<br>**3/3** | 9/11<br>0/0<br>0/0<br>**0/0** | \$0.1324<br>\$0.0355<br>\$0.0312<br>**\$0.0256** | PASS/PASS<br>PASS/PASS<br>PASS/PASS<br>**PASS/PASS** | 36.64 / 37.34s<br>21.02 / 26.94s<br>23.72 / 28.72s<br>**21.86 / 21.73s** | 5/5<br>6/6<br>5/5<br>**4/4** | 9/9<br>0/0<br>0/0<br>0/0 | \$0.0232<br>\$0.0219<br>\$0.0238<br>**\$0.0193** |
+| **`T7b_1password_browser`** | `google-cua-bg`<br>`agy-cua-direct`<br>`agy-cua-jev-v0`<br>**`agy-cua-jev-v1`** | FAIL/FAIL<br>PASS/PASS<br>PASS/PASS<br>**PASS/PASS** | 15.69 / 11.94s<br>34.82 / 140.85s<br>34.80 / 91.98s<br>**34.97 / 52.64s** | 1/1<br>5/5<br>3/7<br>**3/5** | 1/1<br>0/0<br>0/0<br>**0/0** | \$0.0195<br>\$0.0937<br>\$0.0590<br>**\$0.0553** | FAIL/FAIL<br>**PASS/PASS**<br>PASS/PASS<br>PASS/PASS | 12.60 / 14.52s<br>**31.13 / 31.87s**<br>36.27 / 37.88s<br>52.93 / 32.43s | 1/1<br>6/6<br>6/6<br>6/6 | 1/1<br>0/0<br>0/0<br>0/0 | \$0.0068<br>\$0.0343<br>**\$0.0318**<br>\$0.0340 |
+
+### 7.5 Headless `agy -p` CLI Qualification (`gemini-4-argon-low` & `gemini-3.8-flash-high`)
+
+Kept strictly separate from the Gemini API benchmark above, we qualified the live `agy` CLI (`agy 1.4.2`) against the workspace `agy-cua` + `agy-cua-jev` MCP servers using `bin/agy-cua qualify --model <id> --batch`:
+
+| CLI Model (`agy 1.4.2`) | Proof Artifact | Task & Expression | Verdict | Wall Duration | `jev_batch` Calls / Steps | Jev `provider_median_ms` | `cua-driver` `dispatch_median_ms` | `verify_median_ms` | Focus Violations |
+| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`gemini-4-argon-low`** | [`proof/qualify-20261018-argon-low.json`](../proof/qualify-20261018-argon-low.json) | Calculator `90 × 12 = 1,080` | **PASS** | 67 s | 1 batch / 7 verified steps (`errors=0`) | 214.17 ms | 464.49 ms | 75.59 ms | 0 samples |
+| **`gemini-3.8-flash-high`** | [`proof/qualify-20261018-flash-high.json`](../proof/qualify-20261018-flash-high.json) | Calculator `24 × 66 = 1,584` | **PASS** | 96 s | 1 batch / 7 verified steps (`errors=0`) | 227.84 ms | 467.65 ms | 75.67 ms | 0 samples |
+

@@ -61,10 +61,22 @@ MAX_ELEMENTS = 64
 MAX_HISTORY = 16
 
 SNAPSHOT_ID_RE = re.compile(r"^s[0-9a-f]{8,}$")
+BROWSER_SNAPSHOT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+BROWSER_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 CANDIDATE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 LOOPBACK_RE = re.compile(r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?/?$")
-BASE64_IMAGE_RE = re.compile(r"data:image/[a-zA-Z0-9.+-]+;base64,|iVBORw0KGgo", re.IGNORECASE)
+BASE64_IMAGE_RE = re.compile(r"data:image/[a-zA-Z0-9.+-]+;base64,|iVBORw0KGgo|/9j/4AAQSkZJRg", re.IGNORECASE)
+FORBIDDEN_IMAGE_KEYS = frozenset({
+    "image",
+    "screenshot",
+    "image_base64",
+    "png_base64",
+    "inline_data",
+    "screenshot_base64",
+    "image_url",
+    "image_data",
+})
 
 RESERVED_CANDIDATES: dict[str, str] = {
     "reobserve": "Take a fresh window observation before acting because the current state is incomplete or changing.",
@@ -83,6 +95,20 @@ ALLOWED_BACKGROUND_TOOLS = frozenset({
     "invoke_menu",
 })
 
+SCOPED_BROWSER_TOOLS = frozenset({
+    "get_browser_state",
+    "browser_prepare",
+    "browser_navigate",
+    "browser_click",
+    "browser_type",
+})
+
+ALLOWED_BROWSER_STEP_TOOLS = frozenset({
+    "browser_click",
+    "browser_type",
+    "browser_navigate",
+})
+
 FORBIDDEN_TOOLS = frozenset({
     "bring_to_front",
     "get_desktop_state",
@@ -90,10 +116,6 @@ FORBIDDEN_TOOLS = frozenset({
     "clipboard_write",
     "kill_app",
     "set_config",
-    "browser_prepare",
-    "browser_navigate",
-    "browser_click",
-    "browser_type",
     "browser_dialog",
     "browser_set_input_files",
     "browser_download",
@@ -358,9 +380,29 @@ def describe_status(route: JevRoute, accounting: SessionAccounting, env: Mapping
     return payload
 
 
-def _reject_binary_or_image_payload(raw_json: str) -> None:
-    if BASE64_IMAGE_RE.search(raw_json):
-        raise ValueError("screenshots and base64 image payloads are forbidden in text-only Jev requests")
+def _contains_forbidden_image_key(obj: Any) -> bool:
+    if isinstance(obj, Mapping):
+        for k, v in obj.items():
+            if str(k).strip().lower() in FORBIDDEN_IMAGE_KEYS:
+                return True
+            if _contains_forbidden_image_key(v):
+                return True
+    elif isinstance(obj, (list, tuple)):
+        return any(_contains_forbidden_image_key(item) for item in obj)
+    return False
+
+
+def _reject_binary_or_image_payload(raw_json_or_obj: Any, obj: Any = None) -> None:
+    if isinstance(raw_json_or_obj, str):
+        raw_json = raw_json_or_obj
+        target_obj = obj
+    else:
+        target_obj = raw_json_or_obj
+        raw_json = json.dumps(raw_json_or_obj, ensure_ascii=False)
+    if (target_obj is not None and _contains_forbidden_image_key(target_obj)) or BASE64_IMAGE_RE.search(raw_json):
+        raise ValueError(
+            "image_payload_forbidden_in_jev: never pass screenshots and base64 image payloads to Jev"
+        )
 
 
 def validate_select_request(args: Mapping[str, Any]) -> dict[str, Any]:
@@ -369,7 +411,7 @@ def validate_select_request(args: Mapping[str, Any]) -> dict[str, Any]:
     raw_json = json.dumps(args, ensure_ascii=False)
     if len(raw_json.encode("utf-8")) > MAX_JSON_BYTES:
         raise ValueError(f"request exceeds maximum size of {MAX_JSON_BYTES} bytes")
-    _reject_binary_or_image_payload(raw_json)
+    _reject_binary_or_image_payload(raw_json, args)
 
     allowed_keys = {"goal", "pid", "window_id", "snapshot_id", "elements", "history", "candidates"}
     extra_keys = set(args.keys()) - allowed_keys
@@ -398,7 +440,16 @@ def validate_select_request(args: Mapping[str, Any]) -> dict[str, Any]:
     for item in raw_elements:
         if not isinstance(item, Mapping):
             raise ValueError("each element must be an object")
-        el_allowed = {"element_index", "role", "label", "state", "enabled", "depth", "in_toolbar"}
+        el_allowed = {
+            "element_index",
+            "role",
+            "label",
+            "state",
+            "enabled",
+            "depth",
+            "in_toolbar",
+            "supported_actions",
+        }
         if not set(item.keys()).issubset(el_allowed):
             raise ValueError(f"element contains unsupported fields: {sorted(set(item.keys()) - el_allowed)}")
         role = item.get("role")
@@ -430,6 +481,11 @@ def validate_select_request(args: Mapping[str, Any]) -> dict[str, Any]:
             if not isinstance(item["in_toolbar"], bool):
                 raise ValueError("element in_toolbar must be a boolean")
             entry["in_toolbar"] = item["in_toolbar"]
+        if "supported_actions" in item and item["supported_actions"] is not None:
+            raw_sa = item["supported_actions"]
+            if not isinstance(raw_sa, list) or not all(isinstance(a, str) for a in raw_sa):
+                raise ValueError("element supported_actions must be a list of strings")
+            entry["supported_actions"] = [a.strip()[:32] for a in raw_sa if a.strip()][:8]
         elements.append(entry)
 
     raw_history = args.get("history", [])
@@ -1163,7 +1219,17 @@ def _check_commit_safety_gate(
                 "type_text newline in Messages sends the conversation without WAITING_FOR_HUMAN confirmation"
             )
 
-    if tool in {"click", "double_click", "right_click", "set_value"}:
+    is_browser_ctx = bool((observation or {}).get("is_browser") or tool.startswith("browser_"))
+
+    if tool in {
+        "click",
+        "double_click",
+        "right_click",
+        "set_value",
+        "browser_click",
+        "browser_type",
+        "browser_navigate",
+    }:
         if tool in {"click", "double_click", "right_click"} and is_destructive_app_ctx and not is_element_addressed:
             # Coordinate clicks have no AX label to gate on; the caller-supplied description is not
             # authority, so refuse them where Send/Delete controls may sit under the pointer.
@@ -1173,12 +1239,22 @@ def _check_commit_safety_gate(
             )
         if "draft" not in norm_desc:
             if (
-                is_mail_ctx and re.search(r"\bsend(?:\s+(?:message|email|mail)(?:\s+now)?)?\b", norm_desc)
-            ) or re.search(r"\bsend\s+(?:message|email|mail)(?:\s+now)?\b", norm_desc):
+                (is_mail_ctx or is_browser_ctx)
+                and re.search(r"\bsend(?:\s+(?:message|email|mail|money|payment|invite)(?:\s+now)?)?\b", norm_desc)
+            ) or re.search(r"\bsend\s+(?:message|email|mail|money|payment|invite)(?:\s+now)?\b", norm_desc):
                 return (
                     "commit_action_forbidden_by_safety_policy (mail_send_forbidden_by_safety_policy): "
                     f"action {label_or_desc!r} targets Send control without WAITING_FOR_HUMAN confirmation"
                 )
+        if re.search(
+            r"\b(?:place\s+order|complete\s+purchase|buy\s+now|pay\s+now|confirm\s+(?:purchase|payment|order|transfer)|"
+            r"submit\s+(?:payment|order)|wire\s+transfer|authorize\s+payment|checkout\s+now)\b",
+            norm_desc,
+        ):
+            return (
+                "commit_action_forbidden_by_safety_policy: "
+                f"action {label_or_desc!r} targets consequential purchase/payment control without WAITING_FOR_HUMAN confirmation"
+            )
         if re.search(
             r"\b(?:reveal(?:\s+(?:password|secure\s+fields))?|show\s+in\s+large\s+type|"
             r"copy\s+(?:password|one-time\s+password|secret(?:\s+key)?|private\s+(?:key|link)|credential|api[_\s-]*key|recovery\s+(?:code|key)))\b",
@@ -1489,15 +1565,18 @@ def _analyze_window_elements(
                     extra_secure_ids.add(idx2)
                     if val2 and not _pw_placeholder_re.match(val2):
                         redacted_static_values.add(val2)
-        elif is_1password_ctx and role in TEXT_INPUT_AX_ROLES and not lbl and idx not in synthesized_labels:
+        elif role in TEXT_INPUT_AX_ROLES and not lbl and idx not in synthesized_labels:
             next_el = by_index[sorted_ids[pos + 1]] if pos + 1 < len(sorted_ids) else None
-            if val.lower().startswith("search in ") or (
-                next_el is not None
-                and str(next_el.get("role") or "").strip() == "AXButton"
-                and _el_label(next_el).strip().lower() == "clear"
-            ):
+            next_btn_lbl = (
+                _el_label(next_el).strip().lower()
+                if next_el is not None and str(next_el.get("role") or "").strip() == "AXButton"
+                else ""
+            )
+            if is_1password_ctx and (val.lower().startswith("search in ") or next_btn_lbl == "clear"):
                 synthesized_labels[idx] = "Search"
-            elif pos >= 1:
+            elif val.lower().startswith("search ") or next_btn_lbl == "search":
+                synthesized_labels[idx] = val.strip() if val.lower().startswith("search ") else "Search"
+            elif is_1password_ctx and pos >= 1:
                 prev_el = by_index[sorted_ids[pos - 1]]
                 prev_role = str(prev_el.get("role") or "").strip()
                 prev_lbl = _el_label(prev_el)
@@ -1561,13 +1640,57 @@ def _analyze_window_elements(
     return synthesized_labels, extra_secure_ids, redacted_static_values, sidebar_tier_by_id
 
 
+def _observation_window_size(observation: Mapping[str, Any] | None) -> tuple[float | None, float | None]:
+    if not isinstance(observation, Mapping):
+        return None, None
+    widths: list[float] = []
+    heights: list[float] = []
+    for w_key, h_key in (("screenshot_width", "screenshot_height"), ("width", "height")):
+        w_val = observation.get(w_key)
+        h_val = observation.get(h_key)
+        if (
+            isinstance(w_val, (int, float))
+            and not isinstance(w_val, bool)
+            and w_val > 0
+            and isinstance(h_val, (int, float))
+            and not isinstance(h_val, bool)
+            and h_val > 0
+        ):
+            widths.append(float(w_val))
+            heights.append(float(h_val))
+    for b_key in ("window_bounds", "bounds", "image_size", "screenshot"):
+        b_val = observation.get(b_key)
+        if isinstance(b_val, Mapping):
+            for w_key, h_key in (("screenshot_width", "screenshot_height"), ("width", "height"), ("w", "h")):
+                bw = b_val.get(w_key)
+                bh = b_val.get(h_key)
+                if (
+                    isinstance(bw, (int, float))
+                    and not isinstance(bw, bool)
+                    and bw > 0
+                    and isinstance(bh, (int, float))
+                    and not isinstance(bh, bool)
+                    and bh > 0
+                ):
+                    widths.append(float(bw))
+                    heights.append(float(bh))
+    if widths and heights:
+        return max(widths), max(heights)
+    return None, None
+
+
 def extract_window_observation(
     driver_result: Mapping[str, Any],
     *,
     expected_pid: int,
     expected_window_id: int,
+    query: str | None = None,
+    baseline_observation: Mapping[str, Any] | None = None,
+    previous_observation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate and extract structured AX elements and static texts from get_window_state."""
+    if baseline_observation is None and previous_observation is not None:
+        baseline_observation = previous_observation
     sc = driver_result.get("structuredContent")
     if not isinstance(sc, Mapping):
         raise ValueError("Driver get_window_state did not return structuredContent")
@@ -1582,17 +1705,144 @@ def extract_window_observation(
     if not isinstance(snapshot_id, str) or not SNAPSHOT_ID_RE.match(snapshot_id):
         raise ValueError(f"Driver get_window_state returned invalid snapshot_id: {snapshot_id!r}")
 
-    raw_elements = sc.get("elements")
-    if not isinstance(raw_elements, list):
-        raise ValueError("Driver get_window_state returned malformed elements list")
+    is_diff_payload = (
+        sc.get("is_diff") is True
+        or "diff_from_snapshot_id" in sc
+        or "removed_element_indices" in sc
+        or "updated_elements" in sc
+        or "added_elements" in sc
+    )
+    if is_diff_payload:
+        if not isinstance(baseline_observation, Mapping):
+            raise ValueError("invalid_diff_baseline: fresh full get_window_state read required (missing baseline)")
+        if (
+            baseline_observation.get("pid") != expected_pid
+            or baseline_observation.get("window_id") != expected_window_id
+        ):
+            raise ValueError("invalid_diff_baseline: fresh full get_window_state read required (target mismatch)")
+        diff_from = sc.get("diff_from_snapshot_id")
+        if not isinstance(diff_from, str) or not diff_from or baseline_observation.get("snapshot_id") != diff_from:
+            raise ValueError("invalid_diff_baseline: fresh full get_window_state read required (snapshot mismatch)")
+        base_is_incomplete = bool(
+            baseline_observation.get("truncated", False)
+            or baseline_observation.get("observation_truncated", False)
+            or baseline_observation.get("query") is not None
+            or (
+                not baseline_observation.get("elements_complete", True)
+                and baseline_observation.get("truncated") is not False
+            )
+        )
+        if base_is_incomplete:
+            raise ValueError("invalid_diff_baseline: fresh full get_window_state read required (incomplete baseline)")
+
+        base_raw = baseline_observation.get("_raw_elements")
+        if not isinstance(base_raw, list) or not base_raw:
+            base_raw = baseline_observation.get("all_elements") or baseline_observation.get("elements")
+        if not isinstance(base_raw, list) or not base_raw:
+            raise ValueError("invalid_diff_baseline: fresh full get_window_state read required (empty baseline)")
+
+        base_by_idx: dict[int, dict[str, Any]] = {}
+        for b_el in base_raw:
+            if not isinstance(b_el, Mapping):
+                raise ValueError("invalid_diff_baseline: fresh full get_window_state read required")
+            b_idx = b_el.get("element_index")
+            if not isinstance(b_idx, int) or isinstance(b_idx, bool) or b_idx < 0:
+                raise ValueError("invalid_diff_baseline: fresh full get_window_state read required")
+            base_by_idx[b_idx] = dict(b_el)
+
+        has_diff_ops = False
+        if "removed_element_indices" in sc:
+            has_diff_ops = True
+            rem_list = sc.get("removed_element_indices")
+            if not isinstance(rem_list, list):
+                raise ValueError("invalid_diff_baseline: fresh full get_window_state read required")
+            for r_idx in rem_list:
+                if not isinstance(r_idx, int) or isinstance(r_idx, bool) or r_idx not in base_by_idx:
+                    raise ValueError("invalid_diff_baseline: fresh full get_window_state read required")
+                base_by_idx.pop(r_idx, None)
+
+        if "updated_elements" in sc:
+            has_diff_ops = True
+            upd_list = sc.get("updated_elements")
+            if not isinstance(upd_list, list):
+                raise ValueError("invalid_diff_baseline: fresh full get_window_state read required")
+            for u_el in upd_list:
+                if not isinstance(u_el, Mapping):
+                    raise ValueError("invalid_diff_baseline: fresh full get_window_state read required")
+                u_idx = u_el.get("element_index")
+                if not isinstance(u_idx, int) or isinstance(u_idx, bool) or u_idx not in base_by_idx:
+                    raise ValueError("invalid_diff_baseline: fresh full get_window_state read required")
+                merged = dict(base_by_idx[u_idx])
+                merged.update(u_el)
+                base_by_idx[u_idx] = merged
+
+        if "added_elements" in sc:
+            has_diff_ops = True
+            add_list = sc.get("added_elements")
+            if not isinstance(add_list, list):
+                raise ValueError("invalid_diff_baseline: fresh full get_window_state read required")
+            for a_el in add_list:
+                if not isinstance(a_el, Mapping):
+                    raise ValueError("invalid_diff_baseline: fresh full get_window_state read required")
+                a_idx = a_el.get("element_index")
+                if (
+                    not isinstance(a_idx, int)
+                    or isinstance(a_idx, bool)
+                    or a_idx < 0
+                    or a_idx in base_by_idx
+                    or not a_el.get("role")
+                ):
+                    raise ValueError("invalid_diff_baseline: fresh full get_window_state read required")
+                base_by_idx[a_idx] = dict(a_el)
+
+        if not has_diff_ops and "elements" in sc:
+            patch_els = sc.get("elements")
+            if not isinstance(patch_els, list) or not patch_els:
+                raise ValueError("invalid_diff_baseline: fresh full get_window_state read required")
+            for p_el in patch_els:
+                if not isinstance(p_el, Mapping):
+                    raise ValueError("invalid_diff_baseline: fresh full get_window_state read required")
+                p_idx = p_el.get("element_index")
+                if not isinstance(p_idx, int) or isinstance(p_idx, bool) or p_idx < 0:
+                    raise ValueError("invalid_diff_baseline: fresh full get_window_state read required")
+                if p_el.get("removed") is True:
+                    if p_idx not in base_by_idx:
+                        raise ValueError("invalid_diff_baseline: fresh full get_window_state read required")
+                    base_by_idx.pop(p_idx, None)
+                elif p_idx in base_by_idx:
+                    merged = dict(base_by_idx[p_idx])
+                    merged.update(p_el)
+                    base_by_idx[p_idx] = merged
+                else:
+                    if not p_el.get("role"):
+                        raise ValueError("invalid_diff_baseline: fresh full get_window_state read required")
+                    base_by_idx[p_idx] = dict(p_el)
+
+        raw_elements: list[Any] = [base_by_idx[k] for k in sorted(base_by_idx.keys())]
+    else:
+        raw_elements = sc.get("elements")  # type: ignore[assignment]
+        if not isinstance(raw_elements, list):
+            raise ValueError("Driver get_window_state returned malformed elements list")
 
     text_blocks = "".join(
         c.get("text", "")
         for c in (driver_result.get("content") or [])
         if isinstance(c, Mapping) and c.get("type") == "text"
     )
-    tree_md = str(sc.get("tree_markdown") or text_blocks or "")
+    fallback_tree_md = (
+        str(baseline_observation.get("_tree_markdown") or "")
+        if (is_diff_payload and isinstance(baseline_observation, Mapping))
+        else ""
+    )
+    tree_md = str(sc.get("tree_markdown") or text_blocks or fallback_tree_md or "")
     raw_static_texts = [t.replace("\u200e", "").strip() for t in re.findall(r'AXStaticText = "([^"]*)"', tree_md)]
+    for raw_el in raw_elements:
+        if isinstance(raw_el, Mapping) and str(raw_el.get("role") or "").strip() == "AXStaticText":
+            st_val = raw_el.get("value") if raw_el.get("value") not in (None, "") else raw_el.get("label")
+            if isinstance(st_val, str):
+                st_clean = st_val.replace("\u200e", "").strip()
+                if st_clean and st_clean not in raw_static_texts:
+                    raw_static_texts.append(st_clean)
     md_depth, md_toolbar_ids, md_menubar_ids, md_unlabeled_value_ids = _parse_markdown_hierarchy_full(tree_md)
 
     by_index: dict[int, Mapping[str, Any]] = {}
@@ -1606,8 +1856,8 @@ def extract_window_observation(
             win_root_label = str(raw_el.get("label") or "")
             break
     obs_context = {
-        "app_name": sc.get("app_name"),
-        "window_title": sc.get("window_title") or win_root_label or None,
+        "app_name": sc.get("app_name") or (baseline_observation.get("app_name") if isinstance(baseline_observation, Mapping) else None),
+        "window_title": sc.get("window_title") or win_root_label or (baseline_observation.get("window_title") if isinstance(baseline_observation, Mapping) else None),
     }
     is_1password_ctx = "1password" in str(obs_context.get("app_name") or "").lower() or "1password" in str(
         obs_context.get("window_title") or ""
@@ -1615,6 +1865,12 @@ def extract_window_observation(
     synthesized_labels, extra_secure_ids, redacted_static_values, sidebar_secondary_ids = _analyze_window_elements(
         by_index, obs_context, raw_static_texts, md_unlabeled_value_ids
     )
+
+    eff_query: str | None = None
+    if isinstance(query, str) and query.strip():
+        eff_query = query.strip()
+    elif isinstance(sc.get("query"), str) and str(sc.get("query")).strip():
+        eff_query = str(sc.get("query")).strip()
 
     compact_elements: list[dict[str, Any]] = []
     explicit_target_elements: list[dict[str, Any]] = []
@@ -1693,6 +1949,14 @@ def extract_window_observation(
         )
         can_click = (not is_secure) and _element_can_explicit_click(role, actions, has_explicit_actions)
         can_set_value = (not is_secure) and (role in VALUE_SETTABLE_AX_ROLES)
+        supported_actions: list[str] = []
+        if can_click:
+            supported_actions.append("click")
+        if can_set_value:
+            supported_actions.append("set_value")
+        if (not is_secure) and (role in TEXT_INPUT_AX_ROLES):
+            supported_actions.append("type_text")
+
         has_label_or_value = bool(eff_label or value or is_secure or role in TEXT_INPUT_AX_ROLES)
         is_actionable_control = (
             has_label_or_value
@@ -1723,10 +1987,25 @@ def extract_window_observation(
             "priority_tier": priority_tier,
             "can_click": can_click,
             "can_auto_click": can_auto_click,
+            "supported_actions": supported_actions,
         }
         if value is not None:
             compact_el["value"] = value
-        if is_actionable_control:
+
+        matches_query = True
+        if eff_query is not None:
+            q_low = eff_query.lower()
+            haystack = " ".join([
+                display_label,
+                raw_label_val,
+                role,
+                value or "",
+                str(el.get("title") or ""),
+                str(el.get("description") or ""),
+            ]).lower()
+            matches_query = q_low in haystack
+
+        if is_actionable_control and matches_query:
             compact_elements.append(compact_el)
         else:
             explicit_target_elements.append(compact_el)
@@ -1792,23 +2071,66 @@ def extract_window_observation(
     bounded_elements = prioritized_elements[:MAX_ELEMENTS]
     all_elements = prioritized_elements + explicit_target_elements
     total_actionable_elements = len(prioritized_elements)
+    matched_elements_count = len(prioritized_elements)
     omitted_elements_count = max(0, total_actionable_elements - len(bounded_elements))
     omitted_candidates_count = max(0, total_click_candidates - len(auto_candidates))
     elements_complete = bool(sc.get("elements_complete", True))
     driver_truncated = bool(sc.get("truncated", False))
-    observation_truncated = bool(
+    walk_truncated = bool(
         driver_truncated
-        or not elements_complete
         or omitted_elements_count > 0
         or omitted_candidates_count > 0
+        or (not elements_complete and sc.get("truncated") is not False)
+    )
+    observation_truncated = walk_truncated
+    search_complete = bool(not walk_truncated)
+    query_incomplete = bool(eff_query is not None and walk_truncated)
+    if eff_query is not None:
+        if matched_elements_count > 0:
+            query_status = "matched_partial_scope" if walk_truncated else "matched"
+        else:
+            query_status = (
+                "no_matches_in_truncated_scope"
+                if walk_truncated
+                else "no_matches_in_complete_scope"
+            )
+    else:
+        query_status = "unfiltered_truncated" if observation_truncated else "unfiltered_complete"
+    visual_fallback_recommended = bool(
+        matched_elements_count == 0 and not driver_truncated and not walk_truncated and eff_query is None
     )
 
-    return {
+    win_w, win_h = _observation_window_size(sc)
+    if (win_w is None or win_h is None) and isinstance(baseline_observation, Mapping):
+        win_w, win_h = _observation_window_size(baseline_observation)
+    window_bounds: dict[str, Any] | None = None
+    if win_w is not None and win_h is not None:
+        window_bounds = {"width": win_w, "height": win_h}
+        raw_b = sc.get("window_bounds") if isinstance(sc.get("window_bounds"), Mapping) else sc.get("bounds")
+        if isinstance(raw_b, Mapping):
+            for coord_k in ("x", "y"):
+                if isinstance(raw_b.get(coord_k), (int, float)) and not isinstance(raw_b.get(coord_k), bool):
+                    window_bounds[coord_k] = raw_b[coord_k]
+            raw_bw = raw_b.get("width", raw_b.get("w"))
+            raw_bh = raw_b.get("height", raw_b.get("h"))
+            if isinstance(raw_bw, (int, float)) and not isinstance(raw_bw, bool) and raw_bw > 0:
+                window_bounds["logical_width"] = float(raw_bw)
+            if isinstance(raw_bh, (int, float)) and not isinstance(raw_bh, bool) and raw_bh > 0:
+                window_bounds["logical_height"] = float(raw_bh)
+
+    obs_dict: dict[str, Any] = {
         "pid": expected_pid,
         "window_id": expected_window_id,
         "snapshot_id": snapshot_id,
         "app_name": obs_context["app_name"],
         "window_title": obs_context["window_title"],
+        "window_bounds": window_bounds,
+        "query": eff_query,
+        "matched_elements_count": matched_elements_count,
+        "query_status": query_status,
+        "query_incomplete": query_incomplete,
+        "search_complete": search_complete,
+        "visual_fallback_recommended": visual_fallback_recommended,
         "elements_complete": elements_complete,
         "truncated": driver_truncated,
         "total_actionable_elements": total_actionable_elements,
@@ -1817,6 +2139,7 @@ def extract_window_observation(
         "elements_omitted": omitted_elements_count,
         "candidates_omitted": omitted_candidates_count,
         "observation_truncated": observation_truncated,
+        "reconstructed_from_diff": bool(is_diff_payload),
         "static_texts": static_texts,
         "indexed_element_ids": {e["element_index"] for e in all_elements},
         "secure_element_ids": {
@@ -1826,7 +2149,13 @@ def extract_window_observation(
         "elements": bounded_elements,
         "all_elements": all_elements,
         "auto_candidates": auto_candidates,
+        "_raw_elements": [dict(e) for e in raw_elements if isinstance(e, Mapping)],
+        "_tree_markdown": tree_md,
     }
+    if win_w is not None and win_h is not None:
+        obs_dict["width"] = win_w
+        obs_dict["height"] = win_h
+    return obs_dict
 
 
 def build_bound_candidates(
@@ -1834,6 +2163,7 @@ def build_bound_candidates(
     observation: Mapping[str, Any],
     *,
     action_value: str | None = None,
+    source_snapshot_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build or validate caller-supplied executable candidates bound to (pid, window_id, snapshot_id)."""
     pid = observation["pid"]
@@ -1856,6 +2186,7 @@ def build_bound_candidates(
         if action_value is not None:
             if not isinstance(action_value, str):
                 raise ValueError("value must be a string when auto-building set_value candidates")
+            is_bool_action_val = action_value.strip().lower() in {"0", "1", "true", "false", "on", "off", "yes", "no"}
             sv_candidates: list[dict[str, Any]] = []
             used_sv_ids: set[str] = set()
             for el in (observation.get("elements") or []):
@@ -1870,6 +2201,7 @@ def build_bound_candidates(
                     or idx in secure_indices
                     or "secure" in state
                     or role not in VALUE_SETTABLE_AX_ROLES
+                    or (role == "AXCheckBox" and not is_bool_action_val)
                 ):
                     continue
                 if len(sv_candidates) >= MAX_AUTO_CANDIDATES:
@@ -1898,6 +2230,16 @@ def build_bound_candidates(
                     },
                 })
             if not sv_candidates:
+                if (
+                    observation.get("query_incomplete")
+                    or observation.get("observation_truncated")
+                    or observation.get("truncated")
+                    or (not observation.get("elements_complete", True) and observation.get("truncated") is not False)
+                ):
+                    raise ValueError(
+                        "no_matching_candidates_in_truncated_scope: search scope was truncated or incomplete; "
+                        "request a targeted query or deeper observation"
+                    )
                 raise ValueError("no value-settable AX elements found in window to build set_value candidates")
             return sv_candidates
 
@@ -1913,11 +2255,26 @@ def build_bound_candidates(
             is None
         ]
         if not auto:
-            raise ValueError("no actionable AX elements found in window to build candidates")
+            if (
+                observation.get("query_incomplete")
+                or observation.get("observation_truncated")
+                or observation.get("truncated")
+                or (not observation.get("elements_complete", True) and observation.get("truncated") is not False)
+            ):
+                raise ValueError(
+                    "no_matching_candidates_in_truncated_scope: search scope was truncated or incomplete; "
+                    "request a targeted query or deeper observation"
+                )
+            raise ValueError(
+                "no actionable AX elements found in window to build candidates (visual_fallback_recommended=true)"
+            )
         return auto
 
     if not isinstance(raw_candidates, list) or len(raw_candidates) < 1 or len(raw_candidates) > MAX_AUTO_CANDIDATES:
         raise ValueError(f"candidates must be a list of 1 to {MAX_AUTO_CANDIDATES} items")
+
+    _reject_binary_or_image_payload(json.dumps(raw_candidates, ensure_ascii=False), raw_candidates)
+    win_w, win_h = _observation_window_size(observation)
 
     bound: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -1934,8 +2291,20 @@ def build_bound_candidates(
         if not isinstance(desc, str) or not desc.strip() or len(desc) > 1000:
             raise ValueError(f"candidate {cid!r} must have a non-empty description <= 1000 chars")
 
+        sub_args = item.get("arguments") if isinstance(item.get("arguments"), Mapping) else item
+        is_coord_only = (
+            "element_index" not in item
+            and "element_token" not in item
+            and "element_index" not in sub_args
+            and "element_token" not in sub_args
+            and ("x" in sub_args or "y" in sub_args)
+        )
+        allowed_snaps = {snapshot_id}
+        if is_coord_only and source_snapshot_id is not None:
+            allowed_snaps.add(source_snapshot_id)
+
         cand_snap = item.get("snapshot_id", snapshot_id)
-        if cand_snap != snapshot_id:
+        if cand_snap not in allowed_snaps:
             raise ValueError(
                 f"stale_snapshot_id: candidate {cid!r} bound to {cand_snap!r}, "
                 f"current observation is {snapshot_id!r}"
@@ -1997,7 +2366,7 @@ def build_bound_candidates(
             raise ValueError(
                 f"out_of_scope_target: candidate {cid!r} arguments.window_id={args_dict['window_id']} != {window_id}"
             )
-        if "snapshot_id" in args_dict and args_dict["snapshot_id"] != snapshot_id:
+        if "snapshot_id" in args_dict and args_dict["snapshot_id"] not in allowed_snaps:
             raise ValueError(
                 f"stale_snapshot_id: candidate {cid!r} arguments.snapshot_id={args_dict['snapshot_id']!r} != {snapshot_id!r}"
             )
@@ -2080,8 +2449,30 @@ def build_bound_candidates(
             args_dict["element_token"] = f"{snapshot_id}:{el_idx}"
         elif tool == "set_value":
             raise ValueError(f"missing_target_address: candidate {cid!r} for set_value requires element_index")
-        elif tool in {"click", "double_click", "right_click"} and ("x" not in args_dict or "y" not in args_dict):
-            raise ValueError(f"missing_target_address: candidate {cid!r} for {tool} requires element_index (or x, y)")
+        elif tool in {"click", "double_click", "right_click"}:
+            if "x" not in args_dict or "y" not in args_dict:
+                raise ValueError(f"missing_target_address: candidate {cid!r} for {tool} requires element_index (or x, y)")
+            x_val = args_dict.get("x")
+            y_val = args_dict.get("y")
+            if (
+                not isinstance(x_val, (int, float))
+                or isinstance(x_val, bool)
+                or not math.isfinite(float(x_val))
+                or not isinstance(y_val, (int, float))
+                or isinstance(y_val, bool)
+                or not math.isfinite(float(y_val))
+            ):
+                raise ValueError(f"out_of_bounds_coordinates: candidate {cid!r} requires finite numeric x, y")
+            if float(x_val) < 0 or float(y_val) < 0:
+                raise ValueError(
+                    f"out_of_bounds_coordinates: candidate {cid!r} has negative coordinates ({x_val}, {y_val})"
+                )
+            if win_w is not None and win_h is not None and (float(x_val) >= win_w or float(y_val) >= win_h):
+                raise ValueError(
+                    f"out_of_bounds_coordinates: candidate {cid!r} coordinates ({x_val}, {y_val}) "
+                    f"exceed window bounds ({win_w}x{win_h})"
+                )
+            args_dict["snapshot_id"] = snapshot_id
 
         if tool == "scroll" and "direction" not in args_dict:
             raise ValueError(f"missing_scroll_direction: candidate {cid!r} for scroll requires direction")
@@ -2090,7 +2481,7 @@ def build_bound_candidates(
         if desc_gate is not None:
             raise ValueError(f"{desc_gate} (candidate={cid!r})")
 
-        bound.append({
+        bound_entry: dict[str, Any] = {
             "id": cid,
             "description": desc.strip(),
             "pid": pid,
@@ -2098,7 +2489,10 @@ def build_bound_candidates(
             "snapshot_id": snapshot_id,
             "tool": tool,
             "arguments": args_dict,
-        })
+        }
+        if is_coord_only and source_snapshot_id is not None:
+            bound_entry["source_snapshot_id"] = source_snapshot_id
+        bound.append(bound_entry)
     return bound
 
 
@@ -2174,6 +2568,26 @@ def authorize_candidate_dispatch(
         if observation is not None and args["element_index"] in (observation.get("secure_element_ids") or set()):
             raise ValueError(
                 f"secure_element_refused: candidate {selected_id!r} cannot target secure element_index={args['element_index']}"
+            )
+    elif tool in {"click", "double_click", "right_click"} and ("x" in args or "y" in args):
+        x_val = args.get("x")
+        y_val = args.get("y")
+        if (
+            not isinstance(x_val, (int, float))
+            or isinstance(x_val, bool)
+            or not math.isfinite(float(x_val))
+            or not isinstance(y_val, (int, float))
+            or isinstance(y_val, bool)
+            or not math.isfinite(float(y_val))
+            or float(x_val) < 0
+            or float(y_val) < 0
+        ):
+            raise ValueError(f"out_of_bounds_coordinates: candidate {selected_id!r} has invalid coordinates")
+        win_w, win_h = _observation_window_size(observation)
+        if win_w is not None and win_h is not None and (float(x_val) >= win_w or float(y_val) >= win_h):
+            raise ValueError(
+                f"out_of_bounds_coordinates: candidate {selected_id!r} coordinates ({x_val}, {y_val}) "
+                f"exceed window bounds ({win_w}x{win_h})"
             )
 
     gate_labels = [str(candidate.get("description") or "")]
@@ -2528,7 +2942,649 @@ SESSION_SCOPED_DRIVER_TOOLS = frozenset({
     "start_session",
     "set_agent_cursor_enabled",
     "end_session",
+    "get_browser_state",
+    "browser_prepare",
+    "browser_navigate",
+    "browser_click",
+    "browser_type",
 })
+
+
+def _discover_same_pid_windows(
+    driver: "DriverClient",
+    pid: int,
+    current_window_id: int,
+    *,
+    timeout_s: float | None = None,
+    deadline_monotonic: float | None = None,
+) -> list[dict[str, Any]]:
+    """Query cua-driver list_windows for same-PID windows so modal sheets/dialogs can be discovered."""
+    try:
+        res = driver.call_tool(
+            "list_windows",
+            {"pid": pid},
+            timeout_s=timeout_s,
+            deadline_monotonic=deadline_monotonic,
+        )
+        if res.get("isError"):
+            return []
+        sc = res.get("structuredContent")
+        raw_windows: Any = None
+        if isinstance(sc, Mapping):
+            raw_windows = sc.get("windows")
+        if not isinstance(raw_windows, list):
+            txt = "".join(c.get("text", "") for c in (res.get("content") or []) if isinstance(c, Mapping)).strip()
+            if txt.startswith("{") or txt.startswith("["):
+                try:
+                    parsed = json.loads(txt)
+                    if isinstance(parsed, Mapping):
+                        raw_windows = parsed.get("windows")
+                    elif isinstance(parsed, list):
+                        raw_windows = parsed
+                except ValueError:
+                    pass
+        if not isinstance(raw_windows, list):
+            return []
+        discovered: list[dict[str, Any]] = []
+        for item in raw_windows:
+            if not isinstance(item, Mapping):
+                continue
+            w_pid = item.get("pid", pid)
+            if w_pid != pid:
+                continue
+            w_id = item.get("window_id", item.get("id"))
+            if not isinstance(w_id, int) or isinstance(w_id, bool) or w_id <= 0:
+                continue
+            entry: dict[str, Any] = {
+                "pid": pid,
+                "window_id": w_id,
+                "title": str(item.get("title") or item.get("name") or "").strip(),
+                "role": str(item.get("role") or "AXWindow").strip(),
+                "subrole": str(item.get("subrole") or "").strip(),
+                "is_current_target": w_id == current_window_id,
+            }
+            if isinstance(item.get("bounds"), Mapping):
+                entry["bounds"] = dict(item["bounds"])
+            discovered.append(entry)
+        return discovered
+    except Exception:
+        return []
+
+
+def is_allowed_synthetic_browser_url(url: str) -> bool:
+    if not isinstance(url, str) or not url.strip():
+        return False
+    raw = url.strip()
+    if raw.lower() == "about:blank":
+        return True
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+    except Exception:
+        return False
+    if parsed.username or parsed.password:
+        return False
+    scheme = (parsed.scheme or "").lower()
+    if scheme in {"http", "https"}:
+        host = (parsed.hostname or "").lower()
+        if host in {"127.0.0.1", "localhost", "::1"}:
+            return True
+    return False
+
+
+def validate_browser_prepare_args(args: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(args, Mapping):
+        raise ValueError("browser_prepare arguments must be an object")
+    _reject_binary_or_image_payload(args, "browser_prepare")
+    if str(args.get("delivery_mode") or "background").strip().lower() == "foreground":
+        raise ValueError("foreground_or_global_input_forbidden: delivery_mode='foreground' is forbidden")
+    strategy = args.get("strategy")
+    if isinstance(strategy, Mapping):
+        strat_kind = str(strategy.get("kind") or "").strip().lower()
+        if strat_kind and strat_kind not in {"isolated", "isolated_new", "isolated_named"}:
+            raise ValueError(
+                f"browser_mode_refused (browser_mode_forbidden): strategy.kind={strat_kind!r} is forbidden; "
+                "only isolated browser profiles are allowed"
+            )
+    elif isinstance(strategy, str) and strategy.strip().lower() not in {"isolated", "isolated_new", "isolated_named"}:
+        raise ValueError(
+            f"browser_mode_refused (browser_mode_forbidden): strategy={strategy!r} is forbidden; "
+            "only isolated browser profiles are allowed"
+        )
+
+    mode = str(args.get("mode") or "isolated").strip()
+    if mode not in {"isolated", "isolated_new", "isolated_named"}:
+        raise ValueError(
+            f"browser_mode_refused (browser_mode_forbidden): mode={mode!r} is forbidden; only mode='isolated' is allowed"
+        )
+    if "profile_dir" in args and args["profile_dir"] is not None:
+        raise ValueError("browser_profile_override_forbidden: custom profile_dir is forbidden in scoped browser lane")
+
+    raw_prof = args.get("profile")
+    profile_dict: dict[str, Any] = {"mode": "isolated_new"}
+    if isinstance(raw_prof, Mapping):
+        extra_prof_keys = set(raw_prof.keys()) - {"mode", "name"}
+        if extra_prof_keys:
+            raise ValueError(f"browser_profile_override_forbidden: unsupported profile keys {sorted(extra_prof_keys)}")
+        pmode = str(raw_prof.get("mode") or "isolated_new").strip()
+        if pmode == "isolated":
+            pmode = "isolated_new"
+        if pmode not in {"isolated_new", "isolated_named"}:
+            raise ValueError(
+                f"browser_mode_refused (browser_mode_forbidden): profile.mode={pmode!r} is forbidden; "
+                "only isolated_new or isolated_named is allowed"
+            )
+        if pmode == "isolated_named":
+            pname = str(raw_prof.get("name") or args.get("profile_name") or "").strip()
+            if not pname:
+                raise ValueError("isolated_named profile requires a non-empty profile name")
+            profile_dict = {"mode": "isolated_named", "name": pname}
+        else:
+            profile_dict = {"mode": "isolated_new"}
+    elif args.get("profile_name") is not None or mode == "isolated_named":
+        pname = str(args.get("profile_name") or "").strip()
+        if not pname:
+            raise ValueError("isolated_named profile requires a non-empty profile_name")
+        profile_dict = {"mode": "isolated_named", "name": pname}
+
+    out: dict[str, Any] = {
+        "mode": "isolated",
+        "allow_launch": True,
+        "profile": profile_dict,
+    }
+    if "browser" in args and args["browser"] is not None:
+        browser = str(args["browser"]).strip()
+        if not browser:
+            raise ValueError("invalid browser value")
+        out["browser"] = browser
+    if "url" in args and args["url"] is not None:
+        url = str(args["url"]).strip()
+        if not is_allowed_synthetic_browser_url(url):
+            raise ValueError(
+                f"external_browser_url_forbidden (browser_origin_forbidden): url={url!r} is not an allowed "
+                "loopback/synthetic fixture URL (only http(s)://127.0.0.1, localhost, [::1], or about:blank allowed)"
+            )
+        out["url"] = url
+    return out
+
+
+def extract_browser_observation(
+    driver_result: Mapping[str, Any],
+    *,
+    expected_target_id: str | None = None,
+    expected_tab_id: str | None = None,
+) -> dict[str, Any]:
+    if not isinstance(driver_result, Mapping):
+        raise ValueError("get_browser_state result must be a JSON object")
+    sc = driver_result.get("structuredContent")
+    if not isinstance(sc, Mapping):
+        txt = "".join(
+            c.get("text", "") for c in (driver_result.get("content") or []) if isinstance(c, Mapping)
+        ).strip()
+        if txt.startswith("{"):
+            try:
+                sc = json.loads(txt)
+            except ValueError:
+                sc = None
+    if not isinstance(sc, Mapping):
+        raise ValueError("get_browser_state result missing structuredContent")
+
+    tabs = sc.get("tabs") if isinstance(sc.get("tabs"), list) else []
+    first_tab_id = tabs[0].get("tab_id") if (tabs and isinstance(tabs[0], Mapping)) else None
+    target_id = str(sc.get("target_id") or sc.get("browser_target_id") or expected_target_id or "isolated").strip()
+    tab_id = str(sc.get("tab_id") or sc.get("active_tab_id") or first_tab_id or expected_tab_id or "tab-1").strip()
+    if expected_target_id is not None and target_id != expected_target_id:
+        raise ValueError(f"browser target_id mismatch: expected {expected_target_id!r}, got {target_id!r}")
+    if expected_tab_id is not None and tab_id != expected_tab_id:
+        raise ValueError(f"browser tab_id mismatch: expected {expected_tab_id!r}, got {tab_id!r}")
+
+    snap_obj = sc.get("snapshot") if isinstance(sc.get("snapshot"), Mapping) else {}
+    page_obj = sc.get("page") if isinstance(sc.get("page"), Mapping) else {}
+    snap = sc.get("snapshot_id") or sc.get("page_snapshot_id") or snap_obj.get("id") or snap_obj.get("snapshot_id")
+    if not isinstance(snap, str) or not BROWSER_SNAPSHOT_ID_RE.match(snap):
+        raise ValueError(f"get_browser_state returned invalid snapshot_id: {snap!r}")
+
+    url = str(sc.get("url") or page_obj.get("url") or "").strip()
+    title = str(sc.get("title") or page_obj.get("title") or "").strip()
+    if url and not is_allowed_synthetic_browser_url(url):
+        raise ValueError(
+            f"browser_origin_forbidden (external_browser_url_forbidden): tab url={url!r} is not an allowed loopback/synthetic origin"
+        )
+
+    raw_els = sc.get("elements") if isinstance(sc.get("elements"), list) else (
+        sc.get("refs") if isinstance(sc.get("refs"), list) else []
+    )
+    has_named_refs = any(
+        isinstance(it, Mapping)
+        and bool(str(it.get("label") or it.get("text") or it.get("name") or "").strip())
+        for it in raw_els
+    )
+    outline = sc.get("outline")
+    outline_values: dict[tuple[str, str], str] = {}
+    if isinstance(outline, str):
+        for line in outline.splitlines():
+            m_out = re.match(
+                r'^\s*-\s*([a-zA-Z0-9_-]+)\s+"([^"]+)":\s*(.+?)(?:\s+\[[^\]]*\])?\s*$',
+                line,
+            )
+            if m_out:
+                o_role = m_out.group(1).strip().lower()
+                o_label = m_out.group(2).replace("\u200e", "").strip()
+                o_val = m_out.group(3).replace("\u200e", "").strip()
+                if o_label and o_val:
+                    outline_values[(o_role, o_label)] = o_val
+
+    elements: list[dict[str, Any]] = []
+    valid_refs: set[str] = set()
+    secure_refs: set[str] = set()
+    extra_static_texts: list[str] = []
+    for idx, item in enumerate(raw_els):
+        if not isinstance(item, Mapping):
+            continue
+        ref = str(item.get("ref") or item.get("id") or f"ref_{idx}").strip()
+        if not BROWSER_REF_RE.match(ref):
+            continue
+        raw_name = item.get("label") if item.get("label") not in (None, "") else (
+            item.get("text") if item.get("text") not in (None, "") else item.get("name")
+        )
+        label = str(raw_name or "").replace("\u200e", "").strip()
+        role = str(item.get("role") or item.get("tag") or "element").strip()
+        role_lower = role.lower()
+        visibility = str(item.get("visibility") or "").strip().lower()
+        if has_named_refs and not label and visibility == "unknown" and role_lower in {"generic", "element", "group", "div", "span"}:
+            continue
+        val = item.get("value")
+        raw_val_str = "" if val is None else str(val).replace("\u200e", "").strip()
+        if role_lower in {"statictext", "labeltext", "heading", "rootwebarea"}:
+            if label and not _BULLET_MASK_RE.search(label):
+                extra_static_texts.append(label)
+            if raw_val_str and not _BULLET_MASK_RE.search(raw_val_str):
+                extra_static_texts.append(raw_val_str)
+            continue
+        if not raw_val_str and label and (role_lower, label) in outline_values:
+            raw_val_str = outline_values[(role_lower, label)]
+            val = raw_val_str
+        input_type = str(item.get("type") or item.get("input_type") or "").strip().lower()
+        is_secure = (
+            input_type == "password"
+            or "password" in role_lower
+            or "secure" in role_lower
+            or bool(_BULLET_MASK_RE.search(raw_val_str))
+            or bool(_BULLET_MASK_RE.search(label))
+            or (role_lower in {"textbox", "input", "axtextfield", "axsecuretextfield"} and bool(_SECRET_FIELD_NAME_RE.search(label)))
+        )
+        if _BULLET_MASK_RE.search(label):
+            label = ""
+        enabled = bool(item.get("enabled", True))
+        valid_refs.add(ref)
+        if is_secure:
+            secure_refs.add(ref)
+        state_str = "enabled (secure)" if is_secure else ("enabled" if enabled else "disabled")
+        raw_acts = item.get("actions") if isinstance(item.get("actions"), list) else []
+        act_set = {str(a).strip().lower() for a in raw_acts if isinstance(a, str)}
+        supp_actions: list[str] = []
+        if not is_secure and enabled:
+            if not act_set or ("pointer" in act_set or "click" in act_set or "press" in act_set):
+                supp_actions.append("browser_click")
+            if "type" in act_set or role_lower in {"input", "textbox", "searchbox", "textarea", "combobox", "axtextfield"}:
+                supp_actions.append("browser_type")
+        el_entry: dict[str, Any] = {
+            "element_index": len(elements),
+            "ref": ref,
+            "role": role,
+            "label": label or role,
+            "state": state_str,
+            "enabled": enabled,
+            "supported_actions": supp_actions,
+        }
+        if not is_secure and isinstance(val, (str, int, float)) and not isinstance(val, bool) and not _BULLET_MASK_RE.search(raw_val_str):
+            el_entry["value"] = raw_val_str
+        elements.append(el_entry)
+
+    static_texts: list[str] = []
+
+    def _add_static_text(candidate_txt: Any) -> None:
+        if not isinstance(candidate_txt, str):
+            return
+        cleaned = candidate_txt.replace("\u200e", "").strip()
+        if not cleaned or _BULLET_MASK_RE.search(cleaned):
+            return
+        if cleaned not in static_texts:
+            static_texts.append(cleaned)
+
+    if title:
+        _add_static_text(title)
+    for t in extra_static_texts:
+        _add_static_text(t)
+    for t in (sc.get("static_texts") or sc.get("texts") or []):
+        _add_static_text(t)
+    for cref in (sc.get("content_refs") or []):
+        if isinstance(cref, Mapping):
+            _add_static_text(cref.get("name") or cref.get("text") or cref.get("label") or cref.get("value"))
+        elif isinstance(cref, str):
+            _add_static_text(cref)
+    if isinstance(outline, list):
+        for o_item in outline:
+            if isinstance(o_item, Mapping):
+                _add_static_text(o_item.get("name") or o_item.get("text") or o_item.get("title") or o_item.get("label"))
+            elif isinstance(o_item, str):
+                _add_static_text(o_item)
+    elif isinstance(outline, str):
+        for line in outline.splitlines():
+            _add_static_text(line)
+    for e in elements:
+        if e.get("label"):
+            _add_static_text(str(e["label"]))
+        if "value" in e:
+            _add_static_text(str(e["value"]))
+
+    return {
+        "is_browser": True,
+        "target_id": target_id,
+        "tab_id": tab_id,
+        "snapshot_id": snap,
+        "url": url,
+        "title": title,
+        "elements": elements[:MAX_ELEMENTS],
+        "all_elements": elements,
+        "valid_refs": valid_refs,
+        "secure_refs": secure_refs,
+        "static_texts": static_texts,
+        "total_actionable_elements": len(elements),
+        "omitted_elements_count": max(0, len(elements) - len(elements[:MAX_ELEMENTS])),
+        "omitted_candidates_count": max(0, len(elements) - MAX_AUTO_CANDIDATES),
+        "observation_truncated": len(elements) > MAX_ELEMENTS or len(elements) > MAX_AUTO_CANDIDATES,
+    }
+
+
+def build_bound_browser_candidates(
+    raw_candidates: Any,
+    observation: Mapping[str, Any],
+    *,
+    action_value: str | None = None,
+    source_snapshot_id: str | None = None,
+) -> list[dict[str, Any]]:
+    target_id = str(observation["target_id"])
+    tab_id = str(observation["tab_id"])
+    snap = str(observation["snapshot_id"])
+    valid_refs: set[str] = set(observation.get("valid_refs") or set())
+    secure_refs: set[str] = set(observation.get("secure_refs") or set())
+    all_els = observation.get("all_elements") or observation.get("elements") or []
+    by_ref = {str(e.get("ref")): e for e in all_els if isinstance(e, Mapping) and e.get("ref")}
+
+    if raw_candidates is None:
+        built: list[dict[str, Any]] = []
+        for e in (observation.get("elements") or [])[:MAX_AUTO_CANDIDATES]:
+            ref = str(e["ref"])
+            if ref in secure_refs or "secure" in str(e.get("state") or ""):
+                continue
+            role = str(e.get("role") or "element")
+            label = str(e.get("label") or role)
+            slug = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")[:18] or "el"
+            supp = set(e.get("supported_actions") or [])
+            if action_value is not None and (
+                "browser_type" in supp
+                or role.lower() in {"input", "textbox", "searchbox", "textarea", "combobox", "axtextfield"}
+            ):
+                cand_args = {
+                    "target_id": target_id,
+                    "tab_id": tab_id,
+                    "snapshot_id": snap,
+                    "ref": ref,
+                    "text": action_value,
+                    "replace": True,
+                }
+                gate_err = _check_commit_safety_gate(
+                    observation, f'Type into [{ref}] {role} "{label}"', "browser_type", cand_args
+                )
+                if gate_err is not None:
+                    raise ValueError(gate_err)
+                built.append({
+                    "id": f"browser.type.{ref.replace(':', '_')}.{slug}"[:64],
+                    "description": f'Type value into [{ref}] {role} "{label}"',
+                    "tool": "browser_type",
+                    "arguments": cand_args,
+                })
+            else:
+                cand_args = {
+                    "target_id": target_id,
+                    "tab_id": tab_id,
+                    "snapshot_id": snap,
+                    "ref": ref,
+                    "delivery_mode": "background",
+                    "input_route": "dom_event",
+                }
+                gate_err = _check_commit_safety_gate(
+                    observation, f'Click [{ref}] {role} "{label}"', "browser_click", cand_args
+                )
+                if gate_err is not None:
+                    continue
+                built.append({
+                    "id": f"browser.click.{ref.replace(':', '_')}.{slug}"[:64],
+                    "description": f'Click [{ref}] {role} "{label}"',
+                    "tool": "browser_click",
+                    "arguments": cand_args,
+                })
+        if not built:
+            raise ValueError("no actionable browser elements found in page snapshot")
+        return built
+
+    if not isinstance(raw_candidates, list) or len(raw_candidates) == 0:
+        raise ValueError("browser candidates must be a non-empty list when provided")
+    if len(raw_candidates) > MAX_AUTO_CANDIDATES:
+        raise ValueError(f"at most {MAX_AUTO_CANDIDATES} browser candidates allowed")
+
+    validated: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for idx, item in enumerate(raw_candidates):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"candidates[{idx}] must be an object")
+        _reject_binary_or_image_payload(item, f"candidates[{idx}]")
+        cid = str(item.get("id") or "").strip()
+        if not CANDIDATE_ID_RE.match(cid):
+            raise ValueError(f"candidates[{idx}].id invalid: {cid!r}")
+        if cid in RESERVED_CANDIDATES or cid in seen_ids:
+            raise ValueError(f"candidates[{idx}].id duplicate or reserved: {cid!r}")
+        seen_ids.add(cid)
+
+        tool = str(item.get("tool") or "browser_click").strip()
+        if tool in FORBIDDEN_TOOLS:
+            raise ValueError(f"candidates[{idx}] uses forbidden tool {tool!r}")
+        if tool not in ALLOWED_BROWSER_STEP_TOOLS:
+            raise ValueError(f"candidates[{idx}] tool {tool!r} is not in ALLOWED_BROWSER_STEP_TOOLS")
+
+        raw_args = item.get("arguments") if isinstance(item.get("arguments"), Mapping) else item
+        if str(raw_args.get("delivery_mode") or "background").strip().lower() == "foreground":
+            raise ValueError("foreground_or_global_input_forbidden: delivery_mode='foreground' is forbidden")
+        cand_target = str(raw_args.get("target_id") or target_id).strip()
+        cand_tab = str(raw_args.get("tab_id") or tab_id).strip()
+        if cand_target != target_id:
+            raise ValueError(f"candidates[{idx}] target_id={cand_target!r} does not match {target_id!r}")
+        if cand_tab != tab_id:
+            raise ValueError(f"candidates[{idx}] tab_id={cand_tab!r} does not match {tab_id!r}")
+
+        cand_snap = str(raw_args.get("snapshot_id") or source_snapshot_id or snap).strip()
+        if cand_snap != snap:
+            raise ValueError(f"stale_snapshot: candidate snapshot_id={cand_snap!r} != current {snap!r}")
+
+        args_out: dict[str, Any] = {
+            "target_id": target_id,
+            "tab_id": tab_id,
+            "snapshot_id": snap,
+        }
+        target_el: Mapping[str, Any] | None = None
+        if tool in {"browser_click", "browser_type"}:
+            ref = str(raw_args.get("ref") or "").strip()
+            if not ref or ref not in valid_refs:
+                raise ValueError(f"candidates[{idx}] ref={ref!r} not present in current browser snapshot {snap}")
+            target_el = by_ref.get(ref)
+            if ref in secure_refs or (isinstance(target_el, Mapping) and "secure" in str(target_el.get("state") or "")):
+                raise ValueError(f"secure_element_refused: browser ref {ref!r} is a secure/password field")
+            args_out["ref"] = ref
+            if tool == "browser_click":
+                args_out["delivery_mode"] = str(raw_args.get("delivery_mode") or "background").strip()
+                args_out["input_route"] = str(raw_args.get("input_route") or "dom_event").strip()
+            elif tool == "browser_type":
+                text_val = raw_args.get("text", raw_args.get("value", action_value))
+                if not isinstance(text_val, str) or not text_val:
+                    raise ValueError(f"candidates[{idx}] browser_type requires non-empty text")
+                args_out["text"] = text_val
+                args_out["replace"] = bool(raw_args.get("replace", True))
+                if "submit" in raw_args and isinstance(raw_args.get("submit"), bool):
+                    args_out["submit"] = raw_args["submit"]
+        elif tool == "browser_navigate":
+            url = str(raw_args.get("url") or "").strip()
+            if not is_allowed_synthetic_browser_url(url):
+                raise ValueError(
+                    f"external_browser_url_forbidden (browser_origin_forbidden): candidates[{idx}] url={url!r} is not an allowed local/synthetic URL"
+                )
+            args_out["url"] = url
+
+        desc = str(item.get("description") or f"{tool} on {args_out.get('ref') or args_out.get('url')}").strip()
+        target_lbl = str(target_el.get("label") or "") if isinstance(target_el, Mapping) else ""
+        safety_desc = f"{desc} {target_lbl}".strip()
+        gate_err = _check_commit_safety_gate(observation, safety_desc, tool, args_out)
+        if gate_err is not None:
+            raise ValueError(gate_err)
+        validated.append({
+            "id": cid,
+            "description": desc[:1000],
+            "tool": tool,
+            "arguments": args_out,
+        })
+    return validated
+
+
+def authorize_browser_candidate_dispatch(
+    decision: Mapping[str, Any],
+    bound_candidates: list[dict[str, Any]],
+    *,
+    expected_target_id: str,
+    expected_tab_id: str,
+    current_snapshot_id: str,
+    valid_refs: set[str],
+) -> dict[str, Any]:
+    if decision.get("kind") != "selected":
+        raise ValueError(f"cannot authorize non-selected decision kind={decision.get('kind')!r}")
+    selected_id = decision.get("selected_id")
+    if not isinstance(selected_id, str) or selected_id in RESERVED_CANDIDATES:
+        raise ValueError(f"cannot dispatch reserved or empty selected_id={selected_id!r}")
+    by_id = {c["id"]: c for c in bound_candidates}
+    if selected_id not in by_id:
+        raise ValueError(f"selected_id {selected_id!r} not in bound browser candidate table")
+    cand = by_id[selected_id]
+    tool = cand.get("tool")
+    if tool not in ALLOWED_BROWSER_STEP_TOOLS:
+        raise ValueError(f"tool {tool!r} is not allowed in browser step")
+    args = cand.get("arguments")
+    if not isinstance(args, Mapping):
+        raise ValueError("candidate arguments must be a mapping")
+    if args.get("target_id") != expected_target_id or args.get("tab_id") != expected_tab_id:
+        raise ValueError("browser candidate scope mismatch")
+    if args.get("snapshot_id") != current_snapshot_id:
+        raise ValueError("stale_snapshot: browser candidate snapshot_id mismatch")
+    if tool in {"browser_click", "browser_type"}:
+        ref = args.get("ref")
+        if not isinstance(ref, str) or ref not in valid_refs:
+            raise ValueError(f"stale_or_invalid_browser_ref: ref={ref!r} not in snapshot {current_snapshot_id}")
+    elif tool == "browser_navigate":
+        url = str(args.get("url") or "")
+        if not is_allowed_synthetic_browser_url(url):
+            raise ValueError(f"external_browser_url_forbidden: url={url!r}")
+    return cand
+
+
+def check_browser_postcondition(
+    expected: Mapping[str, Any] | None,
+    pre_obs: Mapping[str, Any],
+    post_obs: Mapping[str, Any],
+    *,
+    target_ref: str | None = None,
+) -> tuple[bool, bool, str]:
+    pre_sig = (
+        pre_obs.get("url"),
+        pre_obs.get("title"),
+        tuple(pre_obs.get("static_texts") or []),
+        tuple(
+            (e.get("role"), e.get("label"), e.get("value"), e.get("state"))
+            for e in (pre_obs.get("all_elements") or [])
+            if isinstance(e, Mapping)
+        ),
+    )
+    post_sig = (
+        post_obs.get("url"),
+        post_obs.get("title"),
+        tuple(post_obs.get("static_texts") or []),
+        tuple(
+            (e.get("role"), e.get("label"), e.get("value"), e.get("state"))
+            for e in (post_obs.get("all_elements") or [])
+            if isinstance(e, Mapping)
+        ),
+    )
+    state_changed = pre_sig != post_sig
+    if expected is None:
+        return state_changed, False, "no_expected_postcondition_supplied"
+    if not isinstance(expected, Mapping) or not expected:
+        return state_changed, False, "empty_expected_postcondition"
+
+    post_texts = list(post_obs.get("static_texts") or [])
+    if "url_contains" in expected:
+        needle = str(expected["url_contains"] or "")
+        if not needle or needle not in str(post_obs.get("url") or ""):
+            return state_changed, False, f"expected url_contains={needle!r}, got {post_obs.get('url')!r}"
+    if "title_contains" in expected:
+        needle = str(expected["title_contains"] or "")
+        if not needle or needle not in str(post_obs.get("title") or ""):
+            return state_changed, False, f"expected title_contains={needle!r}, got {post_obs.get('title')!r}"
+    if "static_text_contains" in expected:
+        needle = str(expected["static_text_contains"] or "")
+        if not needle or not any(needle in t for t in post_texts):
+            return state_changed, False, f"expected static_text_contains={needle!r}, got {post_texts!r}"
+    if "static_text_equals" in expected:
+        exact = str(expected["static_text_equals"] or "")
+        if not exact or not any(exact == t for t in post_texts):
+            return state_changed, False, f"expected static_text_equals={exact!r}, got {post_texts!r}"
+    if "element_value_equals" in expected or "element_label_contains" in expected:
+        ref_key = str(expected.get("ref") or target_ref or "").strip()
+        post_els = [e for e in (post_obs.get("all_elements") or []) if isinstance(e, Mapping) and e.get("ref")]
+        by_ref = {str(e.get("ref")): e for e in post_els}
+        post_el = by_ref.get(ref_key)
+        if post_el is None and ref_key:
+            pre_by_ref = {
+                str(e.get("ref")): e
+                for e in (pre_obs.get("all_elements") or [])
+                if isinstance(e, Mapping) and e.get("ref")
+            }
+            pre_el = pre_by_ref.get(ref_key)
+            ref_suffix = ref_key.split(":", 1)[-1] if ":" in ref_key else ""
+            if isinstance(pre_el, Mapping):
+                pre_role = str(pre_el.get("role") or "")
+                pre_lbl = str(pre_el.get("label") or "")
+                for cand_el in post_els:
+                    if str(cand_el.get("role") or "") == pre_role and str(cand_el.get("label") or "") == pre_lbl:
+                        post_el = cand_el
+                        break
+            if post_el is None and ref_suffix:
+                for cand_el in post_els:
+                    cand_ref = str(cand_el.get("ref") or "")
+                    if ":" in cand_ref and cand_ref.split(":", 1)[-1] == ref_suffix:
+                        if pre_el is None or str(cand_el.get("role") or "") == str(pre_el.get("role") or ""):
+                            post_el = cand_el
+                            break
+        if post_el is None:
+            return state_changed, False, f"target_ref_missing_in_post_obs: ref={ref_key!r}"
+        if "element_value_equals" in expected:
+            want_val = str(expected["element_value_equals"])
+            got_val = str(post_el.get("value") or "")
+            if got_val != want_val:
+                return state_changed, False, f"expected element_value_equals={want_val!r} on ref={ref_key!r}, got {got_val!r}"
+        if "element_label_contains" in expected:
+            want_lbl = str(expected["element_label_contains"])
+            got_lbl = str(post_el.get("label") or "")
+            if want_lbl not in got_lbl:
+                return state_changed, False, f"expected element_label_contains={want_lbl!r} on ref={ref_key!r}, got {got_lbl!r}"
+
+    return state_changed, True, "expected_postcondition_verified"
+
 
 _TARGET_LOCK = threading.Lock()
 _ACTIVE_TARGETS: dict[tuple[int, int], dict[str, Any]] = {}
@@ -2909,6 +3965,28 @@ TOOLS = [
         },
     },
     {
+        "name": "jev_observe",
+        "description": (
+            "Observe a background window (pid, window_id) with query/completeness metadata, supported_actions per element, "
+            "diff-baseline validation with automatic fresh-read fallback, and optional same-PID window discovery."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["pid", "window_id"],
+            "properties": {
+                "pid": {"type": "integer", "minimum": 1},
+                "window_id": {"type": "integer", "minimum": 1},
+                "query": {"type": "string", "minLength": 1},
+                "max_depth": {"type": "integer", "minimum": MIN_OBSERVE_MAX_DEPTH, "maximum": MAX_OBSERVE_MAX_DEPTH},
+                "max_elements": {"type": "integer", "minimum": MIN_OBSERVE_MAX_ELEMENTS, "maximum": MAX_OBSERVE_MAX_ELEMENTS},
+                "walk_timeout_ms": {"type": "integer", "minimum": MIN_OBSERVE_WALK_TIMEOUT_MS, "maximum": MAX_OBSERVE_WALK_TIMEOUT_MS},
+                "include_diff": {"type": "boolean"},
+                "discover_windows": {"type": "boolean"},
+            },
+        },
+    },
+    {
         "name": "jev_select_action",
         "description": (
             "Select one bounded candidate action ID (or 'reobserve' / 'abstain') using Jev (jev-1.13.0) from "
@@ -2932,7 +4010,7 @@ TOOLS = [
                     "type": "array",
                     "description": (
                         "Optional compact AX elements "
-                        "({element_index, role, label, state?, enabled?, depth?, in_toolbar?})."
+                        "({element_index, role, label, state?, enabled?, depth?, in_toolbar?, supported_actions?})."
                     ),
                     "items": {"type": "object"},
                 },
@@ -3030,6 +4108,15 @@ TOOLS = [
                     "pattern": "^s[0-9a-f]{8,}$",
                     "description": "Optional expected pre-action snapshot_id; refuses with stale_snapshot if observation differs.",
                 },
+                "source_snapshot_id": {
+                    "type": "string",
+                    "pattern": "^s[0-9a-f]{8,}$",
+                    "description": "Optional snapshot_id from the screenshot/observation used to derive window-local coordinates.",
+                },
+                "discover_windows": {
+                    "type": "boolean",
+                    "description": "When true, queries same-PID windows before and after dispatch to discover newly opened modals/dialogs.",
+                },
                 "candidates": {
                     "type": "array",
                     "description": (
@@ -3044,6 +4131,44 @@ TOOLS = [
                     "items": {"type": "object"},
                 },
                 "expected_postcondition": EXPECTED_POSTCONDITION_SCHEMA,
+            },
+        },
+    },
+    {
+        "name": "jev_browser_prepare",
+        "description": (
+            "Prepare an isolated synthetic browser session via cua-driver (mode='isolated' only; "
+            "default user profiles and external non-local URLs are refused)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "mode": {"type": "string", "enum": ["isolated"]},
+                "browser": {"type": "string"},
+                "url": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "jev_browser_step",
+        "description": (
+            "Execute one guarded browser step on an explicit isolated browser target (target_id, tab_id, snapshot_id) "
+            "with text-only Jev selection, commit-action safety gating, and fresh get_browser_state verification."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["goal"],
+            "properties": {
+                "goal": {"type": "string"},
+                "target_id": {"type": "string"},
+                "tab_id": {"type": "string"},
+                "value": {"type": "string"},
+                "mode": {"type": "string", "enum": ["jev", "deterministic"]},
+                "expected_snapshot_id": {"type": "string"},
+                "candidates": {"type": "array", "items": {"type": "object"}},
+                "expected_postcondition": {"type": "object"},
             },
         },
     },
@@ -3199,6 +4324,10 @@ class JevMcpServer:
             self._driver_client.session_id = self.session_id
         self._closed = False
         self._owned_targets: set[tuple[int, int]] = set()
+        self._last_observations: dict[tuple[int, int], dict[str, Any]] = {}
+        self._visual_snapshots: dict[tuple[int, int], str] = {}
+        self._visual_snapshot_targets: dict[str, tuple[int, int]] = {}
+        self._snapshot_targets: dict[str, tuple[int, int]] = {}
 
     def _get_driver(self) -> DriverClient:
         if self._driver_client is not None:
@@ -3500,6 +4629,13 @@ class JevMcpServer:
                 is_error=True,
             )
 
+        source_snap = args.get("source_snapshot_id")
+        if source_snap is not None and (not isinstance(source_snap, str) or not SNAPSHOT_ID_RE.match(source_snap)):
+            return _format_tool_result(
+                {"schema": "agy_cua.jev_step_v1", "status": "refused", "reason": "invalid_source_snapshot_id"},
+                is_error=True,
+            )
+
         raw_cands = args.get("candidates")
         if mode == "deterministic":
             if not isinstance(raw_cands, list) or len(raw_cands) != 1:
@@ -3619,7 +4755,48 @@ class JevMcpServer:
                 if raw_pre.get("isError"):
                     err_txt = "".join(c.get("text", "") for c in (raw_pre.get("content") or []) if isinstance(c, Mapping))
                     raise RuntimeError(err_txt or "get_window_state returned isError=true")
-                pre_obs = extract_window_observation(raw_pre, expected_pid=pid, expected_window_id=window_id)
+                prev_cached_obs = self._last_observations.get((pid, window_id))
+                prev_baseline = prev_cached_obs
+                try:
+                    pre_obs = extract_window_observation(
+                        raw_pre,
+                        expected_pid=pid,
+                        expected_window_id=window_id,
+                        query=query_val,
+                        previous_observation=prev_baseline,
+                    )
+                except ValueError as diff_exc:
+                    if "invalid_diff_baseline" not in str(diff_exc):
+                        raise
+                    fallback_args = dict(pre_obs_args, include_diff=False, tree_format="both")
+                    raw_pre = driver.call_tool(
+                        "get_window_state",
+                        fallback_args,
+                        timeout_s=obs_call_timeout_s(driver),
+                        deadline_monotonic=_deadline_monotonic,
+                    )
+                    if raw_pre.get("isError"):
+                        err_txt = "".join(c.get("text", "") for c in (raw_pre.get("content") or []) if isinstance(c, Mapping))
+                        raise RuntimeError(err_txt or "get_window_state fallback returned isError=true")
+                    pre_obs = extract_window_observation(
+                        raw_pre,
+                        expected_pid=pid,
+                        expected_window_id=window_id,
+                        query=query_val,
+                        previous_observation=None,
+                    )
+                if isinstance(prev_cached_obs, Mapping) and isinstance(prev_cached_obs.get("window_bounds"), Mapping):
+                    prev_wb = prev_cached_obs["window_bounds"]
+                    cur_wb = pre_obs.get("window_bounds") if isinstance(pre_obs.get("window_bounds"), dict) else {}
+                    if "logical_width" in prev_wb and "logical_width" not in cur_wb:
+                        cur_wb["logical_width"] = prev_wb["logical_width"]
+                        cur_wb["logical_height"] = prev_wb.get("logical_height", prev_wb["logical_width"])
+                        cur_wb["width"] = prev_wb["width"]
+                        cur_wb["height"] = prev_wb["height"]
+                        pre_obs["window_bounds"] = cur_wb
+                if not pre_obs.get("query_incomplete"):
+                    self._last_observations[(pid, window_id)] = pre_obs
+                self._snapshot_targets[pre_obs["snapshot_id"]] = (pid, window_id)
             except Exception as exc:
                 release_if_unowned()
                 obs_ms = round((time.perf_counter() - obs_started) * 1000, 2)
@@ -3632,6 +4809,7 @@ class JevMcpServer:
                     "window_id": window_id,
                     "session_id": self.session_id,
                     "verified": False,
+                    "action_dispatched": False,
                     "uncertain_side_effect": False,
                     "timings_ms": {
                         "observe_ms": obs_ms,
@@ -3650,6 +4828,10 @@ class JevMcpServer:
             "omitted_elements_count": pre_obs["omitted_elements_count"],
             "omitted_candidates_count": pre_obs["omitted_candidates_count"],
             "observation_truncated": pre_obs["observation_truncated"],
+            "query_status": pre_obs.get("query_status"),
+            "query_incomplete": pre_obs.get("query_incomplete", False),
+            "search_complete": pre_obs.get("search_complete", True),
+            "visual_fallback_recommended": pre_obs.get("visual_fallback_recommended", False),
         }
 
         if expected_snap is not None and pre_obs["snapshot_id"] != expected_snap:
@@ -3665,6 +4847,7 @@ class JevMcpServer:
                 "pre_snapshot_id": pre_obs["snapshot_id"],
                 "pre_static_texts": pre_obs["static_texts"],
                 "verified": False,
+                "action_dispatched": False,
                 "uncertain_side_effect": False,
                 "timings_ms": {
                     "observe_ms": obs_ms,
@@ -3677,6 +4860,73 @@ class JevMcpServer:
             }
             self._record_trace(payload)
             return _format_tool_result(payload, is_error=True)
+
+        if source_snap is not None:
+            known_target = self._visual_snapshot_targets.get(source_snap) or self._snapshot_targets.get(source_snap)
+            if known_target is not None and known_target != (pid, window_id):
+                release_if_unowned()
+                payload = {
+                    "schema": "agy_cua.jev_step_v1",
+                    "status": "out_of_scope_target",
+                    "verification_outcome": "not_executed",
+                    "reason": (
+                        f"out_of_scope_target: source_snapshot_id={source_snap!r} belongs to "
+                        f"(pid={known_target[0]}, window_id={known_target[1]}), expected (pid={pid}, window_id={window_id})"
+                    ),
+                    "pid": pid,
+                    "window_id": window_id,
+                    "session_id": self.session_id,
+                    "pre_snapshot_id": pre_obs["snapshot_id"],
+                    "pre_static_texts": pre_obs["static_texts"],
+                    "verified": False,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": False,
+                    "timings_ms": {
+                        "observe_ms": obs_ms,
+                        "provider_ms": 0.0,
+                        "dispatch_ms": 0.0,
+                        "verify_ms": 0.0,
+                        "total_ms": round((time.perf_counter() - step_started) * 1000, 2),
+                    },
+                    "accounting": self.accounting.to_dict(),
+                }
+                self._record_trace(payload)
+                return _format_tool_result(payload, is_error=True)
+            latest_visual_snap = self._visual_snapshots.get((pid, window_id))
+            if source_snap not in self._visual_snapshot_targets or latest_visual_snap != source_snap:
+                release_if_unowned()
+                reason_code = (
+                    f"unknown_source_snapshot_id: source_snapshot_id={source_snap!r} was not observed via jev_observe(include_screenshot=true)"
+                    if source_snap not in self._visual_snapshot_targets
+                    else (
+                        f"stale_snapshot_id: source_snapshot_id={source_snap!r} does not match "
+                        f"last observed visual snapshot {latest_visual_snap!r}"
+                    )
+                )
+                payload = {
+                    "schema": "agy_cua.jev_step_v1",
+                    "status": "stale_snapshot",
+                    "verification_outcome": "not_executed",
+                    "reason": reason_code,
+                    "pid": pid,
+                    "window_id": window_id,
+                    "session_id": self.session_id,
+                    "pre_snapshot_id": pre_obs["snapshot_id"],
+                    "pre_static_texts": pre_obs["static_texts"],
+                    "verified": False,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": False,
+                    "timings_ms": {
+                        "observe_ms": obs_ms,
+                        "provider_ms": 0.0,
+                        "dispatch_ms": 0.0,
+                        "verify_ms": 0.0,
+                        "total_ms": round((time.perf_counter() - step_started) * 1000, 2),
+                    },
+                    "accounting": self.accounting.to_dict(),
+                }
+                self._record_trace(payload)
+                return _format_tool_result(payload, is_error=True)
 
         if _expected_pre_sig is not None and _obs_state_signature(pre_obs) != _expected_pre_sig:
             release_if_unowned()
@@ -3710,6 +4960,7 @@ class JevMcpServer:
                 args.get("candidates"),
                 pre_obs,
                 action_value=action_value,
+                source_snapshot_id=source_snap,
             )
             history_in = args.get("history")
             if history_in is None:
@@ -3734,32 +4985,49 @@ class JevMcpServer:
                 if e["element_index"] not in seen_prompt_ids:
                     prompt_els.append(e)
                     seen_prompt_ids.add(e["element_index"])
+            select_elements = [
+                {
+                    "element_index": e["element_index"],
+                    "role": e["role"],
+                    "label": e["label"],
+                    "state": e["state"],
+                    "depth": e.get("depth", 1),
+                    "in_toolbar": bool(e.get("in_toolbar", False)),
+                    "supported_actions": list(e.get("supported_actions") or []),
+                }
+                for e in prompt_els
+            ]
+            if not select_elements:
+                for idx_c, c in enumerate(bound_candidates):
+                    c_args = c.get("arguments")
+                    if isinstance(c_args, Mapping) and "x" in c_args and "y" in c_args and "element_index" not in c_args:
+                        select_elements.append({
+                            "element_index": idx_c,
+                            "role": "AXCanvasTarget",
+                            "label": str(c.get("description") or c.get("id") or "Canvas Target"),
+                            "state": f"enabled (visual coordinate {c_args['x']}, {c_args['y']})",
+                            "depth": 1,
+                            "in_toolbar": False,
+                            "supported_actions": [str(c.get("tool") or "click")],
+                        })
             select_req = validate_select_request({
                 "goal": goal,
                 "pid": pid,
                 "window_id": window_id,
                 "snapshot_id": pre_obs["snapshot_id"],
-                "elements": [
-                    {
-                        "element_index": e["element_index"],
-                        "role": e["role"],
-                        "label": e["label"],
-                        "state": e["state"],
-                        "depth": e.get("depth", 1),
-                        "in_toolbar": bool(e.get("in_toolbar", False)),
-                    }
-                    for e in prompt_els
-                ],
+                "elements": select_elements,
                 "history": history_in,
                 "candidates": [{"id": c["id"], "description": c["description"]} for c in bound_candidates],
             })
         except Exception as exc:
             release_if_unowned()
+            err_msg = str(exc)
+            err_status = "stale_snapshot" if "stale_snapshot_id" in err_msg else "candidate_refused"
             payload = {
                 "schema": "agy_cua.jev_step_v1",
-                "status": "candidate_refused",
+                "status": err_status,
                 "verification_outcome": "not_executed",
-                "reason": str(exc),
+                "reason": err_msg,
                 "pid": pid,
                 "window_id": window_id,
                 "session_id": self.session_id,
@@ -3963,7 +5231,19 @@ class JevMcpServer:
             self._record_trace(payload)
             return _format_tool_result(payload, is_error=True)
 
+        explicit_discover_windows = args.get("discover_windows") is True
+        pre_same_pid_windows: list[dict[str, Any]] = []
+        if explicit_discover_windows:
+            pre_same_pid_windows = _discover_same_pid_windows(
+                driver,
+                pid,
+                window_id,
+                timeout_s=min(1.0, dispatch_timeout_s),
+                deadline_monotonic=_deadline_monotonic,
+            )
+
         dispatch_started = time.perf_counter()
+        self._visual_snapshots.pop((pid, window_id), None)
         try:
             dispatch_res = driver.call_tool(
                 authorized["tool"],
@@ -4041,7 +5321,37 @@ class JevMcpServer:
             if raw_post.get("isError"):
                 err_txt = "".join(c.get("text", "") for c in (raw_post.get("content") or []) if isinstance(c, Mapping))
                 raise RuntimeError(err_txt or "post-dispatch get_window_state returned isError=true")
-            post_obs = extract_window_observation(raw_post, expected_pid=pid, expected_window_id=window_id)
+            try:
+                post_obs = extract_window_observation(
+                    raw_post,
+                    expected_pid=pid,
+                    expected_window_id=window_id,
+                    query=query_val,
+                    previous_observation=pre_obs,
+                )
+            except ValueError as diff_exc:
+                if "invalid_diff_baseline" not in str(diff_exc):
+                    raise
+                fallback_post_args = dict(post_obs_args, include_diff=False, tree_format="both")
+                raw_post = driver.call_tool(
+                    "get_window_state",
+                    fallback_post_args,
+                    timeout_s=obs_call_timeout_s(driver),
+                    deadline_monotonic=_deadline_monotonic,
+                )
+                if raw_post.get("isError"):
+                    err_txt = "".join(c.get("text", "") for c in (raw_post.get("content") or []) if isinstance(c, Mapping))
+                    raise RuntimeError(err_txt or "post-dispatch get_window_state fallback returned isError=true")
+                post_obs = extract_window_observation(
+                    raw_post,
+                    expected_pid=pid,
+                    expected_window_id=window_id,
+                    query=query_val,
+                    previous_observation=None,
+                )
+            if not post_obs.get("query_incomplete"):
+                self._last_observations[(pid, window_id)] = post_obs
+            self._snapshot_targets[post_obs["snapshot_id"]] = (pid, window_id)
             state_changed, post_ok, verify_reason = check_postcondition(
                 expected_post,
                 pre_obs,
@@ -4070,6 +5380,7 @@ class JevMcpServer:
                 "confidence": decision.get("confidence"),
                 "probabilities": decision.get("probabilities"),
                 "verified": False,
+                "action_dispatched": True,
                 "uncertain_side_effect": True,
                 "timings_ms": {
                     "observe_ms": obs_ms,
@@ -4082,6 +5393,30 @@ class JevMcpServer:
             }
             self._record_trace(payload)
             return _format_tool_result(payload, is_error=True)
+
+        discovered_windows: list[dict[str, Any]] = []
+        newly_opened_windows: list[dict[str, Any]] = []
+        should_discover_post = explicit_discover_windows or (
+            args.get("discover_windows") is not False
+            and _out_post_sig is None
+            and not state_changed
+            and not post_ok
+        )
+        if should_discover_post:
+            discovered_windows = _discover_same_pid_windows(
+                driver,
+                pid,
+                window_id,
+                timeout_s=min(0.4, obs_call_timeout_s(driver)),
+                deadline_monotonic=_deadline_monotonic,
+            )
+            pre_wids = {w["window_id"] for w in pre_same_pid_windows} | {window_id}
+            newly_opened_windows = [w for w in discovered_windows if w["window_id"] not in pre_wids]
+            if newly_opened_windows and not post_ok:
+                state_changed = True
+                if expected_post is None:
+                    verify_reason = "new_same_pid_window_discovered"
+
         verify_ms = round((time.perf_counter() - verify_started) * 1000, 2)
 
         self._update_target_snapshot(pid, window_id, post_obs["snapshot_id"])
@@ -4110,16 +5445,23 @@ class JevMcpServer:
             "post_omitted_elements_count": post_obs["omitted_elements_count"],
             "post_omitted_candidates_count": post_obs["omitted_candidates_count"],
             "post_observation_truncated": post_obs["observation_truncated"],
+            "post_query_status": post_obs.get("query_status"),
+            "post_query_incomplete": post_obs.get("query_incomplete", False),
+            "post_search_complete": post_obs.get("search_complete", True),
+            "post_visual_fallback_recommended": post_obs.get("visual_fallback_recommended", False),
             "observation_truncated": bool(
                 pre_obs["observation_truncated"] or post_obs["observation_truncated"]
             ),
         }
 
+        point_fallback_used = bool(target_el_idx is None and ("x" in driver_args or "y" in driver_args))
         payload = {
             "schema": "agy_cua.jev_step_v1",
             "status": step_status,
             "verification_outcome": verification_outcome,
             "verified": post_ok,
+            "action_dispatched": True,
+            "point_fallback_used": point_fallback_used,
             "uncertain_side_effect": False,
             "verification_reason": verify_reason,
             "state_changed": state_changed,
@@ -4127,10 +5469,13 @@ class JevMcpServer:
             "window_id": window_id,
             "session_id": self.session_id,
             "mode": mode,
+            "source_snapshot_id": source_snap,
             "pre_snapshot_id": pre_obs["snapshot_id"],
             "post_snapshot_id": post_obs["snapshot_id"],
             "pre_static_texts": pre_obs["static_texts"],
             "post_static_texts": post_obs["static_texts"],
+            "discovered_windows": discovered_windows,
+            "newly_opened_windows": newly_opened_windows,
             **post_obs_disclosure,
             "selected_id": authorized["id"],
             "selected_description": authorized["description"],
@@ -4141,6 +5486,632 @@ class JevMcpServer:
             "returned_model": decision.get("returned_model"),
             "sdk_identity": CLIENT_IDENTITY,
             "route": decision.get("route"),
+            "confidence": decision.get("confidence"),
+            "probabilities": decision.get("probabilities"),
+            "timings_ms": {
+                "observe_ms": obs_ms,
+                "provider_ms": provider_ms,
+                "dispatch_ms": dispatch_ms,
+                "verify_ms": verify_ms,
+                "total_ms": round((time.perf_counter() - step_started) * 1000, 2),
+            },
+            "accounting": self.accounting.to_dict(),
+        }
+        self._record_trace(payload)
+        return _format_tool_result(payload, is_error=is_err)
+
+    def handle_observe(self, args: Mapping[str, Any]) -> dict[str, Any]:
+        obs_started = time.perf_counter()
+        if not isinstance(args, Mapping):
+            return _format_tool_result(
+                {"schema": "agy_cua.jev_observe_v1", "status": "refused", "reason": "invalid_arguments"},
+                is_error=True,
+            )
+        pid = args.get("pid")
+        window_id = args.get("window_id")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return _format_tool_result(
+                {"schema": "agy_cua.jev_observe_v1", "status": "refused", "reason": "invalid_pid"},
+                is_error=True,
+            )
+        if not isinstance(window_id, int) or isinstance(window_id, bool) or window_id <= 0:
+            return _format_tool_result(
+                {"schema": "agy_cua.jev_observe_v1", "status": "refused", "reason": "invalid_window_id"},
+                is_error=True,
+            )
+        query_val: str | None = None
+        if "query" in args and args["query"] is not None:
+            raw_q = args["query"]
+            if not isinstance(raw_q, str) or not raw_q.strip():
+                return _format_tool_result(
+                    {"schema": "agy_cua.jev_observe_v1", "status": "refused", "reason": "invalid_query"},
+                    is_error=True,
+                )
+            query_val = raw_q.strip()
+
+        want_screenshot = bool(args.get("include_screenshot", False))
+        obs_call_args: dict[str, Any] = {
+            "pid": pid,
+            "window_id": window_id,
+            "include_screenshot": want_screenshot,
+            "tree_format": "both",
+        }
+        if query_val is not None:
+            obs_call_args["query"] = query_val
+        if "max_depth" in args and args["max_depth"] is not None:
+            obs_call_args["max_depth"] = args["max_depth"]
+        if "max_elements" in args and args["max_elements"] is not None:
+            obs_call_args["max_elements"] = args["max_elements"]
+        if "walk_timeout_ms" in args and args["walk_timeout_ms"] is not None:
+            obs_call_args["timeout_ms"] = args["walk_timeout_ms"]
+        if "include_diff" in args and isinstance(args["include_diff"], bool):
+            obs_call_args["include_diff"] = args["include_diff"]
+
+        diff_fallback_used = False
+        try:
+            driver = self._get_driver()
+            raw_obs = driver.call_tool("get_window_state", obs_call_args)
+            if raw_obs.get("isError"):
+                err_txt = "".join(c.get("text", "") for c in (raw_obs.get("content") or []) if isinstance(c, Mapping))
+                raise RuntimeError(err_txt or "get_window_state returned isError=true")
+            prev_baseline = self._last_observations.get((pid, window_id))
+            try:
+                obs = extract_window_observation(
+                    raw_obs,
+                    expected_pid=pid,
+                    expected_window_id=window_id,
+                    query=query_val,
+                    previous_observation=prev_baseline,
+                )
+            except ValueError as diff_exc:
+                if "invalid_diff_baseline" not in str(diff_exc):
+                    raise
+                diff_fallback_used = True
+                fallback_args = dict(obs_call_args, include_diff=False, tree_format="both")
+                raw_obs = driver.call_tool("get_window_state", fallback_args)
+                if raw_obs.get("isError"):
+                    err_txt = "".join(c.get("text", "") for c in (raw_obs.get("content") or []) if isinstance(c, Mapping))
+                    raise RuntimeError(err_txt or "get_window_state fallback returned isError=true")
+                obs = extract_window_observation(
+                    raw_obs,
+                    expected_pid=pid,
+                    expected_window_id=window_id,
+                    query=query_val,
+                    previous_observation=None,
+                )
+            if not obs.get("query_incomplete"):
+                self._last_observations[(pid, window_id)] = obs
+            self._snapshot_targets[obs["snapshot_id"]] = (pid, window_id)
+            discovered_windows: list[dict[str, Any]] = []
+            if bool(args.get("discover_windows", True)):
+                discovered_windows = _discover_same_pid_windows(driver, pid, window_id)
+        except Exception as exc:
+            return _format_tool_result(
+                {
+                    "schema": "agy_cua.jev_observe_v1",
+                    "status": "observation_failed",
+                    "reason": str(exc),
+                    "pid": pid,
+                    "window_id": window_id,
+                    "session_id": self.session_id,
+                    "observe_ms": round((time.perf_counter() - obs_started) * 1000, 2),
+                },
+                is_error=True,
+            )
+
+        secure_redacted_count = len(obs.get("secure_element_ids") or ())
+        if want_screenshot and secure_redacted_count > 0:
+            refused_payload = {
+                "schema": "agy_cua.jev_observe_v1",
+                "status": "screenshot_refused_secure_window",
+                "reason": (
+                    "screenshot_refused_secure_window: cannot return window screenshot when secure fields are present"
+                ),
+                "pid": pid,
+                "window_id": window_id,
+                "session_id": self.session_id,
+                "snapshot_id": obs["snapshot_id"],
+                "secure_fields_redacted_count": secure_redacted_count,
+                "observe_ms": round((time.perf_counter() - obs_started) * 1000, 2),
+            }
+            self._record_trace(refused_payload)
+            return _format_tool_result(refused_payload, is_error=True)
+
+        image_blocks = [
+            dict(item)
+            for item in (raw_obs.get("content") or [])
+            if isinstance(item, Mapping) and item.get("type") == "image" and item.get("data")
+        ]
+        if want_screenshot and image_blocks:
+            self._visual_snapshots[(pid, window_id)] = obs["snapshot_id"]
+            self._visual_snapshot_targets[obs["snapshot_id"]] = (pid, window_id)
+        elif not want_screenshot and not obs.get("query_incomplete"):
+            self._visual_snapshots.pop((pid, window_id), None)
+
+        payload = {
+            "schema": "agy_cua.jev_observe_v1",
+            "status": "ok",
+            "pid": pid,
+            "window_id": window_id,
+            "session_id": self.session_id,
+            "snapshot_id": obs["snapshot_id"],
+            "app_name": obs["app_name"],
+            "window_title": obs["window_title"],
+            "window_bounds": obs.get("window_bounds"),
+            "elements": obs["elements"],
+            "static_texts": obs["static_texts"],
+            "total_actionable_elements": obs["total_actionable_elements"],
+            "omitted_elements_count": obs["omitted_elements_count"],
+            "omitted_candidates_count": obs["omitted_candidates_count"],
+            "observation_truncated": obs["observation_truncated"],
+            "secure_fields_redacted_count": secure_redacted_count,
+            "query": obs.get("query"),
+            "matched_elements_count": obs.get("matched_elements_count"),
+            "query_status": obs.get("query_status"),
+            "query_incomplete": obs.get("query_incomplete", False),
+            "search_complete": obs.get("search_complete", True),
+            "visual_fallback_recommended": obs.get("visual_fallback_recommended", False),
+            "is_diff": obs.get("is_diff", False),
+            "diff_from_snapshot_id": obs.get("diff_from_snapshot_id"),
+            "diff_fallback_used": diff_fallback_used,
+            "discovered_windows": discovered_windows,
+            "observe_ms": round((time.perf_counter() - obs_started) * 1000, 2),
+        }
+        res_out = _format_tool_result(payload, is_error=False)
+        if want_screenshot and image_blocks:
+            res_out.setdefault("content", []).extend(image_blocks)
+        return res_out
+
+    def handle_browser_prepare(self, args: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            validated = validate_browser_prepare_args(args if isinstance(args, Mapping) else {})
+        except ValueError as exc:
+            payload = {
+                "schema": "agy_cua.jev_browser_prepare_v1",
+                "status": "refused",
+                "reason": str(exc),
+                "session_id": self.session_id,
+            }
+            self._record_trace(payload)
+            return _format_tool_result(payload, is_error=True)
+
+        try:
+            driver = self._get_driver()
+            prep_timeout_s = max(driver.timeout_ms / 1000.0, 15.0)
+            driver_prep_args: dict[str, Any] = {
+                "allow_launch": True,
+                "profile": validated["profile"],
+            }
+            if "browser" in validated:
+                driver_prep_args["browser"] = validated["browser"]
+            if "url" in validated:
+                driver_prep_args["url"] = validated["url"]
+            res = driver.call_tool("browser_prepare", driver_prep_args, timeout_s=prep_timeout_s)
+            if res.get("isError"):
+                err_txt = "".join(c.get("text", "") for c in (res.get("content") or []) if isinstance(c, Mapping))
+                raise RuntimeError(err_txt or "browser_prepare returned isError=true")
+            sc = res.get("structuredContent") if isinstance(res.get("structuredContent"), Mapping) else {}
+            eo = sc.get("endpoint_ownership") if isinstance(sc.get("endpoint_ownership"), Mapping) else {}
+            raw_pid = sc.get("prepared_pid") or sc.get("pid") or eo.get("owner_pid")
+            prepared_pid = (
+                int(raw_pid)
+                if isinstance(raw_pid, int) and not isinstance(raw_pid, bool) and raw_pid > 0
+                else None
+            )
+            raw_wid = sc.get("window_id")
+            window_id = (
+                int(raw_wid)
+                if isinstance(raw_wid, int) and not isinstance(raw_wid, bool) and raw_wid > 0
+                else None
+            )
+            target_id = str(sc.get("target_id") or sc.get("browser_target_id") or "").strip()
+            tab_id = str(sc.get("tab_id") or sc.get("active_tab_id") or "").strip()
+
+            if prepared_pid is not None and (not target_id or not tab_id):
+                if window_id is None:
+                    for attempt in range(10):
+                        lw_res = driver.call_tool("list_windows", {"pid": prepared_pid})
+                        lw_sc = lw_res.get("structuredContent") if isinstance(lw_res.get("structuredContent"), Mapping) else {}
+                        wins = lw_sc.get("windows") if isinstance(lw_sc.get("windows"), list) else []
+                        for w in wins:
+                            if isinstance(w, Mapping) and isinstance(w.get("window_id"), int) and not isinstance(w.get("window_id"), bool):
+                                if w.get("pid") in (None, prepared_pid):
+                                    window_id = int(w["window_id"])
+                                    break
+                        if window_id is not None or attempt == 9:
+                            break
+                        time.sleep(0.15)
+                if window_id is not None:
+                    gbs_res = driver.call_tool(
+                        "get_browser_state",
+                        {"pid": prepared_pid, "window_id": window_id, "include_screenshot": False},
+                        timeout_s=prep_timeout_s,
+                    )
+                    if gbs_res.get("isError"):
+                        err_txt = "".join(c.get("text", "") for c in (gbs_res.get("content") or []) if isinstance(c, Mapping))
+                        raise RuntimeError(err_txt or "get_browser_state bind after browser_prepare returned isError=true")
+                    gbs_sc = gbs_res.get("structuredContent") if isinstance(gbs_res.get("structuredContent"), Mapping) else {}
+                    tabs = gbs_sc.get("tabs") if isinstance(gbs_sc.get("tabs"), list) else []
+                    first_tab_id = tabs[0].get("tab_id") if (tabs and isinstance(tabs[0], Mapping)) else None
+                    target_id = str(gbs_sc.get("target_id") or gbs_sc.get("browser_target_id") or target_id or "isolated").strip()
+                    tab_id = str(gbs_sc.get("tab_id") or gbs_sc.get("active_tab_id") or first_tab_id or tab_id or "tab-1").strip()
+                    if validated.get("url"):
+                        nav_res = driver.call_tool(
+                            "browser_navigate",
+                            {"target_id": target_id, "tab_id": tab_id, "url": validated["url"]},
+                            timeout_s=prep_timeout_s,
+                        )
+                        if nav_res.get("isError"):
+                            err_txt = "".join(c.get("text", "") for c in (nav_res.get("content") or []) if isinstance(c, Mapping))
+                            raise RuntimeError(err_txt or "browser_navigate after browser_prepare returned isError=true")
+
+            target_id = target_id or "isolated"
+            tab_id = tab_id or "tab-1"
+            payload = {
+                "schema": "agy_cua.jev_browser_prepare_v1",
+                "status": "ok",
+                "mode": "isolated",
+                "prepared_pid": prepared_pid,
+                "pid": prepared_pid,
+                "window_id": window_id,
+                "target_id": target_id,
+                "tab_id": tab_id,
+                "url": validated.get("url") or sc.get("url"),
+                "session_id": self.session_id,
+            }
+            self._record_trace(payload)
+            return _format_tool_result(payload, is_error=False)
+        except Exception as exc:
+            payload = {
+                "schema": "agy_cua.jev_browser_prepare_v1",
+                "status": "failed",
+                "reason": str(exc),
+                "session_id": self.session_id,
+            }
+            self._record_trace(payload)
+            return _format_tool_result(payload, is_error=True)
+
+    def handle_browser_step(self, args: Mapping[str, Any]) -> dict[str, Any]:
+        step_started = time.perf_counter()
+        if not isinstance(args, Mapping):
+            return _format_tool_result(
+                {"schema": "agy_cua.jev_browser_step_v1", "status": "refused", "reason": "invalid_arguments", "action_dispatched": False},
+                is_error=True,
+            )
+        if self.accounting.halted:
+            return _format_tool_result(
+                {
+                    "schema": "agy_cua.jev_browser_step_v1",
+                    "status": "halted",
+                    "reason": self.accounting.halt_reason or "session_halted",
+                    "session_id": self.session_id,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": False,
+                    "accounting": self.accounting.to_dict(),
+                },
+                is_error=True,
+            )
+        try:
+            _reject_binary_or_image_payload(args, "jev_browser_step")
+        except ValueError as exc:
+            return _format_tool_result(
+                {"schema": "agy_cua.jev_browser_step_v1", "status": "refused", "reason": str(exc), "action_dispatched": False},
+                is_error=True,
+            )
+
+        goal = args.get("goal")
+        if not isinstance(goal, str) or not goal.strip():
+            return _format_tool_result(
+                {"schema": "agy_cua.jev_browser_step_v1", "status": "refused", "reason": "invalid_goal", "action_dispatched": False},
+                is_error=True,
+            )
+        target_id = str(args.get("target_id") or "isolated").strip()
+        tab_id = str(args.get("tab_id") or "tab-1").strip()
+        action_value = args.get("value") if isinstance(args.get("value"), str) else None
+        mode = str(args.get("mode") or ("deterministic" if args.get("deterministic") is True else "jev")).strip()
+        expected_snap = args.get("expected_snapshot_id")
+
+        obs_started = time.perf_counter()
+        try:
+            driver = self._get_driver()
+            raw_pre = driver.call_tool(
+                "get_browser_state",
+                {
+                    "target_id": target_id,
+                    "tab_id": tab_id,
+                    "include_screenshot": False,
+                    "snapshot_format": "semantic_v2",
+                },
+            )
+            if raw_pre.get("isError"):
+                err_txt = "".join(c.get("text", "") for c in (raw_pre.get("content") or []) if isinstance(c, Mapping))
+                raise RuntimeError(err_txt or "get_browser_state returned isError=true")
+            pre_obs = extract_browser_observation(
+                raw_pre,
+                expected_target_id=target_id,
+                expected_tab_id=tab_id,
+            )
+        except Exception as exc:
+            return _format_tool_result(
+                {
+                    "schema": "agy_cua.jev_browser_step_v1",
+                    "status": "observation_failed",
+                    "verification_outcome": "not_executed",
+                    "reason": str(exc),
+                    "target_id": target_id,
+                    "tab_id": tab_id,
+                    "session_id": self.session_id,
+                    "verified": False,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": False,
+                },
+                is_error=True,
+            )
+        obs_ms = round((time.perf_counter() - obs_started) * 1000, 2)
+
+        if expected_snap is not None and pre_obs["snapshot_id"] != expected_snap:
+            return _format_tool_result(
+                {
+                    "schema": "agy_cua.jev_browser_step_v1",
+                    "status": "stale_snapshot",
+                    "verification_outcome": "not_executed",
+                    "reason": f"stale_snapshot: expected {expected_snap!r}, observed {pre_obs['snapshot_id']!r}",
+                    "target_id": target_id,
+                    "tab_id": tab_id,
+                    "pre_snapshot_id": pre_obs["snapshot_id"],
+                    "session_id": self.session_id,
+                    "verified": False,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": False,
+                },
+                is_error=True,
+            )
+
+        try:
+            bound_cands = build_bound_browser_candidates(
+                args.get("candidates"),
+                pre_obs,
+                action_value=action_value,
+            )
+        except Exception as exc:
+            return _format_tool_result(
+                {
+                    "schema": "agy_cua.jev_browser_step_v1",
+                    "status": "candidate_refused",
+                    "verification_outcome": "not_executed",
+                    "reason": str(exc),
+                    "target_id": target_id,
+                    "tab_id": tab_id,
+                    "pre_snapshot_id": pre_obs["snapshot_id"],
+                    "session_id": self.session_id,
+                    "verified": False,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": False,
+                },
+                is_error=True,
+            )
+
+        if mode == "deterministic":
+            if len(bound_cands) != 1:
+                return _format_tool_result(
+                    {
+                        "schema": "agy_cua.jev_browser_step_v1",
+                        "status": "candidate_refused",
+                        "reason": "deterministic_step_requires_single_candidate",
+                        "target_id": target_id,
+                        "tab_id": tab_id,
+                        "verified": False,
+                        "action_dispatched": False,
+                        "uncertain_side_effect": False,
+                    },
+                    is_error=True,
+                )
+            only_cand = bound_cands[0]
+            decision = {
+                "kind": "selected",
+                "selected_id": only_cand["id"],
+                "requested_model": "deterministic-controller",
+                "returned_model": "deterministic-controller",
+                "route": "deterministic",
+                "confidence": 1.0,
+                "probabilities": {only_cand["id"]: 1.0, "reobserve": 0.0, "abstain": 0.0},
+                "provider_ms": 0.0,
+            }
+            provider_ms = 0.0
+        else:
+            synth_snap = (
+                pre_obs["snapshot_id"]
+                if SNAPSHOT_ID_RE.match(pre_obs["snapshot_id"])
+                else f"s{abs(hash(pre_obs['snapshot_id'])) & 0xFFFFFFFF:08x}"
+            )
+            select_req = validate_select_request({
+                "goal": goal,
+                "pid": 1,
+                "window_id": 1,
+                "snapshot_id": synth_snap,
+                "elements": [
+                    {
+                        "element_index": e["element_index"],
+                        "role": e["role"],
+                        "label": f"[{e['ref']}] {e['label']}",
+                        "state": e["state"],
+                        "supported_actions": list(e.get("supported_actions") or []),
+                    }
+                    for e in pre_obs["elements"]
+                ],
+                "candidates": [{"id": c["id"], "description": c["description"]} for c in bound_cands],
+            })
+            route = resolve_route(self.env, self.keychain_reader)
+            decision = evaluate_jev_choice(select_req, route, self.accounting, self.http_post)
+            provider_ms = decision.get("provider_ms", 0.0)
+
+        if decision["kind"] != "selected":
+            return _format_tool_result(
+                {
+                    "schema": "agy_cua.jev_browser_step_v1",
+                    "status": decision["kind"],
+                    "verification_outcome": "not_executed",
+                    "reason": decision.get("reason") or decision["kind"],
+                    "target_id": target_id,
+                    "tab_id": tab_id,
+                    "pre_snapshot_id": pre_obs["snapshot_id"],
+                    "selected_id": decision.get("selected_id"),
+                    "verified": False,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": False,
+                    "accounting": self.accounting.to_dict(),
+                },
+                is_error=(decision["kind"] == "error"),
+            )
+
+        try:
+            authorized = authorize_browser_candidate_dispatch(
+                decision,
+                bound_cands,
+                expected_target_id=target_id,
+                expected_tab_id=tab_id,
+                current_snapshot_id=pre_obs["snapshot_id"],
+                valid_refs=pre_obs["valid_refs"],
+            )
+        except Exception as exc:
+            return _format_tool_result(
+                {
+                    "schema": "agy_cua.jev_browser_step_v1",
+                    "status": "authorization_refused",
+                    "verification_outcome": "not_executed",
+                    "reason": str(exc),
+                    "target_id": target_id,
+                    "tab_id": tab_id,
+                    "pre_snapshot_id": pre_obs["snapshot_id"],
+                    "verified": False,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": False,
+                },
+                is_error=True,
+            )
+
+        dispatch_driver_args = {
+            k: v for k, v in authorized["arguments"].items() if k != "snapshot_id"
+        }
+        dispatch_started = time.perf_counter()
+        try:
+            dispatch_res = driver.call_tool(authorized["tool"], dispatch_driver_args)
+            dispatch_text = "".join(
+                c.get("text", "") for c in (dispatch_res.get("content") or []) if isinstance(c, Mapping)
+            ).strip()
+            if dispatch_res.get("isError"):
+                raise RuntimeError(dispatch_text or "browser tool returned isError=true")
+        except Exception as exc:
+            self.accounting.uncertain_side_effects += 1
+            self.accounting.halted = True
+            self.accounting.halt_reason = "uncertain_browser_dispatch_side_effect"
+            return _format_tool_result(
+                {
+                    "schema": "agy_cua.jev_browser_step_v1",
+                    "status": "dispatch_failed",
+                    "verification_outcome": "outcome_unknown",
+                    "reason": str(exc),
+                    "target_id": target_id,
+                    "tab_id": tab_id,
+                    "pre_snapshot_id": pre_obs["snapshot_id"],
+                    "verified": False,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": True,
+                    "accounting": self.accounting.to_dict(),
+                },
+                is_error=True,
+            )
+        dispatch_ms = round((time.perf_counter() - dispatch_started) * 1000, 2)
+
+        verify_started = time.perf_counter()
+        try:
+            raw_post = driver.call_tool(
+                "get_browser_state",
+                {
+                    "target_id": target_id,
+                    "tab_id": tab_id,
+                    "include_screenshot": False,
+                    "snapshot_format": "semantic_v2",
+                },
+            )
+            if raw_post.get("isError"):
+                err_txt = "".join(c.get("text", "") for c in (raw_post.get("content") or []) if isinstance(c, Mapping))
+                raise RuntimeError(err_txt or "post-dispatch get_browser_state returned isError=true")
+            post_obs = extract_browser_observation(
+                raw_post,
+                expected_target_id=target_id,
+                expected_tab_id=tab_id,
+            )
+            expected_post = args.get("expected_postcondition")
+            state_changed, post_ok, verify_reason = check_browser_postcondition(
+                expected_post,
+                pre_obs,
+                post_obs,
+                target_ref=authorized["arguments"].get("ref"),
+            )
+        except Exception as exc:
+            self.accounting.uncertain_side_effects += 1
+            self.accounting.halted = True
+            self.accounting.halt_reason = "uncertain_browser_verification"
+            return _format_tool_result(
+                {
+                    "schema": "agy_cua.jev_browser_step_v1",
+                    "status": "verification_failed",
+                    "verification_outcome": "outcome_unknown",
+                    "reason": str(exc),
+                    "target_id": target_id,
+                    "tab_id": tab_id,
+                    "pre_snapshot_id": pre_obs["snapshot_id"],
+                    "verified": False,
+                    "action_dispatched": True,
+                    "uncertain_side_effect": True,
+                    "accounting": self.accounting.to_dict(),
+                },
+                is_error=True,
+            )
+        verify_ms = round((time.perf_counter() - verify_started) * 1000, 2)
+
+        if args.get("expected_postcondition") is None:
+            verification_outcome = "state_changed" if state_changed else "dispatched"
+            step_status = verification_outcome
+            is_err = False
+        elif post_ok:
+            verification_outcome = "goal_verified"
+            step_status = "verified"
+            is_err = False
+        else:
+            verification_outcome = "state_changed" if state_changed else "dispatched"
+            step_status = "postcondition_unmet"
+            is_err = True
+
+        sanitized_args = {
+            k: ("<redacted>" if k in {"text", "value"} else v)
+            for k, v in authorized["arguments"].items()
+        }
+        payload = {
+            "schema": "agy_cua.jev_browser_step_v1",
+            "status": step_status,
+            "verification_outcome": verification_outcome,
+            "verified": post_ok,
+            "action_dispatched": True,
+            "uncertain_side_effect": False,
+            "verification_reason": verify_reason,
+            "state_changed": state_changed,
+            "target_id": target_id,
+            "tab_id": tab_id,
+            "session_id": self.session_id,
+            "mode": mode,
+            "pre_snapshot_id": pre_obs["snapshot_id"],
+            "post_snapshot_id": post_obs["snapshot_id"],
+            "pre_url": pre_obs["url"],
+            "post_url": post_obs["url"],
+            "pre_static_texts": pre_obs["static_texts"],
+            "post_static_texts": post_obs["static_texts"],
+            "selected_id": authorized["id"],
+            "selected_description": authorized["description"],
+            "dispatched_tool": authorized["tool"],
+            "dispatched_arguments": sanitized_args,
+            "returned_model": decision.get("returned_model"),
             "confidence": decision.get("confidence"),
             "probabilities": decision.get("probabilities"),
             "timings_ms": {
@@ -4740,6 +6711,8 @@ class JevMcpServer:
                 status_payload = describe_status(route, self.accounting, self.env)
                 status_payload["session_id"] = self.session_id
                 return reply(_format_tool_result(status_payload))
+            if name == "jev_observe":
+                return reply(self.handle_observe(arguments))
             if name == "jev_select_action":
                 try:
                     validated = validate_select_request(arguments)
@@ -4759,6 +6732,10 @@ class JevMcpServer:
                 return reply(_format_tool_result(decision, is_error=(decision["kind"] == "error")))
             if name == "jev_step":
                 return reply(self.handle_step(arguments))
+            if name == "jev_browser_prepare":
+                return reply(self.handle_browser_prepare(arguments))
+            if name == "jev_browser_step":
+                return reply(self.handle_browser_step(arguments))
             if name in {"jev_batch", "jev_run_steps"}:
                 return reply(self.handle_batch(arguments))
             if name == "jev_sequence":
