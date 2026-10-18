@@ -14,6 +14,12 @@ spec.loader.exec_module(pilot)
 
 
 class FileOracleTest(unittest.TestCase):
+    def test_planner_receives_the_verified_seed_identity(self):
+        prompt = pilot.task_prompt(101, 202, Path("/run/seed.txt"), Path("/run/note.txt"))
+        self.assertIn("verified seed window_id 202", prompt)
+        self.assertIn("must target exactly pid 101, window_id 202", prompt)
+        self.assertIn("do not rediscover the seed by title", prompt)
+
     def test_driver_system_exit_records_blocker_without_private_message(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

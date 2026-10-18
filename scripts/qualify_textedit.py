@@ -80,6 +80,43 @@ def inspect(out, pid, prefix, *, allowed_ids=()):
         session.close()
 
 
+def task_prompt(pid, seed_id, seed, target):
+    return f"""Use the cua-computer-use skill and only agy-cua / agy-cua-jev MCP tools.
+This is a bounded real TextEdit qualification. Do not use terminal, browser, other MCP
+servers, clipboard, subagents, foreground input, settings or scripts. Existing documents
+are protected. The only permitted source is the task-created {seed.name} window in TextEdit
+pid {pid}, verified seed window_id {seed_id}, opened from {seed}.
+The bootstrap File > New must target exactly pid {pid}, window_id {seed_id};
+do not rediscover the seed by title. Do not read or act on unrelated windows.
+Create a NEW document through TextEdit File > New using this seed window only as the
+menu anchor. Discover the new untitled window; it is yours. Do not modify the seed.
+If needed, use Format > Make Plain Text on your NEW document. Enter the draft note
+then edit Status: draft to Status: ready, preserving the other lines and final newline.
+Draft bytes: {SEED!r}
+Required final bytes are:
+{NOTE!r}
+Use jev_step/jev_batch for mutations. For a previously observed target and established
+action, use mode deterministic with exactly one candidate and a meaningful bound
+postcondition. Leave ambiguous semantic choice to Jev (maximum four provider calls).
+File > New and File > Save may change windows: discover and read the new target;
+window creation alone is not goal verification. Bootstrap New is the sole permitted
+direct invoke_menu, targeted to the observed seed window. All later mutations are guarded.
+Do NOT click a text area to focus it: on this Driver, AXShowMenu does not mean AXPress.
+Use a guarded set_value candidate directly on the freshly observed editable text area.
+Exercise recovery deliberately: open File > Save, observe the real save sheet with
+jev_observe using query Save and max_elements 1; if incomplete, read a sufficient bounded
+scope before acting. Cancel this first save sheet, independently observe the document
+again, then reopen Save and save ONLY to this currently nonexistent absolute path:
+{target}
+Never overwrite or replace an existing file. Use the save dialog's native controls;
+use its Go to Folder sheet if needed. Do not claim recovery without actual observations.
+Retain failed or slow attempts. On uncertain dispatch/verification or halted controller,
+stop and report the exact blocker; never replay completed actions or switch to raw input.
+Observe the final note. Report chosen model, provider/deterministic steps, save/cancel
+transitions and verification. Do not close windows or quit TextEdit. No external effects.
+"""
+
+
 def run(out, model, repetition, plugin_ref="HEAD"):
     event(out, "prepare")
     installed = Path.home() / ".gemini/config/plugins/agy-cua"
@@ -122,38 +159,7 @@ def run(out, model, repetition, plugin_ref="HEAD"):
         server["env"] = {"AGY_CUA_HOME": str(installed), "AGY_CUA_JEV_MAX_CALLS": "4",
                          "AGY_CUA_JEV_TRACE_FILE": str(out / "jev.private.jsonl")}
     write_json(workspace / ".agents/mcp_config.json", config)
-    prompt = f"""Use the cua-computer-use skill and only agy-cua / agy-cua-jev MCP tools.
-This is a bounded real TextEdit qualification. Do not use terminal, browser, other MCP
-servers, clipboard, subagents, foreground input, settings or scripts. Existing documents
-are protected. The only permitted source is the task-created {seed.name} window in TextEdit
-pid {pid}, opened from {seed}. Do not read or act on unrelated windows.
-Create a NEW document through TextEdit File > New using this seed window only as the
-menu anchor. Discover the new untitled window; it is yours. Do not modify the seed.
-If needed, use Format > Make Plain Text on your NEW document. Enter the draft note
-then edit Status: draft to Status: ready, preserving the other lines and final newline.
-Draft bytes: {SEED!r}
-Required final bytes are:
-{NOTE!r}
-Use jev_step/jev_batch for mutations. For a previously observed target and established
-action, use mode deterministic with exactly one candidate and a meaningful bound
-postcondition. Leave ambiguous semantic choice to Jev (maximum four provider calls).
-File > New and File > Save may change windows: discover and read the new target;
-window creation alone is not goal verification. Bootstrap New is the sole permitted
-direct invoke_menu, targeted to the observed seed window. All later mutations are guarded.
-Do NOT click a text area to focus it: on this Driver, AXShowMenu does not mean AXPress.
-Use a guarded set_value candidate directly on the freshly observed editable text area.
-Exercise recovery deliberately: open File > Save, observe the real save sheet with
-jev_observe using query Save and max_elements 1; if incomplete, read a sufficient bounded
-scope before acting. Cancel this first save sheet, independently observe the document
-again, then reopen Save and save ONLY to this currently nonexistent absolute path:
-{target}
-Never overwrite or replace an existing file. Use the save dialog's native controls;
-use its Go to Folder sheet if needed. Do not claim recovery without actual observations.
-Retain failed or slow attempts. On uncertain dispatch/verification or halted controller,
-stop and report the exact blocker; never replay completed actions or switch to raw input.
-Observe the final note. Report chosen model, provider/deterministic steps, save/cancel
-transitions and verification. Do not close windows or quit TextEdit. No external effects.
-"""
+    prompt = task_prompt(pid, seed_id, seed, target)
     (out / "prompt.txt").write_text(prompt)
     effort = "low" if model == MODELS[0] else "high"
     cmd = ["agy", "-p", prompt, "--model", model, "--effort", effort,
