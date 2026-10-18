@@ -4599,13 +4599,20 @@ class StdioEndToEndTest(unittest.TestCase):
             self.assertEqual(len(image_blocks), 0)
 
     def test_benchmark_resume_key_and_focus_monitor_browser_tracking(self) -> None:
+        from pathlib import Path
+        from unittest import mock
+
         bench_path = os.path.join(ROOT, "scripts", "benchmark_cua.py")
-        loader = importlib.machinery.SourceFileLoader("benchmark_cua_test_mod", bench_path)
-        spec = importlib.util.spec_from_loader("benchmark_cua_test_mod", loader)
-        assert spec is not None
-        bench_mod = importlib.util.module_from_spec(spec)
-        sys.modules["benchmark_cua_test_mod"] = bench_mod
-        loader.exec_module(bench_mod)
+        with mock.patch.dict(
+            sys.modules,
+            {"dotenv": None, "google": None, "google.genai": None, "PIL": None},
+        ):
+            loader = importlib.machinery.SourceFileLoader("benchmark_cua_test_mod", bench_path)
+            spec = importlib.util.spec_from_loader("benchmark_cua_test_mod", loader)
+            assert spec is not None
+            bench_mod = importlib.util.module_from_spec(spec)
+            sys.modules["benchmark_cua_test_mod"] = bench_mod
+            loader.exec_module(bench_mod)
 
         # Thread 5: completed failures across ANY arm are preserved on resume, while fatal error aborts without arm_failed are not
         self.assertTrue(bench_mod.is_resumable_completed_row({"arm": "agy-cua-direct", "passed": False}))
@@ -4624,6 +4631,111 @@ class StdioEndToEndTest(unittest.TestCase):
         self.assertNotEqual(k_low, k_high)
         self.assertEqual(k_budget, (1, "gemini-3.8-flash", "budget:512", "T1", "agy-cua-jev-v1"))
         self.assertIsNone(k_legacy)
+
+        # Multi-file --resume-from: chained summaries do not double-count, independent summaries sum spend
+        with tempfile.TemporaryDirectory() as td:
+            p_a = Path(td) / "a.json"
+            p_b_chained = Path(td) / "b_chained.json"
+            p_b_indep = Path(td) / "b_indep.json"
+            p_a.write_text(
+                json.dumps(
+                    {
+                        "resumed_from": None,
+                        "total_spend_usd": 1.25,
+                        "reserved_usd": 0.025,
+                        "gemini_input_tokens": 1000,
+                        "gemini_output_tokens": 200,
+                        "gemini_thought_tokens": 50,
+                        "jev_input_tokens": 500,
+                        "jev_output_tokens": 100,
+                        "gemini_uncertain_failures": 1,
+                        "jev_uncertain_failures": 0,
+                        "results": [
+                            {
+                                "repetition": 1,
+                                "model": "gemini-3.8-flash",
+                                "thinking_level": "low",
+                                "task_id": "T1",
+                                "arm": "agy-cua-jev-v1",
+                                "passed": True,
+                                "screenshots_sent": 2,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            p_b_chained.write_text(
+                json.dumps(
+                    {
+                        "resumed_from": str(p_a),
+                        "total_spend_usd": 2.00,
+                        "reserved_usd": 0.025,
+                        "gemini_input_tokens": 1800,
+                        "gemini_output_tokens": 350,
+                        "gemini_thought_tokens": 80,
+                        "jev_input_tokens": 900,
+                        "jev_output_tokens": 180,
+                        "gemini_uncertain_failures": 1,
+                        "jev_uncertain_failures": 0,
+                        "results": [
+                            {
+                                "repetition": 1,
+                                "model": "gemini-3.8-flash",
+                                "thinking_level": "low",
+                                "task_id": "T2",
+                                "arm": "agy-cua-jev-v1",
+                                "passed": True,
+                                "screenshots_sent": 3,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            p_b_indep.write_text(
+                json.dumps(
+                    {
+                        "resumed_from": None,
+                        "total_spend_usd": 0.75,
+                        "reserved_usd": 0.002,
+                        "gemini_input_tokens": 800,
+                        "gemini_output_tokens": 150,
+                        "gemini_thought_tokens": 30,
+                        "jev_input_tokens": 400,
+                        "jev_output_tokens": 80,
+                        "gemini_uncertain_failures": 0,
+                        "jev_uncertain_failures": 1,
+                        "results": [
+                            {
+                                "repetition": 1,
+                                "model": "gemini-4-argon",
+                                "thinking_level": "low",
+                                "task_id": "T1",
+                                "arm": "agy-cua-jev-v1",
+                                "passed": True,
+                                "screenshots_sent": 4,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            spend_chained = bench_mod.SpendTracker(max_budget_usd=5.0)
+            rows_chained = bench_mod.restore_resume_state([p_a, p_b_chained], spend_chained)
+            self.assertEqual(len(rows_chained), 2)
+            self.assertAlmostEqual(spend_chained.total_usd, 2.00, places=5)
+            self.assertEqual(spend_chained.gemini_input_tokens, 1800)
+            self.assertEqual(spend_chained.screenshots_sent, 5)
+
+            spend_indep = bench_mod.SpendTracker(max_budget_usd=5.0)
+            rows_indep = bench_mod.restore_resume_state([p_a, p_b_indep], spend_indep)
+            self.assertEqual(len(rows_indep), 2)
+            self.assertAlmostEqual(spend_indep.total_usd, 2.00, places=5)
+            self.assertEqual(spend_indep.gemini_input_tokens, 1800)
+            self.assertEqual(spend_indep.gemini_uncertain_failures, 1)
+            self.assertEqual(spend_indep.jev_uncertain_failures, 1)
+            self.assertEqual(spend_indep.screenshots_sent, 6)
 
         # Thread 7: FocusMonitor detects isolated browser PID or newly foregrounded browser bundle while preserving operator's initial frontmost app
         mon = bench_mod.FocusMonitor(target_pid=100, target_bundle="com.agycua.benchfixture", monitor_browser=True)

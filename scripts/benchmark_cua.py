@@ -30,17 +30,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None  # type: ignore[assignment]
+
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = Any  # type: ignore[assignment]
+    types = Any  # type: ignore[assignment]
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = Any  # type: ignore[assignment]
 
 DEFAULT_ENV_FILE = Path(
     os.environ.get("AGY_CUA_BENCH_ENV_FILE", str(Path.home() / "Developer" / "side-quests" / "swarm-intercom" / ".env"))
 )
-if DEFAULT_ENV_FILE.exists():
-    load_dotenv(DEFAULT_ENV_FILE, override=False)
-
-from google import genai
-from google.genai import types
-from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 JEV_MCP_PATH = ROOT / "bin" / "agy-cua-jev-mcp"
@@ -1050,10 +1059,33 @@ def run_arm_google_cua_bg(
 
         f_responses: list[types.FunctionResponse] = []
         stop_after_turn = False
+        window_switched_in_turn = False
         for fc in fcs:
             step_t0 = time.perf_counter()
             name = fc.name
             args = dict(fc.args or {})
+            if window_switched_in_turn:
+                resp_payload_skip: dict[str, Any] = {
+                    "result": "skipped_after_window_switch: replan from new window screenshot",
+                    "window_id": active_wid,
+                }
+                if "safety_decision" in args:
+                    resp_payload_skip["safety_acknowledgement"] = "true"
+                f_responses.append(
+                    types.FunctionResponse(
+                        name=name,
+                        response=resp_payload_skip,
+                        parts=[
+                            types.FunctionResponsePart(
+                                inline_data=types.FunctionResponseBlob(
+                                    mime_type="image/png",
+                                    data=png_bytes,
+                                )
+                            )
+                        ],
+                    )
+                )
+                continue
             actions_dispatched += 1
 
             def denorm(nx: Any, ny: Any) -> tuple[int, int]:
@@ -1130,6 +1162,7 @@ def run_arm_google_cua_bg(
                 if other_wids:
                     time.sleep(0.5)
                     active_wid = other_wids[0]
+                    window_switched_in_turn = True
             elif task.task_id == "T7b_1password_browser" and state_file is not None and state_file.exists():
                 try:
                     st = json.loads(state_file.read_text(encoding="utf-8"))
@@ -2423,7 +2456,66 @@ def is_resumable_completed_row(row: Mapping[str, Any]) -> bool:
     return False
 
 
+def restore_resume_state(
+    resume_paths: list[Path],
+    spend: SpendTracker,
+) -> dict[tuple[int, str, str, str, str], dict[str, Any]]:
+    """Restore completed rows and cumulative spend across one or more --resume-from summaries.
+
+    If summary B explicitly lists summary A in its ``resumed_from`` chain (directly or transitively),
+    B already carries A's cumulative spend, so only leaf summaries contribute to restored token/USD
+    totals, while independent summaries sum their spend.
+    """
+    loaded: list[tuple[Path, dict[str, Any]]] = [
+        (rp.resolve(), json.loads(rp.read_text(encoding="utf-8"))) for rp in resume_paths
+    ]
+    ancestors_by_idx: dict[int, set[Path]] = {}
+    superseded_indices: set[int] = set()
+    for j, (_, summary_j) in enumerate(loaded):
+        resumed_raw = str(summary_j.get("resumed_from") or "")
+        chain_paths = {
+            Path(p.strip()).expanduser().resolve()
+            for p in resumed_raw.split(",")
+            if p.strip()
+        }
+        for i in range(j):
+            if loaded[i][0] in chain_paths:
+                chain_paths |= ancestors_by_idx.get(i, set())
+        ancestors_by_idx[j] = chain_paths
+        for i in range(j):
+            if loaded[i][0] in chain_paths:
+                superseded_indices.add(i)
+
+    leaf_summaries = [s for idx, (_, s) in enumerate(loaded) if idx not in superseded_indices]
+    spend.gemini_input_tokens = sum(int(s.get("gemini_input_tokens", 0)) for s in leaf_summaries)
+    spend.gemini_output_tokens = sum(int(s.get("gemini_output_tokens", 0)) for s in leaf_summaries)
+    spend.gemini_thought_tokens = sum(int(s.get("gemini_thought_tokens", 0)) for s in leaf_summaries)
+    spend.jev_input_tokens = sum(int(s.get("jev_input_tokens", 0)) for s in leaf_summaries)
+    spend.jev_output_tokens = sum(int(s.get("jev_output_tokens", 0)) for s in leaf_summaries)
+    spend.reserved_usd = round(sum(float(s.get("reserved_usd", 0.0)) for s in leaf_summaries), 6)
+    spend.gemini_uncertain_failures = sum(int(s.get("gemini_uncertain_failures", 0)) for s in leaf_summaries)
+    spend.jev_uncertain_failures = sum(int(s.get("jev_uncertain_failures", 0)) for s in leaf_summaries)
+    prior_total_usd = sum(float(s.get("total_spend_usd", 0.0)) for s in leaf_summaries)
+    prior_jev_usd = (spend.jev_input_tokens + spend.jev_output_tokens) * (JEV_PRICE_PER_1M_USD / 1_000_000.0)
+    spend.gemini_spent_usd = max(0.0, round(prior_total_usd - prior_jev_usd - spend.reserved_usd, 6))
+
+    passed_rows_by_key: dict[tuple[int, str, str, str, str], dict[str, Any]] = {}
+    for _, prior_summary in loaded:
+        for r in prior_summary.get("results", []):
+            if not isinstance(r, Mapping):
+                continue
+            if is_resumable_completed_row(r):
+                key = extract_prior_row_resume_key(r, prior_summary)
+                if key is not None:
+                    passed_rows_by_key[key] = dict(r)
+    spend.screenshots_sent = sum(int(r.get("screenshots_sent", 0)) for r in passed_rows_by_key.values())
+    return passed_rows_by_key
+
+
 def main() -> int:
+    if DEFAULT_ENV_FILE.exists() and load_dotenv is not None:
+        load_dotenv(DEFAULT_ENV_FILE, override=False)
+
     parser = argparse.ArgumentParser(description="Benchmark AGY-CUA vs Upstream Google Computer Use API")
     parser.add_argument("--model", default="gemini-3.8-flash", help="Outer Gemini model (e.g. gemini-3.8-flash or gemini-4-argon)")
     parser.add_argument(
@@ -2483,28 +2575,7 @@ def main() -> int:
                 sys.stderr.write(f"ERROR: --resume-from file not found: {rp}\n")
                 return 2
         resumed_from_path = ",".join(str(rp) for rp in resume_paths)
-        latest_summary = json.loads(resume_paths[-1].read_text(encoding="utf-8"))
-        spend.gemini_input_tokens = int(latest_summary.get("gemini_input_tokens", 0))
-        spend.gemini_output_tokens = int(latest_summary.get("gemini_output_tokens", 0))
-        spend.gemini_thought_tokens = int(latest_summary.get("gemini_thought_tokens", 0))
-        spend.jev_input_tokens = int(latest_summary.get("jev_input_tokens", 0))
-        spend.jev_output_tokens = int(latest_summary.get("jev_output_tokens", 0))
-        spend.reserved_usd = float(latest_summary.get("reserved_usd", 0.0))
-        spend.gemini_uncertain_failures = int(latest_summary.get("gemini_uncertain_failures", 0))
-        spend.jev_uncertain_failures = int(latest_summary.get("jev_uncertain_failures", 0))
-        prior_total_usd = float(latest_summary.get("total_spend_usd", 0.0))
-        prior_jev_usd = (spend.jev_input_tokens + spend.jev_output_tokens) * (JEV_PRICE_PER_1M_USD / 1_000_000.0)
-        spend.gemini_spent_usd = max(0.0, round(prior_total_usd - prior_jev_usd - spend.reserved_usd, 6))
-        for rp in resume_paths:
-            prior_summary = json.loads(rp.read_text(encoding="utf-8"))
-            for r in prior_summary.get("results", []):
-                if not isinstance(r, Mapping):
-                    continue
-                if is_resumable_completed_row(r):
-                    key = extract_prior_row_resume_key(r, prior_summary)
-                    if key is not None:
-                        passed_rows_by_key[key] = dict(r)
-        spend.screenshots_sent = sum(int(r.get("screenshots_sent", 0)) for r in passed_rows_by_key.values())
+        passed_rows_by_key = restore_resume_state(resume_paths, spend)
 
     all_tasks = build_tasks()
     if args.tasks != "all":
@@ -2534,7 +2605,7 @@ def main() -> int:
             "run_status": run_status,
             "error": error,
             "resumed_from": resumed_from_path,
-            "model": args.model if len(base_schedule) == 1 else [m for m, _ in base_schedule],
+            "model": base_schedule[0][0] if len(base_schedule) == 1 else [m for m, _ in base_schedule],
             "model_schedule": [{"model": m, "thinking_level": tl} for m, tl in base_schedule],
             "repetitions": repetitions,
             "arms": arms,
