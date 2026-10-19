@@ -1,0 +1,130 @@
+{
+  "schema": "agy_cua.textedit_document_targeting_v1",
+  "date": "2026-10-19",
+  "verdict": "BLOCKED",
+  "qualification_passed": false,
+  "agy_cua_base": "003d65ded36a7a7c22b18af5dbf03fce67bf8465",
+  "upstream_base": "46907096b3511b13db00150f197647800871a72d",
+  "upstream_candidate_pr": "https://github.com/trycua/cua/pull/5514",
+  "candidate_build": {
+    "exe_sha256": "be3034ce4fce58c1dd81222312bccf649027d28b14e3ce53d4f6be979b7fbc89",
+    "git_sha": "0364597d88946626ccd8e90478adcfd69c42d92a",
+    "version": "0.36.0"
+  },
+  "installed_build": {
+    "exe_sha256": "d0fff7f17a79ddf862ae187fa828f83c77de43c078d4964470e9ad93f5f1e88f",
+    "git_sha": "d74a9cab3fb2e80ab7f0cef47025ec828586ea75",
+    "version": "0.35.4"
+  },
+  "installed_plugin_sha256": {
+    "bin/agy-cua-mcp": "4ce4b64f37bd683c1dc9875104120fc62b552f703eb31e94c88d4539b0db5135",
+    "bin/agy-cua-jev-mcp": "316c7ba479ad4b58ec98a6a917830e1352856f9730049b02be728c4218139956",
+    "skills/cua-computer-use/SKILL.md": "937ba80bce0b240b61cc664be2949762b3cee04ed0d16346c652852b78ed2c2a"
+  },
+  "shared_runtime_replaced": false,
+  "plugin_installed": false,
+  "global_config_or_tcc_changed": false,
+  "installed_probe": {
+    "installed_binding_mismatch": true,
+    "requested_window_has_rich_controls": true,
+    "menu_context_matches_plain_sibling": true,
+    "pre_dispatch_miss_code": "menu_path_unavailable",
+    "separate_disabled_probe_code": "background_unavailable",
+    "target_foreground": false,
+    "files_unchanged": true,
+    "workflow_qualified": false,
+    "screenshots": {
+      "rich-before.png": "3347d189f0dacdae2feaf7ce5e34faad7070eaec8f51dbf79f5134ce2444afdc",
+      "plain-before.png": "adc4f1d840dfc3e9122c6659360368fef96035e0290455ceb341e76e1a11a623"
+    }
+  },
+  "candidate_probe": {
+    "candidate_build": {
+      "exe_sha256": "be3034ce4fce58c1dd81222312bccf649027d28b14e3ce53d4f6be979b7fbc89",
+      "git_sha": "0364597d88946626ccd8e90478adcfd69c42d92a",
+      "version": "0.36.0"
+    },
+    "sibling_refusal_verified": true,
+    "bound_path_lookup_verified": true,
+    "bound_format_command": "background_unavailable",
+    "both_documents_unchanged": true,
+    "fresh_snapshot_invalidation_verified": true,
+    "focus_samples": 24,
+    "target_frontmost_samples": 0,
+    "focus_errors": 0,
+    "screenshots": {
+      "candidate-rich-before.png": "18b1f49eacfa1ac39c2e04efe5a5ed188a2e37ebbd953adbcd4db9098e3f78d6",
+      "candidate-rich-after.png": "3d5614aec6c87d45a63ed1418bea2e9b9a5e55794fe6a8567d72d1af8ab0e28e",
+      "candidate-plain-before.png": "ef24c85612452b93cfc8e623802ffa9a99622bc77bb4ad73ea4dfc8e7db1dede",
+      "candidate-plain-after.png": "ef24c85612452b93cfc8e623802ffa9a99622bc77bb4ad73ea4dfc8e7db1dede"
+    }
+  },
+  "candidate_calls": [
+    {
+      "purpose": "unbound-rich-make-plain",
+      "duration_s": 0.30974991619586945,
+      "code": "window_not_key"
+    },
+    {
+      "purpose": "bound-plain-missing-path",
+      "duration_s": 0.10265395790338516,
+      "code": "menu_path_unavailable"
+    },
+    {
+      "purpose": "bound-plain-make-rich",
+      "duration_s": 1.1971976668573916,
+      "code": "background_unavailable"
+    }
+  ],
+  "models": {
+    "catalog_verified": true,
+    "cli_version": "1.4.2",
+    "configured_arms": [
+      {
+        "model": "gemini-4-argon-low",
+        "effort": "low"
+      },
+      {
+        "model": "gemini-3.8-flash-high",
+        "effort": "high"
+      }
+    ],
+    "workflow_trials_started": 0,
+    "workflow_successes": 0,
+    "recovery_verified": false,
+    "latency_comparison_available": false,
+    "provider_model_echo": null
+  },
+  "accounting": {
+    "api_budget_usd": 1,
+    "jev_provider_calls": 0,
+    "actual_billing_usd": null,
+    "subscription_usage": null
+  },
+  "validation": {
+    "agy_cua_tests_passed": 97,
+    "native_tests_passed": 630,
+    "native_tests_ignored": 7,
+    "native_toolchain": "1.97.1",
+    "private_transport_tests_passed": 4,
+    "shellcheck_passed": true,
+    "cargo_fmt_passed": true,
+    "diff_check_passed": true
+  },
+  "review": {
+    "upstream_review_requested": false,
+    "upstream_review_blocker": "GitHub RequestReviews rejected: author lacks permission in trycua/cua",
+    "upstream_review_complete": false
+  },
+  "limits": [
+    "Driver-boundary probe, not Antigravity end-to-end qualification.",
+    "Correctly bound Format action remains disabled while TextEdit is in the background.",
+    "No actual Save cancellation/reopen or saved note was exercised.",
+    "No four-model-trial rerun after the known prerequisite failure.",
+    "Menu API accepts pid/window, not an input snapshot token; pre/post observations retained privately.",
+    "AX tree completeness flags were retained; relevant format controls were cross-checked with screenshots and independent AX context.",
+    "Original pair invalidated after operator reported closing task windows; candidate used a fresh pair.",
+    "Zero Jev calls establish no semantic-selector usefulness.",
+    "Native full desktop/cross-platform matrix not run."
+  ]
+}
