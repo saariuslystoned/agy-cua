@@ -978,7 +978,10 @@ def _element_can_auto_click(role: str, actions: set[str], has_explicit_actions: 
     if role in TEXT_INPUT_AX_ROLES:
         if not has_explicit_actions or not actions:
             return True
-        return _supports_interactive_click_action(actions)
+        # Driver's element click uses AXPress here. AXShowMenu on a native
+        # TextEdit text area only opens its contextual menu; it cannot focus
+        # the field through AXPress. Keep value/type actions available.
+        return _supports_press_action(actions)
     if role in {
         "AXButton",
         "AXRadioButton",
