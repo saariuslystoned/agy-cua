@@ -7728,6 +7728,8 @@ class JevMcpServer:
                     return False
                 if obs_check.get("snapshot_id") == pre_obs.get("snapshot_id"):
                     return False
+                if bool(obs_check.get("native_root_element_token")) != bool(pre_obs.get("native_root_element_token")):
+                    return False
                 desired_b = authorized["tool"] == "check"
                 obs_sec_ids = set(obs_check.get("secure_element_ids") or ())
                 obs_cpaths = (
@@ -7743,16 +7745,7 @@ class JevMcpServer:
                         or (obs_cpaths.get(e_idx) if isinstance(e_idx, int) else "")
                         or ""
                     )
-                    if cand_cp == pre_checkbox_container_path:
-                        return True
-                    if (
-                        pre_checkbox_container_path
-                        and pre_obs.get("native_root_element_token") is not None
-                        and obs_check.get("native_root_element_token") is None
-                        and cand_cp.endswith(f" > {pre_checkbox_container_path}")
-                    ):
-                        return True
-                    return False
+                    return cand_cp == pre_checkbox_container_path
 
                 els_c = obs_check.get("all_elements") or obs_check.get("elements") or obs_check.get("_raw_elements") or []
                 cand_el = next(
@@ -9425,15 +9418,18 @@ class JevMcpServer:
                 prev_post_sig = out_sig[0] if out_sig else None
                 prev_post_obs = out_obs[0] if out_obs else None
                 if step_sc.get("auto_drilled"):
-                    prev_obs_scope = (
-                        curr_obs_scope[0],
-                        curr_obs_scope[1],
-                        curr_obs_scope[2],
-                        curr_obs_scope[3],
-                        False,
-                        step_sc.get("region"),
-                        step_sc.get("root_element_index"),
-                    )
+                    if step_sc.get("region") is None and step_sc.get("root_element_index") is None:
+                        prev_obs_scope = None
+                    else:
+                        prev_obs_scope = (
+                            curr_obs_scope[0],
+                            curr_obs_scope[1],
+                            curr_obs_scope[2],
+                            curr_obs_scope[3],
+                            False,
+                            step_sc.get("region"),
+                            step_sc.get("root_element_index"),
+                        )
                 else:
                     prev_obs_scope = curr_obs_scope
             else:
