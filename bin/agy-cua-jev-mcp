@@ -33,14 +33,14 @@ import weakref
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
-SERVER_INFO = {"name": "agy-cua-jev", "version": "0.3.0"}
+SERVER_INFO = {"name": "agy-cua-jev", "version": "0.4.0"}
 DEFAULT_PROTOCOL = "2025-06-18"
 
 HOSTED_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_KEYCHAIN_SERVICE = "typesafe-jev"
 PINNED_JEV_MODEL = "jev-1.13.0"
 LOCAL_KEV_MODEL = "kev-latest"
-CLIENT_IDENTITY = "agy-cua-jev-stdlib/0.3.0"
+CLIENT_IDENTITY = "agy-cua-jev-stdlib/0.4.0"
 
 DEFAULT_TIMEOUT_MS = 10_000
 MIN_TIMEOUT_MS = 1_000
@@ -99,6 +99,8 @@ ALLOWED_BACKGROUND_TOOLS = frozenset({
     "click",
     "double_click",
     "right_click",
+    "check",
+    "uncheck",
     "type_text",
     "press_key",
     "hotkey",
@@ -106,6 +108,19 @@ ALLOWED_BACKGROUND_TOOLS = frozenset({
     "scroll",
     "invoke_menu",
 })
+
+
+def _parse_checkbox_bool_state(val: Any) -> bool | None:
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return val
+    norm = str(val).strip().lower()
+    if norm in {"1", "true", "checked", "on"}:
+        return True
+    if norm in {"0", "false", "unchecked", "off"}:
+        return False
+    return None
 
 SCOPED_BROWSER_TOOLS = frozenset({
     "get_browser_state",
@@ -1708,12 +1723,14 @@ def _check_commit_safety_gate(
         "click",
         "double_click",
         "right_click",
+        "check",
+        "uncheck",
         "set_value",
         "browser_click",
         "browser_type",
         "browser_navigate",
     }:
-        if tool in {"click", "double_click", "right_click"} and is_destructive_app_ctx and not is_element_addressed:
+        if tool in {"click", "double_click", "right_click", "check", "uncheck"} and is_destructive_app_ctx and not is_element_addressed:
             # Coordinate clicks have no AX label to gate on; the caller-supplied description is not
             # authority, so refuse them where Send/Delete controls may sit under the pointer.
             return (
@@ -2827,7 +2844,16 @@ def extract_window_observation(
         if segs_e:
             container_segments_by_el[idx_e] = segs_e
 
-    eff_region = region.strip() if isinstance(region, str) and region.strip() else None
+    native_root_token = (
+        str(sc["root_element_token"]).strip()
+        if isinstance(sc.get("root_element_token"), str) and str(sc["root_element_token"]).strip()
+        else None
+    )
+    reported_region = region.strip() if isinstance(region, str) and region.strip() else None
+    reported_root_element_index = root_element_index
+    eff_region = None if native_root_token is not None else reported_region
+    if native_root_token is not None:
+        root_element_index = None
     if root_element_index is not None:
         if (
             root_element_index not in by_index
@@ -2935,7 +2961,23 @@ def extract_window_observation(
                 label = alt_str
             else:
                 label = ""
-        value = None if (is_secure or el.get("value") is None) else raw_val_str
+        raw_val_state = (
+            ""
+            if el.get("value_state") is None
+            else str(el.get("value_state") or "").replace("\u200e", "").strip()
+        )
+        if is_secure:
+            value = None
+        elif el.get("value") is not None:
+            value = raw_val_str
+        elif (
+            raw_val_state
+            and role in {"AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXSlider", "AXIncrementor"}
+            and not _contains_secret_or_mask(raw_val_state, all_secret_values)
+        ):
+            value = raw_val_state
+        else:
+            value = None
         actions, has_explicit_actions = _normalized_actions(el)
         supports_press = _supports_press_action(actions)
 
@@ -2962,6 +3004,8 @@ def extract_window_observation(
         supported_actions: list[str] = []
         if can_click:
             supported_actions.append("click")
+            if role == "AXCheckBox" and _parse_checkbox_bool_state(value) is not None:
+                supported_actions.extend(["check", "uncheck"])
         if can_set_value:
             supported_actions.append("set_value")
         if (not is_secure) and (role in TEXT_INPUT_AX_ROLES):
@@ -3085,14 +3129,102 @@ def extract_window_observation(
             and len(bucket["sample_labels"]) < 4
         ):
             bucket["sample_labels"].append(c_lbl)
+    native_regions: list[dict[str, Any]] = []
+    raw_sc_regions = sc.get("regions")
+    if isinstance(raw_sc_regions, list):
+        for r_entry in raw_sc_regions:
+            if not isinstance(r_entry, Mapping):
+                continue
+            r_lbl = str(r_entry.get("label") or "").replace("\u200e", "").strip()
+            r_tok = r_entry.get("region_token")
+            r_role = str(r_entry.get("role") or "").strip()
+            r_depth = r_entry.get("depth")
+            if (
+                not r_lbl
+                or _contains_secret_or_mask(r_lbl, all_secret_values)
+                or not isinstance(r_tok, str)
+                or not r_tok
+            ):
+                continue
+            nr_obj: dict[str, Any] = {
+                "label": r_lbl,
+                "region_token": r_tok,
+                "role": r_role,
+                "depth": int(r_depth) if isinstance(r_depth, int) and not isinstance(r_depth, bool) else 1,
+            }
+            r_eidx = r_entry.get("element_index")
+            if isinstance(r_eidx, int) and not isinstance(r_eidx, bool) and r_eidx not in all_secure_ids:
+                nr_obj["element_index"] = r_eidx
+            native_regions.append(nr_obj)
+
+    active_surfaces: list[dict[str, Any]] = []
+    raw_sc_surfaces = sc.get("surfaces")
+    if isinstance(raw_sc_surfaces, list):
+        for s_entry in raw_sc_surfaces:
+            if not isinstance(s_entry, Mapping):
+                continue
+            s_kind = str(s_entry.get("kind") or "").strip()
+            s_role = str(s_entry.get("role") or "").strip()
+            if not s_kind or not s_role:
+                continue
+            s_obj: dict[str, Any] = {"kind": s_kind, "role": s_role}
+            s_title = str(s_entry.get("title") or "").replace("\u200e", "").strip()
+            if s_title and not _contains_secret_or_mask(s_title, all_secret_values):
+                s_obj["title"] = s_title
+            for opt_k in ("subrole", "element_index", "window_id"):
+                if s_entry.get(opt_k) is not None:
+                    s_obj[opt_k] = s_entry[opt_k]
+            active_surfaces.append(s_obj)
+
     drill_regions: list[dict[str, Any]] = list(region_buckets.values())
+    if native_regions:
+        nr_by_norm: dict[str, list[dict[str, Any]]] = {}
+        for nr in native_regions:
+            nr_key = nr["label"].lower()
+            nr_by_norm.setdefault(nr_key, []).append(nr)
+        seen_drill_norms: set[str] = set()
+        for b_item in drill_regions:
+            norm_b = str(b_item["region"]).strip().lower()
+            seen_drill_norms.add(norm_b)
+            cand_nrs = nr_by_norm.get(norm_b) or []
+            if len(cand_nrs) == 1:
+                b_item["region_token"] = cand_nrs[0]["region_token"]
+            elif len(cand_nrs) > 1 and "element_index" in b_item:
+                for c_nr in cand_nrs:
+                    if c_nr.get("element_index") == b_item["element_index"]:
+                        b_item["region_token"] = c_nr["region_token"]
+                        break
+        if native_root_token is None and (bool(sc.get("truncated", False)) or skeleton):
+            for nr in native_regions:
+                if nr["depth"] <= 2 and nr["label"].lower() not in seen_drill_norms:
+                    seen_drill_norms.add(nr["label"].lower())
+                    unwalked_item: dict[str, Any] = {
+                        "region": nr["label"],
+                        "region_token": nr["region_token"],
+                        "actionable_count": 0,
+                        "subregions": [],
+                        "sample_labels": [],
+                        "unwalked_region": True,
+                    }
+                    if "element_index" in nr:
+                        unwalked_item["element_index"] = nr["element_index"]
+                    drill_regions.append(unwalked_item)
     top_name_counts: dict[str, int] = {}
     for b_item in drill_regions:
         norm_r = str(b_item["region"]).strip().lower()
         top_name_counts[norm_r] = top_name_counts.get(norm_r, 0) + 1
-    for b_item in drill_regions:
+    used_drill_cids: set[str] = set()
+    for r_pos, b_item in enumerate(drill_regions):
         if top_name_counts.get(str(b_item["region"]).strip().lower(), 0) > 1:
             b_item["ambiguous_region"] = True
+        base_dcid = f"drill.{r_pos}.{_slug(str(b_item.get('region') or 'region'))}"
+        dcid = base_dcid
+        sfx = 2
+        while dcid in used_drill_cids:
+            dcid = f"{base_dcid}-{sfx}"
+            sfx += 1
+        used_drill_cids.add(dcid)
+        b_item["candidate_id"] = dcid
 
     def _el_in_subtree_scope(cel: Mapping[str, Any]) -> bool:
         c_idx = cel["element_index"]
@@ -3227,6 +3359,45 @@ def extract_window_observation(
                 "delivery_mode": "background",
             },
         })
+        if enrich_descriptions and role == "AXCheckBox":
+            cb_bool = _parse_checkbox_bool_state(compact_el.get("value"))
+            if cb_bool is not None:
+                c_path = compact_el.get("container_path")
+                in_path = f" in {c_path[:160]}" if isinstance(c_path, str) and c_path else ""
+                state_word = "checked" if cb_bool else "unchecked"
+                for chk_prefix, chk_tool, chk_verb, chk_goal_word in (
+                    ("chk", "check", "Check", "checked"),
+                    ("unchk", "uncheck", "Uncheck", "unchecked"),
+                ):
+                    if len(auto_candidates) >= max_auto_candidates:
+                        break
+                    chk_base = f"{chk_prefix}.{idx}.{_slug(display_label)}"
+                    chk_cid = chk_base
+                    chk_suf = 2
+                    while chk_cid in used_ids:
+                        chk_cid = f"{chk_base}-{chk_suf}"
+                        chk_suf += 1
+                    used_ids.add(chk_cid)
+                    chk_desc = (
+                        f"{chk_verb} [{idx}] AXCheckBox {json.dumps(display_label, ensure_ascii=False)}"
+                        f"{in_path} (idempotent: ensure {chk_goal_word}; currently {state_word})"
+                    )
+                    auto_candidates.append({
+                        "id": chk_cid,
+                        "description": chk_desc,
+                        "pid": expected_pid,
+                        "window_id": expected_window_id,
+                        "snapshot_id": snapshot_id,
+                        "tool": chk_tool,
+                        "arguments": {
+                            "pid": expected_pid,
+                            "window_id": expected_window_id,
+                            "snapshot_id": snapshot_id,
+                            "element_index": idx,
+                            "element_token": f"{snapshot_id}:{idx}",
+                            "delivery_mode": "background",
+                        },
+                    })
 
     bounded_elements = prioritized_elements[:max_elements_cap]
     all_elements = prioritized_elements + scoped_explicit_elements
@@ -3312,8 +3483,11 @@ def extract_window_observation(
         "observation_truncated": observation_truncated,
         "reconstructed_from_diff": bool(is_diff_payload),
         "skeleton": bool(skeleton),
-        "region": eff_region,
-        "root_element_index": root_element_index,
+        "region": reported_region,
+        "root_element_index": reported_root_element_index,
+        "native_root_element_token": native_root_token,
+        "native_regions": native_regions,
+        "active_surfaces": active_surfaces,
         "drill_regions": drill_regions,
         "static_texts": static_texts,
         "indexed_element_ids": {e["element_index"] for e in all_elements},
@@ -3358,12 +3532,76 @@ def build_bound_candidates(
     }
 
     if not raw_candidates:
+        drill_cands: list[dict[str, Any]] = []
+        if (
+            enrich_descriptions
+            and observation.get("query") is None
+            and observation.get("region") is None
+            and observation.get("root_element_index") is None
+            and (
+                observation.get("skeleton")
+                or observation.get("observation_truncated")
+                or observation.get("truncated")
+            )
+            and observation.get("drill_regions")
+        ):
+            used_dcids: set[str] = set()
+            for r_pos, d_reg in enumerate(observation.get("drill_regions") or []):
+                if not isinstance(d_reg, Mapping):
+                    continue
+                reg_lbl = str(d_reg.get("region") or "Region").strip() or "Region"
+                base_dcid = str(d_reg.get("candidate_id") or f"drill.{r_pos}.{_slug(reg_lbl)}")
+                dcid = base_dcid
+                sfx = 2
+                while dcid in used_dcids:
+                    dcid = f"{base_dcid}-{sfx}"
+                    sfx += 1
+                used_dcids.add(dcid)
+                samples = ", ".join(str(s) for s in (d_reg.get("sample_labels") or [])[:4])
+                subregs = ", ".join(str(s) for s in (d_reg.get("subregions") or [])[:4])
+                unwalked_tag = (
+                    " (unwalked truncated region)"
+                    if d_reg.get("unwalked_region")
+                    else f" ({d_reg.get('actionable_count', 0)} controls)"
+                )
+                detail_parts: list[str] = []
+                if subregs:
+                    detail_parts.append(f"subregions: {subregs}")
+                if samples:
+                    detail_parts.append(f"samples: {samples}")
+                detail_str = f" [{'; '.join(detail_parts)}]" if detail_parts else ""
+                d_args: dict[str, Any] = {
+                    "pid": pid,
+                    "window_id": window_id,
+                    "snapshot_id": snapshot_id,
+                }
+                if not d_reg.get("ambiguous_region"):
+                    d_args["region"] = reg_lbl
+                if isinstance(d_reg.get("element_index"), int) and not isinstance(d_reg.get("element_index"), bool):
+                    d_args["root_element_index"] = d_reg["element_index"]
+                drill_cands.append(
+                    {
+                        "id": dcid,
+                        "description": (
+                            f"Drill into region {json.dumps(reg_lbl, ensure_ascii=False)}"
+                            f"{unwalked_tag}{detail_str} to inspect and act on its controls"
+                        )[:1000],
+                        "pid": pid,
+                        "window_id": window_id,
+                        "snapshot_id": snapshot_id,
+                        "tool": "drill_region",
+                        "arguments": d_args,
+                    }
+                )
+            drill_cands = drill_cands[: min(16, max_auto_candidates)]
+
         if action_value is not None:
             if not isinstance(action_value, str):
                 raise ValueError("value must be a string when auto-building set_value candidates")
             is_bool_action_val = action_value.strip().lower() in {"0", "1", "true", "false", "on", "off", "yes", "no"}
             sv_candidates: list[dict[str, Any]] = []
             used_sv_ids: set[str] = set()
+            sv_cap = max(0, max_auto_candidates - len(drill_cands))
             for el in (observation.get("elements") or []):
                 if not isinstance(el, Mapping):
                     continue
@@ -3379,7 +3617,7 @@ def build_bound_candidates(
                     or (role == "AXCheckBox" and not is_bool_action_val)
                 ):
                     continue
-                if len(sv_candidates) >= max_auto_candidates:
+                if len(sv_candidates) >= sv_cap:
                     break
                 base_id = f"sv.{idx}.{_slug(label)}"
                 cid = base_id
@@ -3408,7 +3646,8 @@ def build_bound_candidates(
                         "value": action_value,
                     },
                 })
-            if not sv_candidates:
+            combined_sv = sv_candidates + drill_cands
+            if not combined_sv:
                 if (
                     observation.get("query_incomplete")
                     or observation.get("observation_truncated")
@@ -3420,7 +3659,7 @@ def build_bound_candidates(
                         "request a targeted query or deeper observation"
                     )
                 raise ValueError("no value-settable AX elements found in window to build set_value candidates")
-            return sv_candidates
+            return combined_sv
 
         auto = [
             c
@@ -3433,6 +3672,8 @@ def build_bound_candidates(
             )
             is None
         ]
+        if drill_cands:
+            auto = auto[: max(0, max_auto_candidates - len(drill_cands))] + drill_cands
         if not auto:
             if (
                 observation.get("query_incomplete")
@@ -3554,7 +3795,7 @@ def build_bound_candidates(
 
         args_dict["pid"] = pid
         args_dict["window_id"] = window_id
-        if tool in {"click", "double_click", "right_click", "type_text", "press_key", "hotkey", "scroll"}:
+        if tool in {"click", "double_click", "right_click", "check", "uncheck", "type_text", "press_key", "hotkey", "scroll"}:
             args_dict.setdefault("delivery_mode", "background")
 
         if tool == "invoke_menu":
@@ -3621,13 +3862,26 @@ def build_bound_candidates(
                     raise ValueError(
                         f"unsupported_element_action: candidate {cid!r} cannot click role {target_role!r} without AXPress support"
                     )
+                if tool in {"check", "uncheck"}:
+                    if target_role != "AXCheckBox":
+                        raise ValueError(
+                            f"incompatible_tool_for_role: candidate {cid!r} cannot use {tool} on role {target_role!r}"
+                        )
+                    if target_el.get("can_click") is False:
+                        raise ValueError(
+                            f"unsupported_element_action: candidate {cid!r} cannot {tool} AXCheckBox without AXPress support"
+                        )
+                    if _parse_checkbox_bool_state(target_el.get("value")) is None:
+                        raise ValueError(
+                            f"indeterminate_checkbox_state: candidate {cid!r} cannot {tool} AXCheckBox without unambiguous boolean value"
+                        )
                 el_gate = _check_commit_safety_gate(observation, str(target_el.get("label") or ""), tool, args_dict)
                 if el_gate is not None:
                     raise ValueError(f"{el_gate} (candidate={cid!r})")
             args_dict["snapshot_id"] = snapshot_id
             args_dict["element_token"] = f"{snapshot_id}:{el_idx}"
-        elif tool == "set_value":
-            raise ValueError(f"missing_target_address: candidate {cid!r} for set_value requires element_index")
+        elif tool in {"set_value", "check", "uncheck"}:
+            raise ValueError(f"missing_target_address: candidate {cid!r} for {tool} requires element_index")
         elif tool in {"click", "double_click", "right_click"}:
             if "x" not in args_dict or "y" not in args_dict:
                 raise ValueError(f"missing_target_address: candidate {cid!r} for {tool} requires element_index (or x, y)")
@@ -3748,6 +4002,37 @@ def authorize_candidate_dispatch(
             raise ValueError(
                 f"secure_element_refused: candidate {selected_id!r} cannot target secure element_index={args['element_index']}"
             )
+        if tool in {"check", "uncheck"} and observation is not None:
+            obs_els_chk = observation.get("all_elements") or observation.get("elements") or []
+            matched_chk_el = next(
+                (
+                    oe
+                    for oe in obs_els_chk
+                    if isinstance(oe, Mapping) and oe.get("element_index") == args["element_index"]
+                ),
+                None,
+            )
+            if matched_chk_el is not None:
+                chk_role = str(matched_chk_el.get("role") or "").strip()
+                if chk_role != "AXCheckBox":
+                    raise ValueError(
+                        f"incompatible_tool_for_role: candidate {selected_id!r} cannot use {tool} on role {chk_role!r}"
+                    )
+                if matched_chk_el.get("can_click") is False:
+                    raise ValueError(
+                        f"unsupported_element_action: candidate {selected_id!r} cannot {tool} AXCheckBox without AXPress support"
+                    )
+                chk_raw_val = (
+                    matched_chk_el.get("value")
+                    if matched_chk_el.get("value") is not None
+                    else matched_chk_el.get("value_state")
+                )
+                if _parse_checkbox_bool_state(chk_raw_val) is None:
+                    raise ValueError(
+                        f"indeterminate_checkbox_state: candidate {selected_id!r} cannot {tool} AXCheckBox without unambiguous boolean value"
+                    )
+    elif tool in {"set_value", "check", "uncheck"}:
+        raise ValueError(f"missing_target_address: candidate {selected_id!r} for {tool} requires element_index")
     elif tool in {"click", "double_click", "right_click"} and ("x" in args or "y" in args):
         x_val = args.get("x")
         y_val = args.get("y")
@@ -4848,6 +5133,9 @@ class DriverClient:
         self._env = env
         self.session_id = session_id
         self._session_active = False
+        self.supports_root_element_token = False
+        self.supports_include_menubar = False
+        self.driver_version: str | None = None
         self._lock = threading.Lock()
         self._proc: subprocess.Popen[bytes] | None = None
         self._rx_buf = bytearray()
@@ -4857,6 +5145,9 @@ class DriverClient:
         proc = self._proc
         self._proc = None
         self._session_active = False
+        self.supports_root_element_token = False
+        self.supports_include_menubar = False
+        self.driver_version = None
         self._rx_buf.clear()
         if proc is not None:
             try:
@@ -4912,8 +5203,15 @@ class DriverClient:
         env = {"PATH": self._env.get("PATH", os.environ.get("PATH", "/usr/bin:/bin")), "HOME": self._env.get("HOME", os.environ.get("HOME", ""))}
         if self._env.get("AGY_CUA_DRIVER"):
             env["AGY_CUA_DRIVER"] = self._env["AGY_CUA_DRIVER"]
+        if self._env.get("CUA_DRIVER_HOME"):
+            env["CUA_DRIVER_HOME"] = self._env["CUA_DRIVER_HOME"]
+        if self._env.get("AGY_CUA_DRIVER_DIRECT"):
+            env["AGY_CUA_DRIVER_DIRECT"] = self._env["AGY_CUA_DRIVER_DIRECT"]
+        mcp_cmd = [self.driver_bin, "mcp"]
+        if self._env.get("AGY_CUA_DRIVER_DIRECT") == "1":
+            mcp_cmd.append("--direct")
         proc = subprocess.Popen(
-            [self.driver_bin, "mcp"],
+            mcp_cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -4942,6 +5240,24 @@ class DriverClient:
             init_notif = (json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n").encode("utf-8")
             self._write_all_unlocked(proc.stdin.fileno(), init_notif, startup_deadline, "notifications/initialized")
             srv_info = init_res.get("serverInfo") if isinstance(init_res, Mapping) else None
+            if isinstance(srv_info, Mapping) and srv_info.get("name") == "cua-driver":
+                self.driver_version = str(srv_info.get("version")) if srv_info.get("version") else None
+                try:
+                    tools_res = self._request_unlocked(
+                        "tools/list",
+                        {},
+                        timeout_s=min(1.5, max(0.001, startup_deadline - time.monotonic())),
+                    )
+                    for t_def in (tools_res.get("tools") or []) if isinstance(tools_res, Mapping) else []:
+                        if isinstance(t_def, Mapping) and t_def.get("name") == "get_window_state":
+                            in_schema = t_def.get("inputSchema")
+                            props = in_schema.get("properties") if isinstance(in_schema, Mapping) else None
+                            if isinstance(props, Mapping):
+                                self.supports_root_element_token = "root_element_token" in props
+                                self.supports_include_menubar = "include_menubar" in props
+                            break
+                except Exception:
+                    pass
             if (
                 isinstance(srv_info, Mapping)
                 and srv_info.get("name") == "cua-driver"
@@ -5045,6 +5361,18 @@ class DriverClient:
                 if not isinstance(res, dict):
                     raise RuntimeError(f"cua-driver mcp returned non-object result for {method}")
                 return res
+
+    def ensure_capabilities(self, *, deadline_monotonic: float | None = None) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        with self._lock:
+            max_init_s: float | None = None
+            if deadline_monotonic is not None:
+                rem = deadline_monotonic - time.monotonic()
+                if rem <= 0:
+                    raise TimeoutError("batch deadline exceeded")
+                max_init_s = rem
+            self._ensure_started(max_timeout_s=max_init_s)
 
     def call_tool(
         self,
@@ -5591,9 +5919,240 @@ class JevMcpServer:
         self._closed = False
         self._owned_targets: set[tuple[int, int]] = set()
         self._last_observations: dict[tuple[int, int], dict[str, Any]] = {}
+        self._window_token_cache: dict[tuple[int, int], dict[str, Any]] = {}
         self._visual_snapshots: dict[tuple[int, int], str] = {}
         self._visual_snapshot_targets: dict[str, tuple[int, int]] = {}
         self._snapshot_targets: dict[str, tuple[int, int]] = {}
+
+    def _update_window_token_cache(self, pid: int, window_id: int, obs: Mapping[str, Any]) -> None:
+        snap_id = obs.get("snapshot_id")
+        if not isinstance(snap_id, str) or not SNAPSHOT_ID_RE.match(snap_id):
+            return
+        is_full_window = obs.get("native_root_element_token") is None
+        secure_ids = set(obs.get("secure_element_ids") or ())
+        el_tokens: dict[int, str] = {}
+        if is_full_window:
+            all_ids: set[int] = set(obs.get("indexed_element_ids") or ())
+            for raw_e in (obs.get("_raw_elements") or []):
+                if isinstance(raw_e, Mapping):
+                    r_idx = raw_e.get("element_index")
+                    if isinstance(r_idx, int) and not isinstance(r_idx, bool) and r_idx >= 0:
+                        all_ids.add(r_idx)
+            for e_idx in all_ids - secure_ids:
+                el_tokens[e_idx] = f"{snap_id}:{e_idx}"
+        self._window_token_cache[(pid, window_id)] = {
+            "snapshot_id": snap_id,
+            "is_full_window": is_full_window,
+            "regions": [dict(r) for r in (obs.get("native_regions") or []) if isinstance(r, Mapping)],
+            "element_tokens": el_tokens,
+        }
+
+    def _resolve_cached_root_token(
+        self,
+        pid: int,
+        window_id: int,
+        *,
+        region: str | None,
+        root_element_index: int | None,
+    ) -> str | None:
+        cache = self._window_token_cache.get((pid, window_id))
+        if not isinstance(cache, Mapping):
+            return None
+        if region is not None and root_element_index is not None:
+            return None
+        if region is not None:
+            if ">" in region:
+                return None
+            norm_reg = region.strip().lower()
+            matches = [
+                r
+                for r in (cache.get("regions") or [])
+                if isinstance(r, Mapping) and str(r.get("label") or "").strip().lower() == norm_reg
+            ]
+            if len(matches) == 1 and isinstance(matches[0].get("region_token"), str):
+                return str(matches[0]["region_token"])
+            top_matches = [
+                r for r in matches if r.get("depth") == 1 and isinstance(r.get("region_token"), str)
+            ]
+            if len(top_matches) == 1:
+                return str(top_matches[0]["region_token"])
+            return None
+        if root_element_index is not None:
+            el_tokens = cache.get("element_tokens")
+            if isinstance(el_tokens, Mapping) and isinstance(el_tokens.get(root_element_index), str):
+                return str(el_tokens[root_element_index])
+        return None
+
+    def _resolve_post_obs_root_token(
+        self,
+        current_obs: Mapping[str, Any],
+        *,
+        region: str | None,
+    ) -> str | None:
+        if current_obs.get("native_root_element_token") is None:
+            return None
+        snap_id = current_obs.get("snapshot_id")
+        if not isinstance(snap_id, str) or not SNAPSHOT_ID_RE.match(snap_id):
+            return None
+        if region is not None and ">" not in region:
+            norm_reg = region.strip().lower()
+            matches = [
+                r
+                for r in (current_obs.get("native_regions") or [])
+                if isinstance(r, Mapping) and str(r.get("label") or "").strip().lower() == norm_reg
+            ]
+            if len(matches) == 1 and isinstance(matches[0].get("region_token"), str):
+                return str(matches[0]["region_token"])
+            top_matches = [
+                r for r in matches if r.get("depth") == 1 and isinstance(r.get("region_token"), str)
+            ]
+            if len(top_matches) == 1:
+                return str(top_matches[0]["region_token"])
+        secure_ids = set(current_obs.get("secure_element_ids") or ())
+        if 0 not in secure_ids:
+            if 0 in (current_obs.get("indexed_element_ids") or set()):
+                return f"{snap_id}:0"
+            for raw_e in (current_obs.get("_raw_elements") or []):
+                if isinstance(raw_e, Mapping) and raw_e.get("element_index") == 0:
+                    return f"{snap_id}:0"
+        return None
+
+    def _call_get_window_state(
+        self,
+        driver: Any,
+        base_args: Mapping[str, Any],
+        *,
+        pid: int,
+        window_id: int,
+        skeleton: bool = False,
+        region: str | None = None,
+        root_element_index: int | None = None,
+        explicit_root_token: str | None = None,
+        allow_cached_root_token: bool = True,
+        caller_specified_max_elements: bool = False,
+        timeout_s: float | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> dict[str, Any]:
+        if hasattr(driver, "ensure_capabilities"):
+            driver.ensure_capabilities(deadline_monotonic=deadline_monotonic)
+        supports_mb = bool(not self.v1_compat and getattr(driver, "supports_include_menubar", False))
+        supports_root = bool(not self.v1_compat and getattr(driver, "supports_root_element_token", False))
+        call_args = dict(base_args)
+        if supports_mb:
+            call_args.setdefault("include_menubar", False)
+        root_tok: str | None = None
+        if supports_root:
+            root_tok = explicit_root_token or (
+                self._resolve_cached_root_token(
+                    pid,
+                    window_id,
+                    region=region,
+                    root_element_index=root_element_index,
+                )
+                if allow_cached_root_token
+                else None
+            )
+            if (
+                root_tok is None
+                and allow_cached_root_token
+                and region is not None
+                and ">" not in region
+                and (pid, window_id) not in self._window_token_cache
+                and not caller_specified_max_elements
+            ):
+                seed_args: dict[str, Any] = {
+                    "pid": pid,
+                    "window_id": window_id,
+                    "include_screenshot": False,
+                    "tree_format": "compact",
+                    "max_depth": 2,
+                    "max_elements": 60,
+                }
+                if supports_mb:
+                    seed_args["include_menubar"] = False
+                seed_raw = driver.call_tool(
+                    "get_window_state",
+                    seed_args,
+                    timeout_s=timeout_s,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                if not seed_raw.get("isError"):
+                    seed_sc = seed_raw.get("structuredContent")
+                    if isinstance(seed_sc, Mapping):
+                        seed_snap = seed_sc.get("snapshot_id")
+                        raw_regs = seed_sc.get("regions")
+                        if isinstance(seed_snap, str) and SNAPSHOT_ID_RE.match(seed_snap) and isinstance(raw_regs, list):
+                            parsed_regs = [
+                                {
+                                    "region_token": r["region_token"].strip(),
+                                    "label": str(r.get("label") or "").strip(),
+                                    "role": str(r.get("role") or ""),
+                                    "depth": int(r["depth"]) if isinstance(r.get("depth"), int) else 1,
+                                    "element_index": r.get("element_index") if isinstance(r.get("element_index"), int) else None,
+                                }
+                                for r in raw_regs
+                                if isinstance(r, Mapping)
+                                and isinstance(r.get("region_token"), str)
+                                and r["region_token"].startswith(f"{seed_snap}:r")
+                                and str(r.get("label") or "").strip()
+                            ]
+                            self._window_token_cache[(pid, window_id)] = {
+                                "snapshot_id": seed_snap,
+                                "regions": parsed_regs,
+                                "element_tokens": {},
+                            }
+                            root_tok = self._resolve_cached_root_token(
+                                pid,
+                                window_id,
+                                region=region,
+                                root_element_index=None,
+                            )
+        if not caller_specified_max_elements and not self.v1_compat:
+            if root_tok is not None:
+                call_args["max_elements"] = 500
+            elif (
+                skeleton
+                and call_args.get("query") is None
+                and region is None
+                and root_element_index is None
+                and supports_root
+            ):
+                call_args["max_elements"] = 120
+            elif skeleton or region is not None or root_element_index is not None:
+                call_args["max_elements"] = 2000
+        if root_tok is not None:
+            call_args["root_element_token"] = root_tok
+            call_args.pop("include_diff", None)
+        raw = driver.call_tool(
+            "get_window_state",
+            call_args,
+            timeout_s=timeout_s,
+            deadline_monotonic=deadline_monotonic,
+        )
+        if raw.get("isError") and "root_element_token" in call_args:
+            err_txt = "".join(c.get("text", "") for c in (raw.get("content") or []) if isinstance(c, Mapping))
+            if "unsupported_parameter" in err_txt:
+                try:
+                    driver.supports_root_element_token = False
+                except Exception:
+                    pass
+            self._window_token_cache.pop((pid, window_id), None)
+            retry_args = dict(base_args)
+            if supports_mb:
+                retry_args.setdefault("include_menubar", False)
+            if (
+                not self.v1_compat
+                and (skeleton or region is not None or root_element_index is not None)
+                and not caller_specified_max_elements
+            ):
+                retry_args["max_elements"] = 2000
+            raw = driver.call_tool(
+                "get_window_state",
+                retry_args,
+                timeout_s=timeout_s,
+                deadline_monotonic=deadline_monotonic,
+            )
+        return raw
 
     def _get_driver(self) -> DriverClient:
         if self._driver_client is not None:
@@ -6064,9 +6623,15 @@ class JevMcpServer:
                     pre_obs_args["timeout_ms"] = walk_timeout_ms_val
                 elif not self.v1_compat and is_hierarchy_scoped and driver.timeout_ms >= 4000:
                     pre_obs_args["timeout_ms"] = 5000
-                raw_pre = driver.call_tool(
-                    "get_window_state",
+                raw_pre = self._call_get_window_state(
+                    driver,
                     pre_obs_args,
+                    pid=pid,
+                    window_id=window_id,
+                    skeleton=skeleton_val,
+                    region=region_val,
+                    root_element_index=root_element_index_val,
+                    caller_specified_max_elements=(max_elements_val is not None),
                     timeout_s=obs_call_timeout_s(driver, pre_obs_args.get("timeout_ms")),
                     deadline_monotonic=_deadline_monotonic,
                 )
@@ -6093,9 +6658,15 @@ class JevMcpServer:
                     if "invalid_diff_baseline" not in str(diff_exc):
                         raise
                     fallback_args = dict(pre_obs_args, include_diff=False, tree_format="both")
-                    raw_pre = driver.call_tool(
-                        "get_window_state",
+                    raw_pre = self._call_get_window_state(
+                        driver,
                         fallback_args,
+                        pid=pid,
+                        window_id=window_id,
+                        skeleton=skeleton_val,
+                        region=region_val,
+                        root_element_index=root_element_index_val,
+                        caller_specified_max_elements=(max_elements_val is not None),
                         timeout_s=obs_call_timeout_s(driver, pre_obs_args.get("timeout_ms")),
                         deadline_monotonic=_deadline_monotonic,
                     )
@@ -6127,6 +6698,7 @@ class JevMcpServer:
                 if not pre_obs.get("query_incomplete") and not is_hierarchy_scoped:
                     self._last_observations[(pid, window_id)] = pre_obs
                 self._snapshot_targets[pre_obs["snapshot_id"]] = (pid, window_id)
+                self._update_window_token_cache(pid, window_id, pre_obs)
             except Exception as exc:
                 release_if_unowned()
                 obs_ms = round((time.perf_counter() - obs_started) * 1000, 2)
@@ -6168,6 +6740,8 @@ class JevMcpServer:
             obs_disclosure["skeleton"] = bool(pre_obs.get("skeleton", False))
             obs_disclosure["region"] = pre_obs.get("region")
             obs_disclosure["root_element_index"] = pre_obs.get("root_element_index")
+        if pre_obs.get("active_surfaces"):
+            obs_disclosure["active_surfaces"] = pre_obs.get("active_surfaces") or []
 
         if expected_snap is not None and pre_obs["snapshot_id"] != expected_snap:
             release_if_unowned()
@@ -6289,156 +6863,408 @@ class JevMcpServer:
             self._record_trace(payload)
             return _format_tool_result(payload, is_error=True)
 
-        # Stage 2: Build / validate closed candidate table bound to fresh observation
-        try:
-            bound_candidates = build_bound_candidates(
-                args.get("candidates"),
-                pre_obs,
-                action_value=action_value,
-                source_snapshot_id=source_snap,
-                max_auto_candidates=self.max_auto_candidates,
-                enrich_descriptions=not self.v1_compat,
-            )
-            history_in = args.get("history")
-            if history_in is None:
-                history_in = [
-                    {"selected_id": h["selected_id"], "outcome": h["status"]}
-                    for h in self.accounting.history_log[-MAX_HISTORY:]
-                    if isinstance(h.get("selected_id"), str) and isinstance(h.get("status"), str)
-                ]
-            referenced_el_ids = {
-                c["arguments"]["element_index"]
-                for c in bound_candidates
-                if isinstance(c.get("arguments"), Mapping) and isinstance(c["arguments"].get("element_index"), int)
-            }
-            all_els = pre_obs.get("all_elements") or pre_obs["elements"]
-            prompt_els: list[Mapping[str, Any]] = [
-                e for e in all_els if e.get("element_index") in referenced_el_ids
-            ][: self.max_elements_cap]
-            seen_prompt_ids = {e["element_index"] for e in prompt_els}
-            for e in pre_obs["elements"]:
-                if len(prompt_els) >= self.max_elements_cap:
-                    break
-                if e["element_index"] not in seen_prompt_ids:
-                    prompt_els.append(e)
-                    seen_prompt_ids.add(e["element_index"])
-            select_elements: list[dict[str, Any]] = []
-            for e in prompt_els:
-                se_item: dict[str, Any] = {
-                    "element_index": e["element_index"],
-                    "role": e["role"],
-                    "label": e["label"],
-                    "state": e["state"],
-                    "depth": e.get("depth", 1),
-                    "in_toolbar": bool(e.get("in_toolbar", False)),
-                    "supported_actions": list(e.get("supported_actions") or []),
+        # Stage 2 & 3: Build / validate closed candidate table + Jev selection (with optional 1-hop drill.*)
+        history_in = args.get("history")
+        if history_in is None:
+            history_in = [
+                {"selected_id": h["selected_id"], "outcome": h["status"]}
+                for h in self.accounting.history_log[-MAX_HISTORY:]
+                if isinstance(h.get("selected_id"), str) and isinstance(h.get("status"), str)
+            ]
+
+        def _build_and_select_for_obs(
+            obs_curr: dict[str, Any],
+            *,
+            forbid_drill: bool = False,
+        ) -> tuple[list[dict[str, Any]], dict[str, Any], float, bool, dict[str, Any] | None]:
+            try:
+                b_cands = build_bound_candidates(
+                    args.get("candidates"),
+                    obs_curr,
+                    action_value=action_value,
+                    source_snapshot_id=source_snap,
+                    max_auto_candidates=self.max_auto_candidates,
+                    enrich_descriptions=not self.v1_compat,
+                )
+                if forbid_drill:
+                    non_drill = [c for c in b_cands if not str(c.get("id") or "").startswith("drill.")]
+                    if non_drill:
+                        b_cands = non_drill
+                ref_el_ids = {
+                    c["arguments"]["element_index"]
+                    for c in b_cands
+                    if isinstance(c.get("arguments"), Mapping) and isinstance(c["arguments"].get("element_index"), int)
                 }
-                if not self.v1_compat and isinstance(e.get("container_path"), str) and e["container_path"]:
-                    se_item["container_path"] = e["container_path"]
-                select_elements.append(se_item)
-            if not select_elements:
-                for idx_c, c in enumerate(bound_candidates):
-                    c_args = c.get("arguments")
-                    if isinstance(c_args, Mapping) and "x" in c_args and "y" in c_args and "element_index" not in c_args:
-                        select_elements.append({
-                            "element_index": idx_c,
-                            "role": "AXCanvasTarget",
-                            "label": str(c.get("description") or c.get("id") or "Canvas Target"),
-                            "state": f"enabled (visual coordinate {c_args['x']}, {c_args['y']})",
-                            "depth": 1,
-                            "in_toolbar": False,
-                            "supported_actions": [str(c.get("tool") or "click")],
-                        })
-            raw_select_req = _fit_select_request_to_byte_budget(
-                {
-                    "goal": goal,
+                all_els_c = obs_curr.get("all_elements") or obs_curr["elements"]
+                prompt_els_c: list[Mapping[str, Any]] = [
+                    e for e in all_els_c if e.get("element_index") in ref_el_ids
+                ][: self.max_elements_cap]
+                seen_p_ids = {e["element_index"] for e in prompt_els_c}
+                for e in obs_curr["elements"]:
+                    if len(prompt_els_c) >= self.max_elements_cap:
+                        break
+                    if e["element_index"] not in seen_p_ids:
+                        prompt_els_c.append(e)
+                        seen_p_ids.add(e["element_index"])
+                sel_elements: list[dict[str, Any]] = []
+                for e in prompt_els_c:
+                    se_item: dict[str, Any] = {
+                        "element_index": e["element_index"],
+                        "role": e["role"],
+                        "label": e["label"],
+                        "state": e["state"],
+                        "depth": e.get("depth", 1),
+                        "in_toolbar": bool(e.get("in_toolbar", False)),
+                        "supported_actions": list(e.get("supported_actions") or []),
+                    }
+                    if not self.v1_compat and isinstance(e.get("container_path"), str) and e["container_path"]:
+                        se_item["container_path"] = e["container_path"]
+                    sel_elements.append(se_item)
+                if not sel_elements:
+                    for idx_c, c in enumerate(b_cands):
+                        c_args = c.get("arguments")
+                        if isinstance(c_args, Mapping) and "x" in c_args and "y" in c_args and "element_index" not in c_args:
+                            sel_elements.append({
+                                "element_index": idx_c,
+                                "role": "AXCanvasTarget",
+                                "label": str(c.get("description") or c.get("id") or "Canvas Target"),
+                                "state": f"enabled (visual coordinate {c_args['x']}, {c_args['y']})",
+                                "depth": 1,
+                                "in_toolbar": False,
+                                "supported_actions": [str(c.get("tool") or "click")],
+                            })
+                        elif c.get("tool") == "drill_region":
+                            reg_name_c = (
+                                str(c_args.get("region") or "")
+                                if isinstance(c_args, Mapping)
+                                else ""
+                            ) or str(c.get("description") or c.get("id") or "Region")
+                            sel_elements.append({
+                                "element_index": idx_c,
+                                "role": "AXGroup",
+                                "label": reg_name_c[:160],
+                                "state": "enabled (region container)",
+                                "depth": 1,
+                                "in_toolbar": False,
+                                "supported_actions": ["drill_region"],
+                            })
+                raw_sel_req = _fit_select_request_to_byte_budget(
+                    {
+                        "goal": goal,
+                        "pid": pid,
+                        "window_id": window_id,
+                        "snapshot_id": obs_curr["snapshot_id"],
+                        "elements": sel_elements,
+                        "history": history_in,
+                        "candidates": [{"id": c["id"], "description": c["description"]} for c in b_cands],
+                    },
+                    max_json_bytes=self.max_json_bytes,
+                    referenced_el_ids=ref_el_ids,
+                )
+                sel_req = validate_select_request(
+                    raw_sel_req,
+                    max_elements=self.max_elements_cap,
+                    max_candidates=self.max_candidates,
+                    max_json_bytes=self.max_json_bytes,
+                )
+            except Exception as exc:
+                err_msg = str(exc)
+                err_status = "stale_snapshot" if "stale_snapshot_id" in err_msg else "candidate_refused"
+                err_payload = {
+                    "schema": "agy_cua.jev_step_v1",
+                    "status": err_status,
+                    "verification_outcome": "not_executed",
+                    "reason": err_msg,
                     "pid": pid,
                     "window_id": window_id,
-                    "snapshot_id": pre_obs["snapshot_id"],
-                    "elements": select_elements,
-                    "history": history_in,
-                    "candidates": [{"id": c["id"], "description": c["description"]} for c in bound_candidates],
-                },
-                max_json_bytes=self.max_json_bytes,
-                referenced_el_ids=referenced_el_ids,
-            )
-            select_req = validate_select_request(
-                raw_select_req,
-                max_elements=self.max_elements_cap,
-                max_candidates=self.max_candidates,
-                max_json_bytes=self.max_json_bytes,
-            )
-        except Exception as exc:
-            release_if_unowned()
-            err_msg = str(exc)
-            err_status = "stale_snapshot" if "stale_snapshot_id" in err_msg else "candidate_refused"
-            payload = {
-                "schema": "agy_cua.jev_step_v1",
-                "status": err_status,
-                "verification_outcome": "not_executed",
-                "reason": err_msg,
-                "pid": pid,
-                "window_id": window_id,
-                "session_id": self.session_id,
-                "pre_snapshot_id": pre_obs["snapshot_id"],
-                "pre_static_texts": pre_obs["static_texts"],
-                **obs_disclosure,
-                "verified": False,
-                "uncertain_side_effect": False,
-                "timings_ms": {
-                    "observe_ms": obs_ms,
-                    "provider_ms": 0.0,
-                    "dispatch_ms": 0.0,
-                    "verify_ms": 0.0,
-                    "total_ms": round((time.perf_counter() - step_started) * 1000, 2),
-                },
-                "accounting": self.accounting.to_dict(),
-            }
-            self._record_trace(payload)
-            return _format_tool_result(payload, is_error=True)
+                    "session_id": self.session_id,
+                    "pre_snapshot_id": obs_curr["snapshot_id"],
+                    "pre_static_texts": obs_curr["static_texts"],
+                    **obs_disclosure,
+                    "verified": False,
+                    "action_dispatched": False,
+                    "uncertain_side_effect": False,
+                    "timings_ms": {
+                        "observe_ms": obs_ms,
+                        "provider_ms": 0.0,
+                        "dispatch_ms": 0.0,
+                        "verify_ms": 0.0,
+                        "total_ms": round((time.perf_counter() - step_started) * 1000, 2),
+                    },
+                    "accounting": self.accounting.to_dict(),
+                }
+                return [], {}, 0.0, False, err_payload
 
-        # Stage 3: Jev bounded candidate selection or deterministic single-candidate validation
-        reranked = False
-        if mode == "deterministic":
-            only_cand = bound_candidates[0]
-            decision = {
-                "schema": "agy_cua.jev_decision_v1",
-                "kind": "selected",
-                "reason": None,
-                "pid": pid,
-                "window_id": window_id,
-                "snapshot_id": pre_obs["snapshot_id"],
-                "selected_id": only_cand["id"],
-                "requested_model": "deterministic-controller",
-                "returned_model": "deterministic-controller",
-                "sdk_identity": CLIENT_IDENTITY,
-                "route": "deterministic",
-                "confidence": 1.0,
-                "probabilities": {only_cand["id"]: 1.0, "reobserve": 0.0, "abstain": 0.0},
-                "provider_ms": 0.0,
-                "accounting": self.accounting.to_dict(),
-            }
-            provider_ms = 0.0
-        else:
-            route = resolve_route(self.env, self.keychain_reader)
-            if _deadline_monotonic is not None:
-                rem_ms = int((_deadline_monotonic - time.monotonic()) * 1000)
-                if rem_ms <= 0:
+            reranked_c = False
+            if mode == "deterministic":
+                only_cand = b_cands[0]
+                dec_c = {
+                    "schema": "agy_cua.jev_decision_v1",
+                    "kind": "selected",
+                    "reason": None,
+                    "pid": pid,
+                    "window_id": window_id,
+                    "snapshot_id": obs_curr["snapshot_id"],
+                    "selected_id": only_cand["id"],
+                    "requested_model": "deterministic-controller",
+                    "returned_model": "deterministic-controller",
+                    "sdk_identity": CLIENT_IDENTITY,
+                    "route": "deterministic",
+                    "confidence": 1.0,
+                    "probabilities": {only_cand["id"]: 1.0, "reobserve": 0.0, "abstain": 0.0},
+                    "provider_ms": 0.0,
+                    "accounting": self.accounting.to_dict(),
+                }
+                p_ms = 0.0
+            else:
+                route = resolve_route(self.env, self.keychain_reader)
+                if _deadline_monotonic is not None:
+                    rem_ms = int((_deadline_monotonic - time.monotonic()) * 1000)
+                    if rem_ms <= 0:
+                        to_payload = {
+                            "schema": "agy_cua.jev_step_v1",
+                            "status": "batch_timeout",
+                            "verification_outcome": "not_executed",
+                            "reason": "batch deadline exceeded before Jev selection",
+                            "pid": pid,
+                            "window_id": window_id,
+                            "session_id": self.session_id,
+                            "pre_snapshot_id": obs_curr["snapshot_id"],
+                            "verified": False,
+                            "action_dispatched": False,
+                            "uncertain_side_effect": False,
+                            "timings_ms": {
+                                "observe_ms": obs_ms,
+                                "provider_ms": 0.0,
+                                "dispatch_ms": 0.0,
+                                "verify_ms": 0.0,
+                                "total_ms": round((time.perf_counter() - step_started) * 1000, 2),
+                            },
+                            "accounting": self.accounting.to_dict(),
+                        }
+                        return [], {}, 0.0, False, to_payload
+                    if rem_ms < route.timeout_ms:
+                        route = JevRoute(
+                            kind=route.kind,
+                            reason=route.reason,
+                            endpoint=route.endpoint,
+                            model=route.model,
+                            api_key=route.api_key,
+                            key_source=route.key_source,
+                            timeout_ms=max(1, rem_ms),
+                            note=route.note,
+                        )
+                dec_c = evaluate_jev_choice(sel_req, route, self.accounting, self.http_post)
+                p_ms = float(dec_c.get("provider_ms", 0.0))
+                if (
+                    not self.v1_compat
+                    and _should_rerank_decision(dec_c, len(b_cands))
+                    and self.accounting.calls_used < self.accounting.max_calls
+                ):
+                    probs_p1 = dec_c.get("probabilities") if isinstance(dec_c.get("probabilities"), Mapping) else {}
+                    ranked_cands = sorted(
+                        b_cands,
+                        key=lambda c: (1 if c["id"] == dec_c.get("selected_id") else 0, float(probs_p1.get(c["id"], 0.0))),
+                        reverse=True,
+                    )
+                    shortlist_cands = ranked_cands[:V2_RERANK_SHORTLIST_K]
+                    short_el_ids = {
+                        c["arguments"]["element_index"]
+                        for c in shortlist_cands
+                        if isinstance(c.get("arguments"), Mapping) and isinstance(c["arguments"].get("element_index"), int)
+                    }
+                    short_elements = (
+                        [se for se in sel_elements if se.get("element_index") in short_el_ids]
+                        if short_el_ids
+                        else sel_elements[:V2_RERANK_SHORTLIST_K]
+                    )
+                    can_rerank = True
+                    route_p2 = route
+                    if _deadline_monotonic is not None:
+                        rem_p2_ms = int((_deadline_monotonic - time.monotonic()) * 1000)
+                        if rem_p2_ms <= 0:
+                            can_rerank = False
+                        elif rem_p2_ms < route.timeout_ms:
+                            route_p2 = JevRoute(
+                                kind=route.kind,
+                                reason=route.reason,
+                                endpoint=route.endpoint,
+                                model=route.model,
+                                api_key=route.api_key,
+                                key_source=route.key_source,
+                                timeout_ms=max(1, rem_p2_ms),
+                                note=route.note,
+                            )
+                    if can_rerank:
+                        rerank_goal = _build_rerank_goal(
+                            goal,
+                            f" (disambiguate shortlisted top-{len(shortlist_cands)} candidates)",
+                        )
+                        try:
+                            rerank_req = validate_select_request(
+                                {
+                                    "goal": rerank_goal,
+                                    "pid": pid,
+                                    "window_id": window_id,
+                                    "snapshot_id": obs_curr["snapshot_id"],
+                                    "elements": short_elements,
+                                    "history": history_in,
+                                    "candidates": [{"id": c["id"], "description": c["description"]} for c in shortlist_cands],
+                                },
+                                max_elements=self.max_elements_cap,
+                                max_candidates=self.max_candidates,
+                                max_json_bytes=self.max_json_bytes,
+                            )
+                        except ValueError:
+                            rerank_req = None
+                        if rerank_req is not None:
+                            rerank_dec = evaluate_jev_choice(rerank_req, route_p2, self.accounting, self.http_post)
+                            p_ms = round(float(p_ms) + float(rerank_dec.get("provider_ms", 0.0)), 2)
+                            dec_c = rerank_dec
+                            reranked_c = True
+            return b_cands, dec_c, p_ms, reranked_c, None
+
+        bound_candidates, decision, provider_ms, reranked, stage2_err = _build_and_select_for_obs(pre_obs)
+        if stage2_err is not None:
+            release_if_unowned()
+            self._record_trace(stage2_err)
+            return _format_tool_result(stage2_err, is_error=True)
+
+        auto_drilled = False
+        if (
+            not self.v1_compat
+            and decision.get("kind") == "selected"
+            and isinstance(decision.get("selected_id"), str)
+            and decision["selected_id"].startswith("drill.")
+            and args.get("candidates") is None
+            and (mode == "deterministic" or self.accounting.calls_used < self.accounting.max_calls)
+        ):
+            sel_drill_id = decision["selected_id"]
+            drill_reg = next(
+                (
+                    r
+                    for r in (pre_obs.get("drill_regions") or [])
+                    if isinstance(r, Mapping) and r.get("candidate_id") == sel_drill_id
+                ),
+                None,
+            )
+            drill_region_name = (
+                str(drill_reg["region"]).strip()
+                if isinstance(drill_reg, Mapping)
+                and not drill_reg.get("ambiguous_region")
+                and isinstance(drill_reg.get("region"), str)
+                and str(drill_reg["region"]).strip()
+                else None
+            )
+            raw_drill_el_idx = (
+                drill_reg.get("element_index")
+                if isinstance(drill_reg, Mapping) and "element_index" in drill_reg
+                else (drill_reg.get("root_element_index") if isinstance(drill_reg, Mapping) else None)
+            )
+            drill_root_idx = (
+                int(raw_drill_el_idx)
+                if isinstance(raw_drill_el_idx, int) and not isinstance(raw_drill_el_idx, bool)
+                else None
+            )
+            explicit_drill_tok = (
+                str(drill_reg["region_token"]).strip()
+                if isinstance(drill_reg, Mapping)
+                and isinstance(drill_reg.get("region_token"), str)
+                and ":" in str(drill_reg["region_token"])
+                else None
+            )
+            if drill_region_name is not None or drill_root_idx is not None or explicit_drill_tok is not None:
+                drill_obs_started = time.perf_counter()
+                try:
+                    drill_obs_args: dict[str, Any] = {
+                        "pid": pid,
+                        "window_id": window_id,
+                        "include_screenshot": needs_pixel_anchor,
+                        "tree_format": "both",
+                    }
+                    if query_val is not None:
+                        drill_obs_args["query"] = query_val
+                    if max_depth_val is not None:
+                        drill_obs_args["max_depth"] = max_depth_val
+                    if max_elements_val is not None:
+                        drill_obs_args["max_elements"] = max_elements_val
+                    if walk_timeout_ms_val is not None:
+                        drill_obs_args["timeout_ms"] = walk_timeout_ms_val
+                    elif driver.timeout_ms >= 4000:
+                        drill_obs_args["timeout_ms"] = 5000
+                    raw_drill = self._call_get_window_state(
+                        driver,
+                        drill_obs_args,
+                        pid=pid,
+                        window_id=window_id,
+                        skeleton=False,
+                        region=drill_region_name,
+                        root_element_index=(None if drill_region_name is not None else drill_root_idx),
+                        explicit_root_token=explicit_drill_tok,
+                        allow_cached_root_token=(explicit_drill_tok is None),
+                        caller_specified_max_elements=(max_elements_val is not None),
+                        timeout_s=obs_call_timeout_s(driver, drill_obs_args.get("timeout_ms")),
+                        deadline_monotonic=_deadline_monotonic,
+                    )
+                    if raw_drill.get("isError"):
+                        err_txt = "".join(c.get("text", "") for c in (raw_drill.get("content") or []) if isinstance(c, Mapping))
+                        raise RuntimeError(err_txt or "auto-drill get_window_state returned isError=true")
+                    drilled_obs = extract_window_observation(
+                        raw_drill,
+                        expected_pid=pid,
+                        expected_window_id=window_id,
+                        query=query_val,
+                        previous_observation=None,
+                        skeleton=False,
+                        region=drill_region_name,
+                        root_element_index=(None if drill_region_name is not None else drill_root_idx),
+                        max_elements_cap=self.max_elements_cap,
+                        max_auto_candidates=self.max_auto_candidates,
+                        enrich_descriptions=not self.v1_compat,
+                    )
+                    obs_ms = round(obs_ms + (time.perf_counter() - drill_obs_started) * 1000, 2)
+                    self._update_window_token_cache(pid, window_id, drilled_obs)
+                    self._snapshot_targets[drilled_obs["snapshot_id"]] = (pid, window_id)
+                    pre_obs = drilled_obs
+                    auto_drilled = True
+                    is_hierarchy_scoped = True
+                    skeleton_val = False
+                    region_val = drill_region_name
+                    root_element_index_val = None if drill_region_name is not None else drill_root_idx
+                    obs_disclosure = {
+                        "total_actionable_elements": pre_obs["total_actionable_elements"],
+                        "omitted_elements_count": pre_obs["omitted_elements_count"],
+                        "omitted_candidates_count": pre_obs["omitted_candidates_count"],
+                        "observation_truncated": pre_obs["observation_truncated"],
+                        "query_status": pre_obs.get("query_status"),
+                        "query_incomplete": pre_obs.get("query_incomplete", False),
+                        "search_complete": pre_obs.get("search_complete", True),
+                        "visual_fallback_recommended": pre_obs.get("visual_fallback_recommended", False),
+                        "drill_regions": pre_obs.get("drill_regions") or [],
+                        "skeleton": False,
+                        "region": pre_obs.get("region"),
+                        "root_element_index": pre_obs.get("root_element_index"),
+                    }
+                    if pre_obs.get("active_surfaces"):
+                        obs_disclosure["active_surfaces"] = pre_obs.get("active_surfaces") or []
+                except Exception as exc:
+                    obs_ms = round(obs_ms + (time.perf_counter() - drill_obs_started) * 1000, 2)
                     release_if_unowned()
                     payload = {
                         "schema": "agy_cua.jev_step_v1",
-                        "status": "batch_timeout",
+                        "status": "observation_failed",
                         "verification_outcome": "not_executed",
-                        "reason": "batch deadline exceeded before Jev selection",
+                        "reason": f"auto_drill_failed: {exc}",
                         "pid": pid,
                         "window_id": window_id,
                         "session_id": self.session_id,
                         "pre_snapshot_id": pre_obs["snapshot_id"],
                         "verified": False,
+                        "action_dispatched": False,
                         "uncertain_side_effect": False,
                         "timings_ms": {
                             "observe_ms": obs_ms,
-                            "provider_ms": 0.0,
+                            "provider_ms": provider_ms,
                             "dispatch_ms": 0.0,
                             "verify_ms": 0.0,
                             "total_ms": round((time.perf_counter() - step_started) * 1000, 2),
@@ -6447,85 +7273,21 @@ class JevMcpServer:
                     }
                     self._record_trace(payload)
                     return _format_tool_result(payload, is_error=True)
-                if rem_ms < route.timeout_ms:
-                    route = JevRoute(
-                        kind=route.kind,
-                        reason=route.reason,
-                        endpoint=route.endpoint,
-                        model=route.model,
-                        api_key=route.api_key,
-                        key_source=route.key_source,
-                        timeout_ms=max(1, rem_ms),
-                        note=route.note,
-                    )
-            decision = evaluate_jev_choice(select_req, route, self.accounting, self.http_post)
-            provider_ms = decision.get("provider_ms", 0.0)
-            if (
-                not self.v1_compat
-                and _should_rerank_decision(decision, len(bound_candidates))
-                and self.accounting.calls_used < self.accounting.max_calls
-            ):
-                probs_p1 = decision.get("probabilities") if isinstance(decision.get("probabilities"), Mapping) else {}
-                ranked_cands = sorted(
-                    bound_candidates,
-                    key=lambda c: (1 if c["id"] == decision.get("selected_id") else 0, float(probs_p1.get(c["id"], 0.0))),
-                    reverse=True,
+
+                b_cands_2, dec_2, p_ms_2, reranked_2, drill_sel_err = _build_and_select_for_obs(
+                    pre_obs,
+                    forbid_drill=True,
                 )
-                shortlist_cands = ranked_cands[:V2_RERANK_SHORTLIST_K]
-                short_el_ids = {
-                    c["arguments"]["element_index"]
-                    for c in shortlist_cands
-                    if isinstance(c.get("arguments"), Mapping) and isinstance(c["arguments"].get("element_index"), int)
-                }
-                short_elements = (
-                    [se for se in select_elements if se.get("element_index") in short_el_ids]
-                    if short_el_ids
-                    else select_elements[:V2_RERANK_SHORTLIST_K]
-                )
-                can_rerank = True
-                route_p2 = route
-                if _deadline_monotonic is not None:
-                    rem_p2_ms = int((_deadline_monotonic - time.monotonic()) * 1000)
-                    if rem_p2_ms <= 0:
-                        can_rerank = False
-                    elif rem_p2_ms < route.timeout_ms:
-                        route_p2 = JevRoute(
-                            kind=route.kind,
-                            reason=route.reason,
-                            endpoint=route.endpoint,
-                            model=route.model,
-                            api_key=route.api_key,
-                            key_source=route.key_source,
-                            timeout_ms=max(1, rem_p2_ms),
-                            note=route.note,
-                        )
-                if can_rerank:
-                    rerank_goal = _build_rerank_goal(
-                        goal,
-                        f" (disambiguate shortlisted top-{len(shortlist_cands)} candidates)",
-                    )
-                    try:
-                        rerank_req = validate_select_request(
-                            {
-                                "goal": rerank_goal,
-                                "pid": pid,
-                                "window_id": window_id,
-                                "snapshot_id": pre_obs["snapshot_id"],
-                                "elements": short_elements,
-                                "history": history_in,
-                                "candidates": [{"id": c["id"], "description": c["description"]} for c in shortlist_cands],
-                            },
-                            max_elements=self.max_elements_cap,
-                            max_candidates=self.max_candidates,
-                            max_json_bytes=self.max_json_bytes,
-                        )
-                    except ValueError:
-                        rerank_req = None
-                    if rerank_req is not None:
-                        rerank_dec = evaluate_jev_choice(rerank_req, route_p2, self.accounting, self.http_post)
-                        provider_ms = round(float(provider_ms) + float(rerank_dec.get("provider_ms", 0.0)), 2)
-                        decision = rerank_dec
-                        reranked = True
+                provider_ms = round(float(provider_ms) + float(p_ms_2), 2)
+                reranked = bool(reranked or reranked_2)
+                if drill_sel_err is not None:
+                    drill_sel_err["timings_ms"]["provider_ms"] = provider_ms
+                    drill_sel_err["auto_drilled"] = True
+                    release_if_unowned()
+                    self._record_trace(drill_sel_err)
+                    return _format_tool_result(drill_sel_err, is_error=True)
+                bound_candidates = b_cands_2
+                decision = dec_2
 
         if decision["kind"] != "selected":
             release_if_unowned()
@@ -6548,7 +7310,9 @@ class JevMcpServer:
                 "confidence": decision.get("confidence"),
                 "probabilities": decision.get("probabilities"),
                 "reranked": reranked,
+                "auto_drilled": auto_drilled,
                 "verified": False,
+                "action_dispatched": False,
                 "uncertain_side_effect": False,
                 "timings_ms": {
                     "observe_ms": obs_ms,
@@ -6590,7 +7354,9 @@ class JevMcpServer:
                 "confidence": decision.get("confidence"),
                 "probabilities": decision.get("probabilities"),
                 "reranked": reranked,
+                "auto_drilled": auto_drilled,
                 "verified": False,
+                "action_dispatched": False,
                 "uncertain_side_effect": False,
                 "timings_ms": {
                     "observe_ms": obs_ms,
@@ -6636,7 +7402,9 @@ class JevMcpServer:
                 "confidence": decision.get("confidence"),
                 "probabilities": decision.get("probabilities"),
                 "reranked": reranked,
+                "auto_drilled": auto_drilled,
                 "verified": False,
+                "action_dispatched": False,
                 "uncertain_side_effect": False,
                 "timings_ms": {
                     "observe_ms": obs_ms,
@@ -6661,64 +7429,96 @@ class JevMcpServer:
                 deadline_monotonic=_deadline_monotonic,
             )
 
-        dispatch_started = time.perf_counter()
-        self._visual_snapshots.pop((pid, window_id), None)
-        try:
-            dispatch_res = driver.call_tool(
-                authorized["tool"],
-                driver_args,
-                timeout_s=dispatch_timeout_s,
-                deadline_monotonic=_deadline_monotonic,
+        already_in_target_state: bool | None = None
+        pre_checkbox_label: str | None = None
+        if authorized["tool"] in {"check", "uncheck"}:
+            pre_els_chk = pre_obs.get("all_elements") or pre_obs.get("elements") or pre_obs.get("_raw_elements") or []
+            cb_el = next(
+                (
+                    e
+                    for e in pre_els_chk
+                    if isinstance(e, Mapping) and e.get("element_index") == target_el_idx
+                ),
+                None,
             )
-            dispatch_text = "".join(
-                c.get("text", "") for c in (dispatch_res.get("content") or []) if isinstance(c, Mapping)
-            ).strip()
-            if dispatch_res.get("isError"):
-                raise RuntimeError(dispatch_text or "Driver tool returned isError=true")
-        except Exception as exc:
+            pre_checkbox_label = str(cb_el.get("label") or "") if isinstance(cb_el, Mapping) else None
+            cb_raw_val = (
+                (cb_el.get("value") if cb_el.get("value") is not None else cb_el.get("value_state"))
+                if isinstance(cb_el, Mapping)
+                else None
+            )
+            cur_cb_bool = _parse_checkbox_bool_state(cb_raw_val)
+            desired_cb_bool = authorized["tool"] == "check"
+            already_in_target_state = cur_cb_bool == desired_cb_bool
+
+        self._visual_snapshots.pop((pid, window_id), None)
+        if already_in_target_state is True:
+            action_dispatched = False
+            dispatch_ms = 0.0
+            safe_receipt = f"already_{'checked' if authorized['tool'] == 'check' else 'unchecked'}_noop"
+        else:
+            action_dispatched = True
+            actual_driver_tool = "click" if authorized["tool"] in {"check", "uncheck"} else authorized["tool"]
+            dispatch_started = time.perf_counter()
+            try:
+                dispatch_res = driver.call_tool(
+                    actual_driver_tool,
+                    driver_args,
+                    timeout_s=dispatch_timeout_s,
+                    deadline_monotonic=_deadline_monotonic,
+                )
+                dispatch_text = "".join(
+                    c.get("text", "") for c in (dispatch_res.get("content") or []) if isinstance(c, Mapping)
+                ).strip()
+                if dispatch_res.get("isError"):
+                    raise RuntimeError(dispatch_text or "Driver tool returned isError=true")
+            except Exception as exc:
+                dispatch_ms = round((time.perf_counter() - dispatch_started) * 1000, 2)
+                # Retain ambiguous/failed side-effect and halt automatic repetition
+                self.accounting.uncertain_side_effects += 1
+                self.accounting.halted = True
+                self.accounting.halt_reason = "uncertain_dispatch_side_effect"
+                payload = {
+                    "schema": "agy_cua.jev_step_v1",
+                    "status": "dispatch_failed",
+                    "verification_outcome": "outcome_unknown",
+                    "reason": str(exc),
+                    "pid": pid,
+                    "window_id": window_id,
+                    "session_id": self.session_id,
+                    "pre_snapshot_id": pre_obs["snapshot_id"],
+                    **obs_disclosure,
+                    "selected_id": authorized["id"],
+                    "dispatched_tool": authorized["tool"],
+                    "dispatched_arguments": sanitized_args,
+                    "returned_model": decision.get("returned_model"),
+                    "confidence": decision.get("confidence"),
+                    "probabilities": decision.get("probabilities"),
+                    "reranked": reranked,
+                    "auto_drilled": auto_drilled,
+                    "verified": False,
+                    "action_dispatched": True,
+                    "uncertain_side_effect": True,
+                    "timings_ms": {
+                        "observe_ms": obs_ms,
+                        "provider_ms": provider_ms,
+                        "dispatch_ms": dispatch_ms,
+                        "verify_ms": 0.0,
+                        "total_ms": round((time.perf_counter() - step_started) * 1000, 2),
+                    },
+                    "accounting": self.accounting.to_dict(),
+                }
+                self._record_trace(payload)
+                return _format_tool_result(payload, is_error=True)
             dispatch_ms = round((time.perf_counter() - dispatch_started) * 1000, 2)
-            # Retain ambiguous/failed side-effect and halt automatic repetition
-            self.accounting.uncertain_side_effects += 1
-            self.accounting.halted = True
-            self.accounting.halt_reason = "uncertain_dispatch_side_effect"
-            payload = {
-                "schema": "agy_cua.jev_step_v1",
-                "status": "dispatch_failed",
-                "verification_outcome": "outcome_unknown",
-                "reason": str(exc),
-                "pid": pid,
-                "window_id": window_id,
-                "session_id": self.session_id,
-                "pre_snapshot_id": pre_obs["snapshot_id"],
-                **obs_disclosure,
-                "selected_id": authorized["id"],
-                "dispatched_tool": authorized["tool"],
-                "dispatched_arguments": sanitized_args,
-                "returned_model": decision.get("returned_model"),
-                "confidence": decision.get("confidence"),
-                "probabilities": decision.get("probabilities"),
-                "reranked": reranked,
-                "verified": False,
-                "uncertain_side_effect": True,
-                "timings_ms": {
-                    "observe_ms": obs_ms,
-                    "provider_ms": provider_ms,
-                    "dispatch_ms": dispatch_ms,
-                    "verify_ms": 0.0,
-                    "total_ms": round((time.perf_counter() - step_started) * 1000, 2),
-                },
-                "accounting": self.accounting.to_dict(),
-            }
-            self._record_trace(payload)
-            return _format_tool_result(payload, is_error=True)
-        dispatch_ms = round((time.perf_counter() - dispatch_started) * 1000, 2)
-        safe_receipt = "<redacted>" if authorized["tool"] in {"type_text", "set_value"} else dispatch_text
+            safe_receipt = "<redacted>" if authorized["tool"] in {"type_text", "set_value"} else dispatch_text
 
         # Stage 5: Fresh observation & independent postcondition verification
         expected_post = args.get("expected_postcondition")
+        is_checkbox_op = authorized["tool"] in {"check", "uncheck"}
         eff_wait_ms = (
             0
-            if expected_post is None
+            if (expected_post is None and not (is_checkbox_op and action_dispatched))
             else (
                 wait_timeout_ms_val
                 if wait_timeout_ms_val is not None
@@ -6741,8 +7541,6 @@ class JevMcpServer:
                 post_obs_args["max_depth"] = max_depth_val
             if max_elements_val is not None:
                 post_obs_args["max_elements"] = max_elements_val
-            elif not self.v1_compat and is_hierarchy_scoped:
-                post_obs_args["max_elements"] = 2000
             if walk_timeout_ms_val is not None:
                 post_obs_args["timeout_ms"] = walk_timeout_ms_val
             elif not self.v1_compat and is_hierarchy_scoped and driver.timeout_ms >= 4000:
@@ -6783,10 +7581,23 @@ class JevMcpServer:
                 poll_deadline: float | None = None,
             ) -> dict[str, Any]:
                 eff_base = None if is_hierarchy_scoped else baseline_obs
+                post_root_tok = (
+                    self._resolve_post_obs_root_token(baseline_obs, region=region_val)
+                    if baseline_obs is not None
+                    else None
+                )
                 call_args, call_timeout_s, eff_deadline = _bound_post_call_params(post_obs_args, poll_deadline)
-                raw_p = driver.call_tool(
-                    "get_window_state",
+                raw_p = self._call_get_window_state(
+                    driver,
                     call_args,
+                    pid=pid,
+                    window_id=window_id,
+                    skeleton=skeleton_val,
+                    region=region_val,
+                    root_element_index=root_element_index_val,
+                    explicit_root_token=post_root_tok,
+                    allow_cached_root_token=False,
+                    caller_specified_max_elements=(max_elements_val is not None),
                     timeout_s=call_timeout_s,
                     deadline_monotonic=eff_deadline,
                 )
@@ -6794,7 +7605,7 @@ class JevMcpServer:
                     err_t = "".join(c.get("text", "") for c in (raw_p.get("content") or []) if isinstance(c, Mapping))
                     raise RuntimeError(err_t or "post-dispatch get_window_state returned isError=true")
                 try:
-                    return extract_window_observation(
+                    obs_p = extract_window_observation(
                         raw_p,
                         expected_pid=pid,
                         expected_window_id=window_id,
@@ -6812,16 +7623,24 @@ class JevMcpServer:
                         raise
                     fb_base = dict(post_obs_args, include_diff=False, tree_format="both")
                     fb_args, fb_timeout_s, fb_deadline = _bound_post_call_params(fb_base, poll_deadline)
-                    raw_p = driver.call_tool(
-                        "get_window_state",
+                    raw_p = self._call_get_window_state(
+                        driver,
                         fb_args,
+                        pid=pid,
+                        window_id=window_id,
+                        skeleton=skeleton_val,
+                        region=region_val,
+                        root_element_index=root_element_index_val,
+                        explicit_root_token=post_root_tok,
+                        allow_cached_root_token=False,
+                        caller_specified_max_elements=(max_elements_val is not None),
                         timeout_s=fb_timeout_s,
                         deadline_monotonic=fb_deadline,
                     )
                     if raw_p.get("isError"):
                         err_t = "".join(c.get("text", "") for c in (raw_p.get("content") or []) if isinstance(c, Mapping))
                         raise RuntimeError(err_t or "post-dispatch get_window_state fallback returned isError=true")
-                    return extract_window_observation(
+                    obs_p = extract_window_observation(
                         raw_p,
                         expected_pid=pid,
                         expected_window_id=window_id,
@@ -6834,6 +7653,39 @@ class JevMcpServer:
                         max_auto_candidates=self.max_auto_candidates,
                         enrich_descriptions=not self.v1_compat,
                     )
+                self._update_window_token_cache(pid, window_id, obs_p)
+                return obs_p
+
+            def _checkbox_matches_desired(obs_check: Mapping[str, Any]) -> bool:
+                if not is_checkbox_op:
+                    return False
+                desired_b = authorized["tool"] == "check"
+                els_c = obs_check.get("all_elements") or obs_check.get("elements") or obs_check.get("_raw_elements") or []
+                cand_el = next(
+                    (
+                        e
+                        for e in els_c
+                        if isinstance(e, Mapping)
+                        and e.get("element_index") == target_el_idx
+                        and e.get("role") == "AXCheckBox"
+                    ),
+                    None,
+                )
+                if cand_el is None and pre_checkbox_label:
+                    cand_el = next(
+                        (
+                            e
+                            for e in els_c
+                            if isinstance(e, Mapping)
+                            and e.get("role") == "AXCheckBox"
+                            and str(e.get("label") or "") == pre_checkbox_label
+                        ),
+                        None,
+                    )
+                if cand_el is None:
+                    return False
+                cand_raw_val = cand_el.get("value") if cand_el.get("value") is not None else cand_el.get("value_state")
+                return _parse_checkbox_bool_state(cand_raw_val) == desired_b
 
             post_obs = _read_post_observation(pre_obs)
             verify_polls = 1
@@ -6846,12 +7698,18 @@ class JevMcpServer:
                 post_obs,
                 target_element_index=target_el_idx,
             )
-            if eff_wait_ms > 0 and not post_ok and _is_retryable_postcondition_reason(verify_reason):
+            cb_satisfied = _checkbox_matches_desired(post_obs)
+            if is_checkbox_op and already_in_target_state is True and cb_satisfied:
+                if expected_post is None or (isinstance(expected_post, Mapping) and expected_post.get("kind") == "any_change"):
+                    post_ok = True
+                    verify_reason = "idempotent_checkbox_already_in_target_state"
+            need_cb_poll = bool(is_checkbox_op and action_dispatched and expected_post is None and not cb_satisfied)
+            if eff_wait_ms > 0 and ((not post_ok and _is_retryable_postcondition_reason(verify_reason)) or need_cb_poll):
                 settle_deadline = verify_started_mono + (eff_wait_ms / 1000.0)
                 if _deadline_monotonic is not None:
                     settle_deadline = min(settle_deadline, _deadline_monotonic - 0.05)
                 min_poll_read_s = MIN_OBSERVE_WALK_TIMEOUT_MS / 1000.0
-                while not post_ok and _is_retryable_postcondition_reason(verify_reason):
+                while (not post_ok and _is_retryable_postcondition_reason(verify_reason)) or need_cb_poll:
                     rem_settle = settle_deadline - time.monotonic()
                     if rem_settle <= min_poll_read_s + 0.01:
                         break
@@ -6876,16 +7734,25 @@ class JevMcpServer:
                         post_obs,
                         target_element_index=target_el_idx,
                     )
+                    cb_satisfied = _checkbox_matches_desired(post_obs)
+                    if is_checkbox_op and already_in_target_state is True and cb_satisfied:
+                        if expected_post is None or (isinstance(expected_post, Mapping) and expected_post.get("kind") == "any_change"):
+                            post_ok = True
+                            verify_reason = "idempotent_checkbox_already_in_target_state"
+                    need_cb_poll = bool(is_checkbox_op and action_dispatched and expected_post is None and not cb_satisfied)
         except Exception as exc:
             verify_ms = round((time.perf_counter() - verify_started) * 1000, 2)
             self._last_observations.pop((pid, window_id), None)
-            self.accounting.uncertain_side_effects += 1
-            self.accounting.halted = True
-            self.accounting.halt_reason = "uncertain_verification_after_dispatch"
+            if action_dispatched:
+                self.accounting.uncertain_side_effects += 1
+                self.accounting.halted = True
+                self.accounting.halt_reason = "uncertain_verification_after_dispatch"
+            else:
+                release_if_unowned()
             payload = {
                 "schema": "agy_cua.jev_step_v1",
                 "status": "verification_failed",
-                "verification_outcome": "outcome_unknown",
+                "verification_outcome": "outcome_unknown" if action_dispatched else "not_executed",
                 "reason": str(exc),
                 "pid": pid,
                 "window_id": window_id,
@@ -6899,9 +7766,11 @@ class JevMcpServer:
                 "confidence": decision.get("confidence"),
                 "probabilities": decision.get("probabilities"),
                 "reranked": reranked,
+                "auto_drilled": auto_drilled,
                 "verified": False,
-                "action_dispatched": True,
-                "uncertain_side_effect": True,
+                "action_dispatched": action_dispatched,
+                "already_in_target_state": already_in_target_state,
+                "uncertain_side_effect": action_dispatched,
                 "timings_ms": {
                     "observe_ms": obs_ms,
                     "provider_ms": provider_ms,
@@ -6917,7 +7786,8 @@ class JevMcpServer:
         discovered_windows: list[dict[str, Any]] = []
         newly_opened_windows: list[dict[str, Any]] = []
         should_discover_post = explicit_discover_windows or (
-            args.get("discover_windows") is not False
+            action_dispatched
+            and args.get("discover_windows") is not False
             and _out_post_sig is None
             and not state_changed
             and not post_ok
@@ -6946,15 +7816,28 @@ class JevMcpServer:
             _out_post_obs.append(post_obs)
 
         if expected_post is None:
-            verification_outcome = "state_changed" if state_changed else "dispatched"
-            step_status = verification_outcome
-            is_err = False
+            if is_checkbox_op and already_in_target_state is True and cb_satisfied:
+                post_ok = True
+                verification_outcome = "goal_verified"
+                step_status = "verified"
+                is_err = False
+            elif is_checkbox_op and action_dispatched and cb_satisfied:
+                post_ok = True
+                state_changed = True
+                verify_reason = f"checkbox_{'checked' if authorized['tool'] == 'check' else 'unchecked'}_verified"
+                verification_outcome = "state_changed"
+                step_status = "state_changed"
+                is_err = False
+            else:
+                verification_outcome = "state_changed" if state_changed else "dispatched"
+                step_status = verification_outcome
+                is_err = False
         elif post_ok:
             verification_outcome = "goal_verified"
             step_status = "verified"
             is_err = False
         else:
-            verification_outcome = "state_changed" if state_changed else "dispatched"
+            verification_outcome = "state_changed" if state_changed else ("noop" if not action_dispatched else "dispatched")
             step_status = "postcondition_unmet"
             is_err = True
 
@@ -6973,6 +7856,8 @@ class JevMcpServer:
                 pre_obs["observation_truncated"] or post_obs["observation_truncated"]
             ),
         }
+        if post_obs.get("active_surfaces"):
+            post_obs_disclosure["post_active_surfaces"] = post_obs.get("active_surfaces") or []
 
         point_fallback_used = bool(target_el_idx is None and ("x" in driver_args or "y" in driver_args))
         payload = {
@@ -6980,7 +7865,9 @@ class JevMcpServer:
             "status": step_status,
             "verification_outcome": verification_outcome,
             "verified": post_ok,
-            "action_dispatched": True,
+            "action_dispatched": action_dispatched,
+            "already_in_target_state": already_in_target_state,
+            "auto_drilled": auto_drilled,
             "point_fallback_used": point_fallback_used,
             "uncertain_side_effect": False,
             "verification_reason": verify_reason,
@@ -7120,7 +8007,17 @@ class JevMcpServer:
                 if (isinstance(raw_walk_to, int) and not isinstance(raw_walk_to, bool) and raw_walk_to > 0)
                 else None
             )
-            raw_obs = driver.call_tool("get_window_state", obs_call_args, timeout_s=obs_rpc_timeout_s)
+            raw_obs = self._call_get_window_state(
+                driver,
+                obs_call_args,
+                pid=pid,
+                window_id=window_id,
+                skeleton=skeleton_val,
+                region=region_val,
+                root_element_index=root_element_index_val,
+                caller_specified_max_elements=("max_elements" in args and args["max_elements"] is not None),
+                timeout_s=obs_rpc_timeout_s,
+            )
             if raw_obs.get("isError"):
                 err_txt = "".join(c.get("text", "") for c in (raw_obs.get("content") or []) if isinstance(c, Mapping))
                 raise RuntimeError(err_txt or "get_window_state returned isError=true")
@@ -7144,7 +8041,17 @@ class JevMcpServer:
                     raise
                 diff_fallback_used = True
                 fallback_args = dict(obs_call_args, include_diff=False, tree_format="both")
-                raw_obs = driver.call_tool("get_window_state", fallback_args, timeout_s=obs_rpc_timeout_s)
+                raw_obs = self._call_get_window_state(
+                    driver,
+                    fallback_args,
+                    pid=pid,
+                    window_id=window_id,
+                    skeleton=skeleton_val,
+                    region=region_val,
+                    root_element_index=root_element_index_val,
+                    caller_specified_max_elements=("max_elements" in args and args["max_elements"] is not None),
+                    timeout_s=obs_rpc_timeout_s,
+                )
                 if raw_obs.get("isError"):
                     err_txt = "".join(c.get("text", "") for c in (raw_obs.get("content") or []) if isinstance(c, Mapping))
                     raise RuntimeError(err_txt or "get_window_state fallback returned isError=true")
@@ -7164,6 +8071,7 @@ class JevMcpServer:
             if not obs.get("query_incomplete") and not is_hierarchy_scoped:
                 self._last_observations[(pid, window_id)] = obs
             self._snapshot_targets[obs["snapshot_id"]] = (pid, window_id)
+            self._update_window_token_cache(pid, window_id, obs)
             discovered_windows: list[dict[str, Any]] = []
             if bool(args.get("discover_windows", True)):
                 discovered_windows = _discover_same_pid_windows(driver, pid, window_id)
@@ -7228,6 +8136,7 @@ class JevMcpServer:
             "region": obs.get("region"),
             "root_element_index": obs.get("root_element_index"),
             "drill_regions": obs.get("drill_regions") or [],
+            "active_surfaces": obs.get("active_surfaces") or [],
             "total_actionable_elements": obs["total_actionable_elements"],
             "omitted_elements_count": obs["omitted_elements_count"],
             "omitted_candidates_count": obs["omitted_candidates_count"],
@@ -8376,6 +9285,9 @@ class JevMcpServer:
                 "status": step_sc.get("status"),
                 "verification_outcome": step_sc.get("verification_outcome"),
                 "verified": bool(step_sc.get("verified")),
+                "action_dispatched": bool(step_sc.get("action_dispatched", False)),
+                "already_in_target_state": step_sc.get("already_in_target_state"),
+                "auto_drilled": bool(step_sc.get("auto_drilled", False)),
                 "uncertain_side_effect": bool(step_sc.get("uncertain_side_effect")),
                 "reason": step_sc.get("verification_reason") or step_sc.get("reason"),
                 "pre_snapshot_id": step_sc.get("pre_snapshot_id"),
@@ -8399,7 +9311,18 @@ class JevMcpServer:
                 completed_steps.append(summary_item)
                 prev_post_sig = out_sig[0] if out_sig else None
                 prev_post_obs = out_obs[0] if out_obs else None
-                prev_obs_scope = curr_obs_scope
+                if step_sc.get("auto_drilled"):
+                    prev_obs_scope = (
+                        curr_obs_scope[0],
+                        curr_obs_scope[1],
+                        curr_obs_scope[2],
+                        curr_obs_scope[3],
+                        False,
+                        step_sc.get("region"),
+                        step_sc.get("root_element_index"),
+                    )
+                else:
+                    prev_obs_scope = curr_obs_scope
             else:
                 failed_step = summary_item
                 remaining_steps = format_remaining(idx + 1)

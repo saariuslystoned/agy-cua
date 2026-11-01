@@ -7083,6 +7083,398 @@ class StdioEndToEndTest(unittest.TestCase):
                     self.assertTrue(getattr(jev_ctx.exception, "canary_leaked", False))
 
 
+    def test_v040_skill_cap_idempotent_checkbox_auto_drill_and_rust_ax_fastpath(self) -> None:
+        from collections.abc import Mapping
+        from pathlib import Path
+        from typing import Any
+
+        repo_root = Path(__file__).resolve().parents[1]
+        plugin_meta = json.loads((repo_root / "plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual(plugin_meta["version"], "0.4.0")
+        self.assertEqual(jev.SERVER_INFO["version"], "0.4.0")
+        skill_bytes = (repo_root / "skills" / "cua-computer-use" / "SKILL.md").read_bytes()
+        self.assertLess(len(skill_bytes), 24_000)
+
+        # 1. value_state fallback + idempotent check / uncheck auto-candidates & refusals
+        obs_cb = jev.extract_window_observation(
+            {
+                "content": [{"type": "text", "text": 'AXStaticText = "Provisioning Ready"'}],
+                "structuredContent": {
+                    "pid": 88,
+                    "window_id": 404,
+                    "snapshot_id": "s00000801",
+                    "elements_complete": True,
+                    "truncated": False,
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "Provisioning"},
+                        {
+                            "element_index": 2,
+                            "role": "AXCheckBox",
+                            "label": "Enable Hardware Key",
+                            "value": None,
+                            "value_state": "1",
+                            "enabled": True,
+                            "parent_index": 0,
+                            "actions": ["AXPress"],
+                        },
+                        {
+                            "element_index": 3,
+                            "role": "AXCheckBox",
+                            "label": "Require Touch ID",
+                            "value": "0",
+                            "enabled": True,
+                            "parent_index": 0,
+                            "actions": ["AXPress"],
+                        },
+                        {
+                            "element_index": 4,
+                            "role": "AXCheckBox",
+                            "label": "Mixed Policy",
+                            "value": "2",
+                            "enabled": True,
+                            "parent_index": 0,
+                            "actions": ["AXPress"],
+                        },
+                        {
+                            "element_index": 5,
+                            "role": "AXButton",
+                            "label": "Save Form",
+                            "enabled": True,
+                            "parent_index": 0,
+                            "actions": ["AXPress"],
+                        },
+                    ],
+                },
+            },
+            expected_pid=88,
+            expected_window_id=404,
+            enrich_descriptions=True,
+        )
+        auto_ids = {c["id"] for c in obs_cb["auto_candidates"]}
+        self.assertIn("chk.2.enable-hardware-key", auto_ids)
+        self.assertIn("unchk.2.enable-hardware-key", auto_ids)
+        self.assertIn("chk.3.require-touch-id", auto_ids)
+        self.assertIn("unchk.3.require-touch-id", auto_ids)
+        # Indeterminate checkbox ("2") must NOT emit chk/unchk and must refuse explicit check
+        self.assertNotIn("chk.4.mixed-policy", auto_ids)
+        with self.assertRaisesRegex(ValueError, "indeterminate_checkbox_state"):
+            jev.build_bound_candidates(
+                [{"id": "bad_mixed", "description": "Check mixed", "tool": "check", "arguments": {"element_index": 4}}],
+                obs_cb,
+            )
+        with self.assertRaisesRegex(ValueError, "incompatible_tool_for_role"):
+            jev.build_bound_candidates(
+                [{"id": "bad_btn", "description": "Check button", "tool": "check", "arguments": {"element_index": 5}}],
+                obs_cb,
+            )
+        # Commit safety gate still blocks consequential checkbox labels
+        obs_destruct = jev.extract_window_observation(
+            {
+                "content": [],
+                "structuredContent": {
+                    "pid": 88,
+                    "window_id": 404,
+                    "snapshot_id": "s00000802",
+                    "elements_complete": True,
+                    "truncated": False,
+                    "elements": [
+                        {"element_index": 0, "role": "AXWindow", "label": "Danger"},
+                        {
+                            "element_index": 1,
+                            "role": "AXCheckBox",
+                            "label": "Authorize Payment",
+                            "value": "0",
+                            "enabled": True,
+                            "parent_index": 0,
+                            "actions": ["AXPress"],
+                        },
+                    ],
+                },
+            },
+            expected_pid=88,
+            expected_window_id=404,
+        )
+        with self.assertRaisesRegex(ValueError, "commit_action_forbidden_by_safety_policy"):
+            jev.build_bound_candidates(
+                [{"id": "del_cb", "description": "Authorize payment", "tool": "check", "arguments": {"element_index": 1}}],
+                obs_destruct,
+            )
+
+        # 2. End-to-end idempotent check (already "1" -> 0 clicks; "0" -> 1 click) + batch any_change compatibility
+        class RustCapableFakeDriver:
+            def __init__(self) -> None:
+                self.timeout_ms = 5000
+                self.session_id = "test-sess"
+                self.supports_include_menubar = True
+                self.supports_root_element_token = True
+                self.fail_next_root_token = False
+                self.calls: list[tuple[str, dict[str, Any]]] = []
+                self.hw_val = "1"
+                self.bio_val = "0"
+                self.footer_applied = False
+                self.snap_seq = 900
+
+            def ensure_capabilities(self, deadline_monotonic: float | None = None) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+            def _next_snap(self) -> str:
+                self.snap_seq += 1
+                return f"s{self.snap_seq:08d}"
+
+            def call_tool(
+                self,
+                name: str,
+                args: Mapping[str, Any],
+                timeout_s: float | None = None,
+                deadline_monotonic: float | None = None,
+            ) -> dict[str, Any]:
+                call_dict = dict(args)
+                self.calls.append((name, call_dict))
+                if name == "click":
+                    tok = str(call_dict.get("element_token") or "")
+                    if tok.endswith(":2"):
+                        self.hw_val = "0" if self.hw_val == "1" else "1"
+                    elif tok.endswith(":3"):
+                        self.bio_val = "0" if self.bio_val == "1" else "1"
+                    elif tok.endswith(":1"):
+                        self.footer_applied = True
+                    return {"content": [{"type": "text", "text": "Clicked"}], "isError": False}
+                if name == "get_window_state":
+                    snap = self._next_snap()
+                    wid = int(call_dict["window_id"])
+                    if wid == 404:
+                        sc = {
+                            "pid": 88,
+                            "window_id": 404,
+                            "snapshot_id": snap,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "elements": [
+                                {"element_index": 0, "role": "AXWindow", "label": "Provisioning"},
+                                {
+                                    "element_index": 2,
+                                    "role": "AXCheckBox",
+                                    "label": "Enable Hardware Key",
+                                    "value": None,
+                                    "value_state": self.hw_val,
+                                    "enabled": True,
+                                    "parent_index": 0,
+                                    "actions": ["AXPress"],
+                                },
+                                {
+                                    "element_index": 3,
+                                    "role": "AXCheckBox",
+                                    "label": "Require Touch ID",
+                                    "value": self.bio_val,
+                                    "enabled": True,
+                                    "parent_index": 0,
+                                    "actions": ["AXPress"],
+                                },
+                            ],
+                        }
+                        return {"content": [{"type": "text", "text": 'AXStaticText = "Ready"'}], "structuredContent": sc}
+                    # Window 505: dense 1,500-node workspace with native regions + root_element_token support
+                    regs = [
+                        {"region_token": f"{snap}:r0", "label": "Workspace Sidebar", "role": "AXGroup", "depth": 1, "element_index": 1},
+                        {"region_token": f"{snap}:r1", "label": "Operations Telemetry Grid", "role": "AXGroup", "depth": 1, "element_index": 4},
+                        {"region_token": f"{snap}:r2", "label": "Deployment Commit Footer", "role": "AXGroup", "depth": 1},
+                    ]
+                    root_tok = call_dict.get("root_element_token")
+                    if isinstance(root_tok, str) and self.fail_next_root_token:
+                        self.fail_next_root_token = False
+                        return {"content": [{"type": "text", "text": "stale_snapshot: snapshot expired"}], "isError": True}
+                    if isinstance(root_tok, str) and root_tok.endswith(":r2"):
+                        status_txt = "FooterStatus: Applied=true" if self.footer_applied else "FooterStatus: Idle"
+                        sc = {
+                            "pid": 88,
+                            "window_id": 505,
+                            "snapshot_id": snap,
+                            "root_element_token": root_tok,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "regions": regs,
+                            "surfaces": [{"kind": "sheet", "role": "AXSheet", "title": "Confirm Policy"}],
+                            "elements": [
+                                {"element_index": 0, "role": "AXGroup", "label": "Deployment Commit Footer", "depth": 1},
+                                {
+                                    "element_index": 1,
+                                    "role": "AXButton",
+                                    "label": "Apply Routing Policy",
+                                    "enabled": True,
+                                    "depth": 2,
+                                    "parent_index": 0,
+                                    "actions": ["AXPress"],
+                                },
+                            ],
+                        }
+                        return {
+                            "content": [{"type": "text", "text": f'AXStaticText = "{status_txt}"'}],
+                            "structuredContent": sc,
+                        }
+                    # Full/truncated read: Footer is unwalked past truncation but pre-seeded in sc["regions"]!
+                    sc = {
+                        "pid": 88,
+                        "window_id": 505,
+                        "snapshot_id": snap,
+                        "elements_complete": False,
+                        "truncated": True,
+                        "regions": regs,
+                        "surfaces": [{"kind": "sheet", "role": "AXSheet", "title": "Confirm Policy"}],
+                        "elements": [
+                            {"element_index": 0, "role": "AXWindow", "label": "Enterprise Ops"},
+                            {"element_index": 1, "role": "AXGroup", "label": "Workspace Sidebar", "depth": 1, "parent_index": 0},
+                            {"element_index": 2, "role": "AXButton", "label": "Staging Cluster", "enabled": True, "depth": 2, "parent_index": 1, "actions": ["AXPress"]},
+                            {"element_index": 4, "role": "AXGroup", "label": "Operations Telemetry Grid", "depth": 1, "parent_index": 0},
+                            {"element_index": 5, "role": "AXButton", "label": "Tag Filter 1", "enabled": True, "depth": 2, "parent_index": 4, "actions": ["AXPress"]},
+                        ],
+                    }
+                    return {"content": [{"type": "text", "text": 'AXStaticText = "FooterStatus: Idle"'}], "structuredContent": sc}
+                raise AssertionError(f"unexpected driver call {name}")
+
+        fake_drv = RustCapableFakeDriver()
+
+        def fake_jev_http(req: Any, timeout_s: float) -> tuple[int, str]:
+            payload = json.loads(req.data.decode("utf-8"))
+            state = payload["state"]
+            goal_txt = state["goal"]
+            cand_ids = list(payload["questions"]["candidate"]["criteria"].keys())
+            if "Enable Hardware Key" in goal_txt:
+                chosen = "chk.2.enable-hardware-key"
+            elif "Require Touch ID" in goal_txt:
+                chosen = "chk.3.require-touch-id"
+            elif "Apply Routing Policy" in goal_txt:
+                drill_matches = [cid for cid in cand_ids if cid.startswith("drill.") and "deployment-commit-footer" in cid]
+                chosen = drill_matches[0] if drill_matches else "ax.1.apply-routing-policy"
+            else:
+                chosen = cand_ids[0]
+            rem = max(1, len(cand_ids) - 1)
+            probs = {cid: (0.96 if cid == chosen else round(0.04 / rem, 6)) for cid in cand_ids}
+            return 200, json.dumps(
+                {
+                    "model": jev.PINNED_JEV_MODEL,
+                    "answers": {"candidate": {"type": "choice", "choice": chosen, "probabilities": probs}},
+                    "usage": {"input_tokens": 30, "output_tokens": 4},
+                }
+            )
+
+        srv = jev.JevMcpServer(
+            env={"TYPESAFE_API_KEY": "test-key"},
+            driver_client=fake_drv,
+            http_post=fake_jev_http,
+            keychain_reader=lambda _: None,
+        )
+        try:
+            # Batch with idempotent check on already-checked box ("1") + unchecked box ("0")
+            batch_res = srv.handle_batch(
+                {
+                    "pid": 88,
+                    "window_id": 404,
+                    "steps": [
+                        {
+                            "goal": "Ensure Enable Hardware Key is checked",
+                            "expected_postcondition": {"element_value_equals": "1"},
+                        },
+                        {
+                            "goal": "Ensure Require Touch ID is checked",
+                            "expected_postcondition": {"element_value_equals": "1"},
+                        },
+                    ],
+                }
+            )
+            bsc = batch_res["structuredContent"]
+            self.assertFalse(batch_res["isError"], bsc)
+            self.assertEqual(bsc["status"], "verified")
+            self.assertFalse(bsc["completed_steps"][0]["action_dispatched"])
+            self.assertTrue(bsc["completed_steps"][0]["already_in_target_state"])
+            self.assertTrue(bsc["completed_steps"][1]["action_dispatched"])
+            self.assertFalse(bsc["completed_steps"][1]["already_in_target_state"])
+            click_calls_404 = [c for c in fake_drv.calls if c[0] == "click"]
+            self.assertEqual(len(click_calls_404), 1)
+            self.assertEqual(fake_drv.hw_val, "1")
+            self.assertEqual(fake_drv.bio_val, "1")
+            # Confirm include_menubar=False was sent on get_window_state
+            gws_404 = [c[1] for c in fake_drv.calls if c[0] == "get_window_state"]
+            self.assertTrue(all(c.get("include_menubar") is False for c in gws_404))
+
+            # 3. Single-hop auto-drill on truncated 1,500-node window using native pre-seeded region_token!
+            fake_drv.calls.clear()
+            step_res = srv.handle_step(
+                {
+                    "pid": 88,
+                    "window_id": 505,
+                    "goal": "In Deployment Commit Footer, click Apply Routing Policy",
+                    "expected_postcondition": {"static_text_contains": "Applied=true"},
+                }
+            )
+            ssc = step_res["structuredContent"]
+            self.assertFalse(step_res["isError"], ssc)
+            self.assertEqual(ssc["status"], "verified")
+            self.assertTrue(ssc["auto_drilled"])
+            self.assertEqual(ssc["region"], "Deployment Commit Footer")
+            self.assertEqual(ssc["selected_id"], "ax.1.apply-routing-policy")
+            self.assertEqual(ssc["active_surfaces"], [{"kind": "sheet", "role": "AXSheet", "title": "Confirm Policy"}])
+            gws_505 = [c[1] for c in fake_drv.calls if c[0] == "get_window_state"]
+            # Call 1: unscoped initial read (no root_element_token); Call 2: auto-drill with :r2; Call 3: post_obs with :r2!
+            self.assertEqual(len(gws_505), 3)
+            self.assertNotIn("root_element_token", gws_505[0])
+            self.assertNotIn("max_elements", gws_505[0])
+            self.assertTrue(str(gws_505[1].get("root_element_token", "")).endswith(":r2"))
+            self.assertEqual(gws_505[1].get("max_elements"), 500)
+            self.assertTrue(str(gws_505[2].get("root_element_token", "")).endswith(":r2"))
+            self.assertEqual(gws_505[2].get("max_elements"), 500)
+
+            # 3b. jev_batch with auto_drilled step propagates drilled scope cleanly
+            fake_drv.footer_applied = False
+            fake_drv.calls.clear()
+            batch_drill_res = srv.handle_batch(
+                {
+                    "pid": 88,
+                    "window_id": 505,
+                    "steps": [
+                        {
+                            "goal": "In Deployment Commit Footer, click Apply Routing Policy",
+                            "expected_postcondition": {"static_text_contains": "Applied=true"},
+                        }
+                    ],
+                }
+            )
+            bdsc = batch_drill_res["structuredContent"]
+            self.assertFalse(batch_drill_res["isError"], bdsc)
+            self.assertEqual(bdsc["status"], "verified")
+            self.assertTrue(bdsc["completed_steps"][0]["auto_drilled"])
+
+            # 4. Cold region jev_observe seeds depth-2 regions then uses root_element_token; stale token falls back cleanly
+            srv._window_token_cache.clear()
+            fake_drv.calls.clear()
+            cold_obs_res = srv.handle_observe(
+                {"pid": 88, "window_id": 505, "region": "Deployment Commit Footer", "discover_windows": False}
+            )
+            self.assertFalse(cold_obs_res["isError"])
+            cold_gws = [c[1] for c in fake_drv.calls if c[0] == "get_window_state"]
+            self.assertEqual(len(cold_gws), 2)
+            self.assertEqual(cold_gws[0].get("max_depth"), 2)
+            self.assertEqual(cold_gws[0].get("max_elements"), 60)
+            self.assertTrue(str(cold_gws[1].get("root_element_token", "")).endswith(":r2"))
+
+            # Stale root_element_token fallback retry
+            fake_drv.fail_next_root_token = True
+            fake_drv.calls.clear()
+            fb_obs_res = srv.handle_observe(
+                {"pid": 88, "window_id": 505, "region": "Workspace Sidebar", "discover_windows": False}
+            )
+            self.assertFalse(fb_obs_res["isError"])
+            fb_gws = [c[1] for c in fake_drv.calls if c[0] == "get_window_state"]
+            self.assertEqual(len(fb_gws), 2)
+            self.assertIn("root_element_token", fb_gws[0])
+            self.assertNotIn("root_element_token", fb_gws[1])
+            self.assertEqual(fb_gws[1].get("max_elements"), 2000)
+        finally:
+            srv.close()
+
+
 if __name__ == "__main__":
     unittest.main()
 
