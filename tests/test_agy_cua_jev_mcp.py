@@ -5432,6 +5432,85 @@ class StdioEndToEndTest(unittest.TestCase):
                     env={},
                     timeout_s=0.05,
                 )
+
+            # 2b) Descendant processes spawned inside _run_jev_node_helper are killed & reaped on timeout
+            with tempfile.TemporaryDirectory() as td_pg:
+                child_pid_file = os.path.join(td_pg, "descendant.pid")
+                spawner_code = (
+                    "import subprocess, sys, time; "
+                    f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                    f"open({child_pid_file!r}, 'w').write(str(p.pid)); "
+                    "time.sleep(30)"
+                )
+                with self.assertRaises(bench_mod.ArmActionError):
+                    bench_mod._run_jev_node_helper(
+                        [sys.executable, "-c", spawner_code],
+                        env={},
+                        proxy=proxy,
+                        timeout_s=0.25,
+                        tool_name="jev_desktop_run",
+                    )
+                self.assertTrue(os.path.exists(child_pid_file))
+                with open(child_pid_file, encoding="utf-8") as fh:
+                    descendant_pid = int(fh.read().strip())
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(descendant_pid, 0)
+
+            # 2c) _run_ad_cli & _parse_jev_run_events fail closed on uncertain mutations, allow retry=='safe' & read-only errors
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._run_ad_cli(
+                    sys.executable,
+                    ["-c", "import sys; sys.stdout.write('')", "click", "@s1:e1"],
+                    env={},
+                )
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._run_ad_cli(
+                    sys.executable,
+                    [
+                        "-c",
+                        'import json; print(json.dumps({"ok": False, "error": {"code": "ACTION_FAILED", "disposition": {"delivery": "delivery_uncertain", "retry": "unknown"}}}))',
+                        "click",
+                        "@s1:e1",
+                    ],
+                    env={},
+                )
+            safe_mut, _ = bench_mod._run_ad_cli(
+                sys.executable,
+                [
+                    "-c",
+                    'import json; print(json.dumps({"ok": False, "error": {"code": "STALE_REF", "disposition": {"delivery": "not_delivered", "retry": "safe"}}}))',
+                    "click",
+                    "@s1:e1",
+                ],
+                env={},
+            )
+            self.assertFalse(safe_mut["ok"])
+            ro_err, _ = bench_mod._run_ad_cli(
+                sys.executable,
+                ["-c", "import sys; sys.stdout.write('not-json')", "snapshot"],
+                env={},
+            )
+            self.assertFalse(ro_err["ok"])
+            self.assertEqual(ro_err["error"]["code"], "INVALID_JSON")
+
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._parse_jev_run_events("", "boom")
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._parse_jev_run_events("{bad-json}\n", "")
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._parse_jev_run_events(
+                    '{"turn":{"step":1,"operation":"CLICK","ok":false,"error":{"code":"ACTION_FAILED","disposition":{"retry":"unsafe"}}}}\n'
+                    '{"stop":"action_failed","error":{"code":"ACTION_FAILED","disposition":{"retry":"unsafe"}}}\n',
+                    "",
+                )
+            evs_ok, n_act_ok, stop_ok = bench_mod._parse_jev_run_events(
+                '{"turn":{"step":1,"operation":"CLICK","ok":false,"error":{"code":"STALE_REF","disposition":{"retry":"safe"}}}}\n'
+                '{"stop":"action_failed","error":{"code":"STALE_REF","disposition":{"retry":"safe"}}}\n',
+                "",
+            )
+            self.assertEqual(len(evs_ok), 2)
+            self.assertEqual(n_act_ok, 1)
+            self.assertEqual(stop_ok["stop"], "action_failed")
         finally:
             proxy.close()
 

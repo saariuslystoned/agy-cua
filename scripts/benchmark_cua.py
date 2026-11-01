@@ -20,6 +20,7 @@ import io
 import json
 import os
 import re
+import signal
 import statistics
 import subprocess
 import sys
@@ -2925,12 +2926,141 @@ AD_READ_ONLY_COMMANDS: frozenset[str] = frozenset(
 )
 
 
+AD_GLOBAL_VALUE_FLAGS: frozenset[str] = frozenset({"--session", "--agent-id", "-c"})
+
+
 def _coerce_proc_text(val: str | bytes | None) -> str:
     if val is None:
         return ""
     if isinstance(val, bytes):
         return val.decode("utf-8", "replace")
     return str(val)
+
+
+def _extract_ad_subcommand(argv: list[str]) -> str:
+    idx = 0
+    while idx < len(argv):
+        tok = str(argv[idx])
+        if tok in AD_GLOBAL_VALUE_FLAGS:
+            idx += 2
+            continue
+        if any(tok.startswith(f"{flg}=") for flg in AD_GLOBAL_VALUE_FLAGS):
+            idx += 1
+            continue
+        if tok.startswith("-"):
+            idx += 1
+            continue
+        return tok
+    return ""
+
+
+def _is_ad_retry_safe(payload: Mapping[str, Any] | None) -> bool:
+    """Return True only when an `agent-desktop` error envelope explicitly marks retry as `'safe'`."""
+    if not isinstance(payload, Mapping):
+        return False
+    err_obj = payload.get("error")
+    if not isinstance(err_obj, Mapping):
+        return False
+    disp = err_obj.get("disposition")
+    return isinstance(disp, Mapping) and disp.get("retry") == "safe"
+
+
+def _terminate_process_group(proc: subprocess.Popen[str], pgid: int, *, sigterm_grace_s: float = 0.25) -> None:
+    """Terminate an isolated process group (`SIGTERM` -> grace -> `SIGKILL`) so no helper children survive."""
+    if pgid <= 0 or not hasattr(os, "killpg"):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        pass
+    deadline = time.monotonic() + max(0.0, sigterm_grace_s)
+    while time.monotonic() < deadline:
+        proc.poll()
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            break
+        time.sleep(0.02)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _drain_and_reap_process(proc: subprocess.Popen[str], pgid: int) -> tuple[str, str]:
+    """Drain pipes and collect `proc`'s exit status after group termination."""
+    _terminate_process_group(proc, pgid)
+    try:
+        out, err = proc.communicate(timeout=1.5)
+    except subprocess.TimeoutExpired:
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        out, err = "", ""
+    try:
+        proc.wait(timeout=1.5)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        proc.wait()
+    if pgid > 0 and hasattr(os, "killpg"):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        reap_deadline = time.monotonic() + 0.25
+        while time.monotonic() < reap_deadline:
+            try:
+                os.killpg(pgid, 0)
+            except (ProcessLookupError, PermissionError):
+                break
+            time.sleep(0.01)
+    return out or "", err or ""
+
+
+def _run_grouped_subprocess(
+    argv: list[str],
+    *,
+    env: Mapping[str, str],
+    timeout_s: float,
+) -> subprocess.CompletedProcess[str]:
+    """Run `argv` in a dedicated process group (`start_new_session=True`) and reap all descendants on timeout."""
+    proc = subprocess.Popen(
+        [str(x) for x in argv],
+        env=dict(env),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        start_new_session=True,
+    )
+    pgid = proc.pid
+    try:
+        out, err = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        partial_out, partial_err = _drain_and_reap_process(proc, pgid)
+        comb_out = partial_out or _coerce_proc_text(exc.output)
+        comb_err = partial_err or _coerce_proc_text(exc.stderr)
+        raise subprocess.TimeoutExpired(proc.args, timeout_s, output=comb_out, stderr=comb_err) from exc
+    except BaseException:
+        _drain_and_reap_process(proc, pgid)
+        raise
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out or "", err or "")
 
 
 def _run_ad_cli(
@@ -2942,19 +3072,13 @@ def _run_ad_cli(
 ) -> tuple[dict[str, Any], bool]:
     if "--headed" in argv or "--cursor" in argv:
         raise ArmActionError("headed_or_cursor_forbidden_in_background_mode")
-    subcmd = next((tok for tok in argv if not str(tok).startswith("-")), "")
+    subcmd = _extract_ad_subcommand(argv)
+    is_read_only = subcmd in AD_READ_ONLY_COMMANDS
     try:
-        proc = subprocess.run(
-            [str(ad_bin), *argv],
-            env=dict(env),
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-        )
+        proc = _run_grouped_subprocess([str(ad_bin), *argv], env=env, timeout_s=timeout_s)
     except subprocess.TimeoutExpired as exc:
         out_txt = _coerce_proc_text(exc.stdout) + "\n" + _coerce_proc_text(exc.stderr)
-        kind = "read" if subcmd in AD_READ_ONLY_COMMANDS else "mutating"
+        kind = "read" if is_read_only else "mutating"
         suffix = "; canary_leaked=True" if contains_secret_canary(out_txt) else ""
         raise ArmActionError(
             f"agent-desktop {kind} command {subcmd!r} timed out after {timeout_s}s; action outcome unknown{suffix}"
@@ -2962,10 +3086,30 @@ def _run_ad_cli(
     raw_out = (proc.stdout or "").strip()
     raw_err = (proc.stderr or "").strip()
     leaked = contains_secret_canary(raw_out) or contains_secret_canary(raw_err)
-    try:
-        parsed = json.loads(raw_out) if raw_out else {"ok": False, "error": {"code": "EMPTY_STDOUT", "message": raw_err[:200]}}
-    except ValueError:
-        parsed = {"ok": False, "error": {"code": "INVALID_JSON", "message": raw_out[:200]}}
+    parsed: Any
+    if not raw_out:
+        parsed = {"ok": False, "error": {"code": "EMPTY_STDOUT", "message": raw_err[:200]}}
+    else:
+        try:
+            loaded = json.loads(raw_out)
+            parsed = loaded if isinstance(loaded, dict) else {"ok": False, "error": {"code": "INVALID_JSON", "message": raw_out[:200]}}
+        except ValueError:
+            parsed = {"ok": False, "error": {"code": "INVALID_JSON", "message": raw_out[:200]}}
+
+    if not is_read_only:
+        suffix = "; canary_leaked=True" if leaked else ""
+        if proc.returncode != 0 and bool(parsed.get("ok")):
+            raise ArmActionError(
+                f"agent-desktop mutating command {subcmd!r} exited {proc.returncode} despite ok=true; action outcome unknown{suffix}"
+            )
+        if not bool(parsed.get("ok")) and not _is_ad_retry_safe(parsed):
+            err_obj = parsed.get("error") if isinstance(parsed.get("error"), Mapping) else {}
+            code = err_obj.get("code")
+            disp = err_obj.get("disposition") if isinstance(err_obj.get("disposition"), Mapping) else {}
+            raise ArmActionError(
+                f"agent-desktop mutating command {subcmd!r} failed without safe retry disposition "
+                f"(code={code!r}, retry={disp.get('retry')!r}); action outcome unknown{suffix}"
+            )
     return parsed, leaked
 
 
@@ -2977,16 +3121,9 @@ def _run_jev_node_helper(
     timeout_s: float,
     tool_name: str,
 ) -> tuple[subprocess.CompletedProcess[str], bool]:
-    """Run `scripts/jev/{run,act}.mjs` and fail closed on timeout so unknown side effects abort the arm."""
+    """Run `scripts/jev/{run,act}.mjs` in its own process group and fail closed on timeout."""
     try:
-        proc = subprocess.run(
-            cmd,
-            env=dict(env),
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-        )
+        proc = _run_grouped_subprocess(cmd, env=env, timeout_s=timeout_s)
     except subprocess.TimeoutExpired as exc:
         out_txt = _coerce_proc_text(exc.stdout) + "\n" + _coerce_proc_text(exc.stderr)
         if contains_secret_canary(out_txt):
@@ -3001,6 +3138,48 @@ def _run_jev_node_helper(
             proxy.canary_leaked = True
     proxy.raise_if_error()
     return proc, leaked
+
+
+def _parse_jev_run_events(stdout_text: str, stderr_text: str) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
+    """Parse `scripts/jev/run.mjs` JSONL events and fail closed on malformed or uncertain mutation failures."""
+    raw_lines = [ln.strip() for ln in (stdout_text or "").splitlines() if ln.strip()]
+    if not raw_lines:
+        raise ArmActionError(
+            f"jev_desktop_run produced empty output; action outcome unknown ({(stderr_text or '').strip()[:160]})"
+        )
+    events: list[dict[str, Any]] = []
+    run_actions = 0
+    for ln in raw_lines:
+        try:
+            ev = json.loads(ln)
+        except ValueError as exc:
+            raise ArmActionError("jev_desktop_run emitted malformed JSONL; action outcome unknown") from exc
+        if not isinstance(ev, dict):
+            raise ArmActionError("jev_desktop_run emitted non-object JSONL event; action outcome unknown")
+        events.append(ev)
+        t_obj = ev.get("turn")
+        if isinstance(t_obj, Mapping):
+            op = t_obj.get("operation")
+            if op not in {None, "WAIT", "DRILL", "WIDEN"}:
+                run_actions += 1
+                if t_obj.get("ok") is False and not _is_ad_retry_safe(t_obj):
+                    err_obj = t_obj.get("error") if isinstance(t_obj.get("error"), Mapping) else {}
+                    raise ArmActionError(
+                        f"jev_desktop_run {op!r} failed without safe retry disposition "
+                        f"(code={err_obj.get('code')!r}); action outcome unknown"
+                    )
+    stop_ev = events[-1]
+    if stop_ev.get("stop") == "action_failed" and not _is_ad_retry_safe(stop_ev):
+        raise ArmActionError("jev_desktop_run stopped on action_failed without safe retry disposition; action outcome unknown")
+    if stop_ev.get("ok") is False:
+        if run_actions > 0:
+            raise ArmActionError(
+                f"jev_desktop_run aborted with error after {run_actions} action(s); action outcome unknown"
+            )
+        return events, run_actions, {"stop": "read_failed", "error": stop_ev.get("error")}
+    if "stop" not in stop_ev:
+        raise ArmActionError("jev_desktop_run terminated without a terminal stop event; action outcome unknown")
+    return events, run_actions, stop_ev
 
 
 def _extract_ad_window_list(lw_res: Mapping[str, Any], *, pid: int | None = None) -> list[dict[str, Any]]:
@@ -3626,27 +3805,13 @@ def run_arm_agent_desktop_jev(
                     )
                     if helper_leaked:
                         canary_leaked = True
-                    raw_lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
-                    events = []
-                    run_actions = 0
-                    for ln in raw_lines:
-                        if contains_secret_canary(ln):
-                            canary_leaked = True
-                        try:
-                            ev = json.loads(ln)
-                            events.append(ev)
-                            t_obj = ev.get("turn") if isinstance(ev, Mapping) else None
-                            if isinstance(t_obj, Mapping) and t_obj.get("operation") not in {None, "WAIT", "DRILL", "WIDEN"}:
-                                run_actions += 1
-                                actions_dispatched += 1
-                        except ValueError:
-                            pass
+                    events, run_actions, stop_ev = _parse_jev_run_events(proc.stdout or "", proc.stderr or "")
+                    actions_dispatched += run_actions
                     tot_ms = round((time.perf_counter() - step_t0) * 1000, 2)
                     j_slice = sum(proxy.jev_latencies_ms[jev_before_len:])
                     observe_latencies_ms.append(round(max(0.0, tot_ms - j_slice), 2))
                     step_latencies_ms.append(tot_ms)
                     post_texts = read_status_texts(active_wid_str)
-                    stop_ev = events[-1] if events else {"stop": "empty_output", "stderr": (proc.stderr or "")[:200]}
                     trace_events.append({
                         "turn": turn_idx,
                         "tool": name,
