@@ -434,6 +434,90 @@ def _reject_binary_or_image_payload(raw_json_or_obj: Any, obj: Any = None) -> No
         )
 
 
+def _fit_select_request_to_byte_budget(
+    req: Mapping[str, Any],
+    *,
+    max_json_bytes: int,
+    referenced_el_ids: set[int] | None = None,
+) -> dict[str, Any]:
+    """Deterministically compact optional context so valid v2 candidate sets fit max_json_bytes."""
+    def _byte_len(obj: Mapping[str, Any]) -> int:
+        return len(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+
+    out = dict(req)
+    if _byte_len(out) <= max_json_bytes:
+        return out
+
+    raw_els = out.get("elements")
+    if isinstance(raw_els, list) and raw_els:
+        stripped_els = [
+            {k: v for k, v in e.items() if k != "container_path"}
+            for e in raw_els
+            if isinstance(e, Mapping)
+        ]
+        out["elements"] = stripped_els
+        if _byte_len(out) <= max_json_bytes:
+            return out
+
+        if referenced_el_ids:
+            ref_els = [e for e in stripped_els if e.get("element_index") in referenced_el_ids]
+            if len(ref_els) < len(stripped_els):
+                out["elements"] = ref_els
+                if _byte_len(out) <= max_json_bytes:
+                    return out
+                stripped_els = ref_els
+
+        lo_e, hi_e = 0, len(stripped_els)
+        best_e = 0
+        while lo_e <= hi_e:
+            mid_e = (lo_e + hi_e) // 2
+            out["elements"] = stripped_els[:mid_e]
+            if _byte_len(out) <= max_json_bytes:
+                best_e = mid_e
+                lo_e = mid_e + 1
+            else:
+                hi_e = mid_e - 1
+        out["elements"] = stripped_els[:best_e]
+        if _byte_len(out) <= max_json_bytes:
+            return out
+
+    if isinstance(out.get("history"), list) and out["history"]:
+        out["history"] = out["history"][-4:]
+        if _byte_len(out) <= max_json_bytes:
+            return out
+        out["history"] = []
+        if _byte_len(out) <= max_json_bytes:
+            return out
+
+    raw_cands = out.get("candidates")
+    if isinstance(raw_cands, list) and raw_cands:
+        base_cands = [dict(c) for c in raw_cands if isinstance(c, Mapping)]
+        lo_c, hi_c = 16, 1000
+        best_c = 16
+        while lo_c <= hi_c:
+            mid_c = (lo_c + hi_c) // 2
+            out["candidates"] = [
+                {
+                    **c,
+                    "description": (str(c.get("description") or "")[:mid_c].rstrip() or str(c.get("id") or "x")[:mid_c]),
+                }
+                for c in base_cands
+            ]
+            if _byte_len(out) <= max_json_bytes:
+                best_c = mid_c
+                lo_c = mid_c + 1
+            else:
+                hi_c = mid_c - 1
+        out["candidates"] = [
+            {
+                **c,
+                "description": (str(c.get("description") or "")[:best_c].rstrip() or str(c.get("id") or "x")[:best_c]),
+            }
+            for c in base_cands
+        ]
+    return out
+
+
 def validate_select_request(
     args: Mapping[str, Any],
     *,
@@ -927,37 +1011,6 @@ def _decode_md_escaped_str(raw: str) -> str:
         return raw.replace('\\"', '"').replace("\\n", "\n").replace("\\\\", "\\").replace("\u200e", "").strip()
 
 
-def _extract_md_node_label(rest: str) -> str:
-    s = rest.strip()
-    if not s or s.startswith("="):
-        return ""
-    if s.startswith('"'):
-        m_q = re.match(r'^"((?:[^"\\]|\\.)*)"', s, flags=re.DOTALL)
-        if m_q:
-            return _decode_md_escaped_str(m_q.group(1))
-    if s.startswith("("):
-        head = s.split(" = ", 1)[0].strip()
-        if head.startswith("(") and head.endswith(")"):
-            return head[1:-1].replace("\u200e", "").strip()
-        m_p = re.match(r"^\(([^)]+)\)", s)
-        if m_p:
-            return m_p.group(1).replace("\u200e", "").strip()
-    return ""
-
-
-def _extract_md_quoted_value(rest: str) -> str:
-    m_v = re.search(r'(?:^|\s)=\s*"((?:[^"\\]|\\.)*)"', rest, flags=re.DOTALL)
-    if not m_v:
-        return ""
-    return _decode_md_escaped_str(m_v.group(1))
-
-
-_PW_PLACEHOLDER_RE = re.compile(
-    r"^(?:enter\s+your\s+password|master\s+(?:vault\s+)?password|password|generate\s+password,\s+or\s+type\s+a\s+password)$",
-    re.IGNORECASE,
-)
-
-
 def _scan_quote_to_eol(text: str, start_idx: int) -> tuple[bool, int]:
     """Scan inside a double-quoted literal starting at start_idx; return (closed, next_idx)."""
     idx = start_idx
@@ -975,24 +1028,98 @@ def _scan_quote_to_eol(text: str, start_idx: int) -> tuple[bool, int]:
     return False, n
 
 
-def _md_rest_has_unclosed_quote(rest: str) -> bool:
-    """Return True iff the remainder of a _TREE_MD_LINE_RE line leaves a quoted label or '= \"...\"' value unclosed."""
+def _skip_md_leading_label(rest: str) -> tuple[bool, int, str]:
+    """Advance past a leading quoted or balanced-parenthesized label on a _TREE_MD_LINE_RE tail."""
     s = rest.lstrip(" \t")
-    pos = 0
+    if not s or s.startswith("="):
+        return False, 0, s
     if s.startswith('"'):
-        closed, pos = _scan_quote_to_eol(s, 1)
-        if not closed:
-            return True
-    elif s.startswith("("):
+        closed, next_pos = _scan_quote_to_eol(s, 1)
+        return (not closed), next_pos, s
+    if s.startswith("("):
+        idx = 1
+        n = len(s)
+        depth = 1
+        in_q = False
+        escaped = False
+        while idx < n:
+            ch = s[idx]
+            if in_q:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_q = False
+            else:
+                if ch == '"':
+                    in_q = True
+                elif ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        return False, idx + 1, s
+            idx += 1
+        if in_q:
+            return True, n, s
         eq_pos = s.find(' = "')
-        close_p = s.find(")", 1, eq_pos if eq_pos != -1 else len(s))
-        pos = (close_p + 1) if close_p != -1 else (eq_pos if eq_pos != -1 else len(s))
-    m_eq = re.search(r'(?:^|\s)=\s*"', s[pos:])
+        return False, (eq_pos if eq_pos != -1 else n), s
+    return False, 0, s
+
+
+def _extract_md_node_label(rest: str) -> str:
+    s = rest.strip()
+    if not s or s.startswith("="):
+        return ""
+    if s.startswith('"'):
+        m_q = re.match(r'^"((?:[^"\\]|\\.)*)"', s, flags=re.DOTALL)
+        if m_q:
+            return _decode_md_escaped_str(m_q.group(1))
+    if s.startswith("("):
+        unclosed, end_pos, trimmed = _skip_md_leading_label(s)
+        if not unclosed and end_pos >= 2 and trimmed[end_pos - 1] == ")":
+            return trimmed[1 : end_pos - 1].replace("\u200e", "").strip()
+        head = s.split(" = ", 1)[0].strip()
+        if head.startswith("(") and head.endswith(")"):
+            return head[1:-1].replace("\u200e", "").strip()
+        m_p = re.match(r"^\(([^)]+)\)", s)
+        if m_p:
+            return m_p.group(1).replace("\u200e", "").strip()
+    return ""
+
+
+def _extract_md_quoted_value(rest: str) -> str:
+    unclosed, after_lbl, s = _skip_md_leading_label(rest)
+    if unclosed:
+        return ""
+    m_v = re.search(r'(?:^|\s)=\s*"((?:[^"\\]|\\.)*)"', s[after_lbl:], flags=re.DOTALL)
+    if not m_v:
+        return ""
+    return _decode_md_escaped_str(m_v.group(1))
+
+
+_PW_PLACEHOLDER_RE = re.compile(
+    r"^(?:enter\s+your\s+password|master\s+(?:vault\s+)?password|password|generate\s+password,\s+or\s+type\s+a\s+password)$",
+    re.IGNORECASE,
+)
+
+
+def _md_tail_has_unclosed_value_quote(tail: str) -> bool:
+    m_eq = re.search(r'(?:^|\s)=\s*"', tail)
     if m_eq:
-        closed_val, _ = _scan_quote_to_eol(s, pos + m_eq.end())
+        closed_val, _ = _scan_quote_to_eol(tail, m_eq.end())
         if not closed_val:
             return True
     return False
+
+
+def _md_rest_has_unclosed_quote(rest: str) -> bool:
+    """Return True iff the remainder of a _TREE_MD_LINE_RE line leaves a quoted label or '= \"...\"' value unclosed."""
+    unclosed_lbl, pos, s = _skip_md_leading_label(rest)
+    if unclosed_lbl:
+        return True
+    return _md_tail_has_unclosed_value_quote(s[pos:])
 
 
 def _coalesce_multiline_md_lines(tree_md: str) -> list[str]:
@@ -1007,20 +1134,17 @@ def _coalesce_multiline_md_lines(tree_md: str) -> list[str]:
         if m and _md_rest_has_unclosed_quote(cur[m.end() :]):
             j = i + 1
             parts = [cur]
-            closed = False
             while j < n:
                 nxt = raw_lines[j]
                 parts.append(nxt)
                 closed_here, after_idx = _scan_quote_to_eol(nxt, 0)
-                if closed_here:
-                    if not _md_rest_has_unclosed_quote(nxt[after_idx:]):
-                        closed = True
-                        break
+                if closed_here and not _md_tail_has_unclosed_value_quote(nxt[after_idx:]):
+                    j += 1
+                    break
                 j += 1
-            if closed:
-                out.append("\n".join(parts))
-                i = j + 1
-                continue
+            out.append("\n".join(parts))
+            i = j
+            continue
         out.append(cur)
         i += 1
     return out
@@ -1102,6 +1226,7 @@ def _parse_markdown_structure(tree_md: str) -> dict[str, Any]:
                             "anc_ckeys": list(anc_ckeys),
                             "all_anc_ids": set(all_anc_ids),
                             "has_non_root_anc": has_non_root_anc,
+                            "proven_top_level": bool(not has_non_root_anc and not anc_ckeys),
                         }
                     )
                     if st_clean not in md_all_static_texts:
@@ -1190,6 +1315,7 @@ def _parse_markdown_structure(tree_md: str) -> dict[str, Any]:
                     "anc_ckeys": list(anc_ckeys),
                     "all_anc_ids": set(all_anc_ids),
                     "has_non_root_anc": has_non_root_anc,
+                    "proven_top_level": bool(not has_non_root_anc and not anc_ckeys),
                 }
             )
             if st_clean not in md_all_static_texts:
@@ -1231,7 +1357,7 @@ def _parse_markdown_hierarchy_full(tree_md: str) -> tuple[dict[int, int], set[in
         if not m:
             continue
         indent, idx_str, role = m.group(1), m.group(2), m.group(3)
-        level = len(indent) // 2
+        level = len(indent.expandtabs(2)) // 2
         for deeper in [k for k in role_by_level if k > level]:
             del role_by_level[deeper]
         role_by_level[level] = role
@@ -2228,6 +2354,7 @@ def extract_window_observation(
                 "anc_ckeys": list(rec["anc_ckeys"]),
                 "all_anc_ids": set(rec["all_anc_ids"]),
                 "has_non_root_anc": bool(rec["has_non_root_anc"]),
+                "proven_top_level": bool(rec.get("proven_top_level", False)),
             }
         )
         if rec["text"] not in raw_static_texts:
@@ -2318,6 +2445,14 @@ def extract_window_observation(
             seen_p.add(curr_p)
             all_p_ids.add(curr_p)
             p_el = by_index.get(curr_p)
+            md_p_cks = md_struct["anc_ckeys_by_el"].get(curr_p, [])
+            md_p_ids = md_struct["all_anc_ids_by_el"].get(curr_p, set())
+            if md_p_ids:
+                all_p_ids.update(md_p_ids)
+            if md_struct["has_non_root_anc_by_el"].get(curr_p, False):
+                has_non_root_p = True
+            if md_struct["has_nontoolbar_container_anc_by_el"].get(curr_p, False):
+                has_nontoolbar_cont_p = True
             if p_el is None:
                 if curr_p not in window_root_ids:
                     has_non_root_p = True
@@ -2331,6 +2466,9 @@ def extract_window_observation(
                     all_p_ids.update(c_miss["all_anc_el_ids"])
                     if c_miss["role"] != "AXToolbar" and curr_p not in md_toolbar_ids:
                         has_nontoolbar_cont_p = True
+                elif md_p_cks:
+                    for m_ck in reversed(md_p_cks):
+                        rev_ckeys.append(m_ck)
                 elif curr_p not in window_root_ids and curr_p not in md_toolbar_ids:
                     has_nontoolbar_cont_p = True
                 break
@@ -2344,6 +2482,8 @@ def extract_window_observation(
                 rev_ckeys.append(ck_p)
                 if p_role != "AXToolbar" and curr_p not in md_toolbar_ids:
                     has_nontoolbar_cont_p = True
+            for m_ck in reversed(md_p_cks):
+                rev_ckeys.append(m_ck)
             curr_p = p_el.get("parent_index")
         return (
             _dedup_ckeys(list(reversed(rev_ckeys))),
@@ -2486,6 +2626,7 @@ def extract_window_observation(
                 exp_st.extend(containers[ak]["anc_ckeys"])
         s_rec["anc_ckeys"] = _dedup_ckeys(exp_st)
 
+    has_any_hierarchy_ctx = bool(tree_md.strip() or containers)
     for raw_el in raw_elements:
         if isinstance(raw_el, Mapping) and str(raw_el.get("role") or "").strip() == "AXStaticText":
             st_clean = _raw_el_static_text(raw_el)
@@ -2498,11 +2639,34 @@ def extract_window_observation(
                 p_ckeys = _dedup_ckeys(el_anc_ckeys.get(st_idx_int, []) + p_ckeys)
                 p_all_ids = p_all_ids | ancestor_indices_by_el.get(st_idx_int, set())
                 p_has_non_root = bool(p_has_non_root or has_non_root_anc_by_el.get(st_idx_int, False))
+            for anc_id in list(p_all_ids):
+                if anc_id in el_anc_ckeys:
+                    p_ckeys = _dedup_ckeys(el_anc_ckeys[anc_id] + p_ckeys)
+                if has_non_root_anc_by_el.get(anc_id, False):
+                    p_has_non_root = True
+            exp_raw_cks: list[tuple[str, int]] = []
+            for ak in p_ckeys:
+                ak_norm = alias_map.get(ak, ak)
+                if ak_norm in containers:
+                    exp_raw_cks.extend(containers[ak_norm]["anc_ckeys"])
+                else:
+                    exp_raw_cks.append(ak_norm)
+            p_ckeys = _dedup_ckeys(exp_raw_cks)
             exp_st_depth = raw_el.get("depth")
             if isinstance(exp_st_depth, int) and not isinstance(exp_st_depth, bool) and exp_st_depth >= 2:
                 p_has_non_root = True
             if p_ckeys:
                 p_has_non_root = True
+            raw_parent = raw_el.get("parent_index")
+            proven_raw_top = bool(
+                not p_has_non_root
+                and not p_ckeys
+                and (
+                    (isinstance(raw_parent, int) and not isinstance(raw_parent, bool) and raw_parent in window_root_ids)
+                    or (isinstance(exp_st_depth, int) and not isinstance(exp_st_depth, bool) and exp_st_depth == 1)
+                    or not has_any_hierarchy_ctx
+                )
+            )
             matched_existing = False
             if st_idx_int is not None:
                 for s_rec in static_records:
@@ -2510,8 +2674,43 @@ def extract_window_observation(
                         s_rec["anc_ckeys"] = _dedup_ckeys(s_rec["anc_ckeys"] + p_ckeys)
                         s_rec["all_anc_ids"].update(p_all_ids)
                         s_rec["has_non_root_anc"] = bool(s_rec["has_non_root_anc"] or p_has_non_root)
+                        s_rec["proven_top_level"] = bool(
+                            (s_rec.get("proven_top_level", False) or proven_raw_top)
+                            and not s_rec["has_non_root_anc"]
+                            and not s_rec["anc_ckeys"]
+                        )
                         matched_existing = True
                         break
+                if not matched_existing:
+                    unindexed_matches = [
+                        s_rec
+                        for s_rec in static_records
+                        if s_rec["elem_idx"] is None and s_rec["text"] == st_clean
+                    ]
+                    chosen_rec: dict[str, Any] | None = None
+                    if p_ckeys:
+                        chosen_rec = next(
+                            (sr for sr in unindexed_matches if sr["anc_ckeys"] == p_ckeys),
+                            None,
+                        )
+                    if chosen_rec is None and proven_raw_top:
+                        chosen_rec = next(
+                            (sr for sr in unindexed_matches if sr.get("proven_top_level", False)),
+                            None,
+                        )
+                    if chosen_rec is None and len(unindexed_matches) == 1:
+                        chosen_rec = unindexed_matches[0]
+                    if chosen_rec is not None:
+                        chosen_rec["elem_idx"] = st_idx_int
+                        chosen_rec["anc_ckeys"] = _dedup_ckeys(chosen_rec["anc_ckeys"] + p_ckeys)
+                        chosen_rec["all_anc_ids"].update(p_all_ids)
+                        chosen_rec["has_non_root_anc"] = bool(chosen_rec["has_non_root_anc"] or p_has_non_root)
+                        chosen_rec["proven_top_level"] = bool(
+                            (chosen_rec.get("proven_top_level", False) or proven_raw_top)
+                            and not chosen_rec["has_non_root_anc"]
+                            and not chosen_rec["anc_ckeys"]
+                        )
+                        matched_existing = True
             else:
                 for s_rec in static_records:
                     if (
@@ -2521,6 +2720,11 @@ def extract_window_observation(
                         and s_rec["has_non_root_anc"] == p_has_non_root
                     ):
                         s_rec["all_anc_ids"].update(p_all_ids)
+                        s_rec["proven_top_level"] = bool(
+                            (s_rec.get("proven_top_level", False) or proven_raw_top)
+                            and not s_rec["has_non_root_anc"]
+                            and not s_rec["anc_ckeys"]
+                        )
                         matched_existing = True
                         break
             if not matched_existing:
@@ -2531,6 +2735,7 @@ def extract_window_observation(
                         "anc_ckeys": p_ckeys,
                         "all_anc_ids": p_all_ids,
                         "has_non_root_anc": p_has_non_root,
+                        "proven_top_level": proven_raw_top,
                     }
                 )
 
@@ -2941,7 +3146,11 @@ def extract_window_observation(
                 or _contains_secret_or_mask(st_txt, all_secret_values)
             ):
                 continue
-            is_top_level_st = (not s_rec["has_non_root_anc"]) and (not s_rec["anc_ckeys"])
+            is_top_level_st = (
+                bool(s_rec.get("proven_top_level", False))
+                and (not s_rec["has_non_root_anc"])
+                and (not s_rec["anc_ckeys"])
+            )
             if target_region_ckey is not None or root_element_index is not None:
                 in_reg = target_region_ckey is None or (target_region_ckey in s_rec["anc_ckeys"])
                 in_root = root_element_index is None or (
@@ -6140,7 +6349,7 @@ class JevMcpServer:
                             "in_toolbar": False,
                             "supported_actions": [str(c.get("tool") or "click")],
                         })
-            select_req = validate_select_request(
+            raw_select_req = _fit_select_request_to_byte_budget(
                 {
                     "goal": goal,
                     "pid": pid,
@@ -6150,6 +6359,11 @@ class JevMcpServer:
                     "history": history_in,
                     "candidates": [{"id": c["id"], "description": c["description"]} for c in bound_candidates],
                 },
+                max_json_bytes=self.max_json_bytes,
+                referenced_el_ids=referenced_el_ids,
+            )
+            select_req = validate_select_request(
+                raw_select_req,
                 max_elements=self.max_elements_cap,
                 max_candidates=self.max_candidates,
                 max_json_bytes=self.max_json_bytes,
@@ -6541,19 +6755,23 @@ class JevMcpServer:
                 call_args = dict(base_args)
                 eff_deadline = _deadline_monotonic
                 if poll_deadline is not None:
+                    now_m = time.monotonic()
+                    if _deadline_monotonic is not None and _deadline_monotonic - now_m <= 0:
+                        raise TimeoutError("batch_deadline_exceeded")
                     eff_deadline = poll_deadline if eff_deadline is None else min(eff_deadline, poll_deadline)
-                    rem_s = eff_deadline - time.monotonic()
-                    if rem_s <= 0:
+                    rem_s = eff_deadline - now_m
+                    rem_ms = int(rem_s * 1000)
+                    if rem_s <= 0 or rem_ms < MIN_OBSERVE_WALK_TIMEOUT_MS:
+                        if _deadline_monotonic is not None and _deadline_monotonic <= poll_deadline and (_deadline_monotonic - now_m) < (MIN_OBSERVE_WALK_TIMEOUT_MS / 1000.0):
+                            raise TimeoutError("batch_deadline_exceeded")
                         raise TimeoutError("settle_timeout_exceeded")
-                    rem_ms = max(1, int(rem_s * 1000))
-                    if rem_ms >= MIN_OBSERVE_WALK_TIMEOUT_MS:
-                        walk_cap = (
-                            max(MIN_OBSERVE_WALK_TIMEOUT_MS, rem_ms - 50)
-                            if rem_ms > MIN_OBSERVE_WALK_TIMEOUT_MS + 50
-                            else rem_ms
-                        )
-                        cur_walk = call_args.get("timeout_ms")
-                        call_args["timeout_ms"] = min(cur_walk, walk_cap) if isinstance(cur_walk, int) else walk_cap
+                    walk_cap = (
+                        max(MIN_OBSERVE_WALK_TIMEOUT_MS, rem_ms - 50)
+                        if rem_ms > MIN_OBSERVE_WALK_TIMEOUT_MS + 50
+                        else rem_ms
+                    )
+                    cur_walk = call_args.get("timeout_ms")
+                    call_args["timeout_ms"] = min(cur_walk, walk_cap) if isinstance(cur_walk, int) else walk_cap
                     call_timeout_s = min(obs_call_timeout_s(driver, call_args.get("timeout_ms")), rem_s)
                 else:
                     call_timeout_s = obs_call_timeout_s(driver, call_args.get("timeout_ms"))
@@ -6640,7 +6858,14 @@ class JevMcpServer:
                     time.sleep(min(0.10, max(0.01, rem_settle - min_poll_read_s)))
                     if settle_deadline - time.monotonic() < min_poll_read_s:
                         break
-                    post_obs = _read_post_observation(post_obs, poll_deadline=settle_deadline)
+                    try:
+                        post_obs = _read_post_observation(post_obs, poll_deadline=settle_deadline)
+                    except TimeoutError as settle_exc:
+                        if _deadline_monotonic is not None and time.monotonic() >= _deadline_monotonic - 0.05:
+                            raise
+                        if "batch_deadline" in str(settle_exc):
+                            raise
+                        break
                     verify_polls += 1
                     if not post_obs.get("query_incomplete") and not is_hierarchy_scoped:
                         self._last_observations[(pid, window_id)] = post_obs
@@ -6889,7 +7114,13 @@ class JevMcpServer:
                 and driver.timeout_ms >= 4000
             ):
                 obs_call_args["timeout_ms"] = 5000
-            raw_obs = driver.call_tool("get_window_state", obs_call_args)
+            raw_walk_to = obs_call_args.get("timeout_ms")
+            obs_rpc_timeout_s = (
+                max(driver.timeout_ms, raw_walk_to + 1000) / 1000.0
+                if (isinstance(raw_walk_to, int) and not isinstance(raw_walk_to, bool) and raw_walk_to > 0)
+                else None
+            )
+            raw_obs = driver.call_tool("get_window_state", obs_call_args, timeout_s=obs_rpc_timeout_s)
             if raw_obs.get("isError"):
                 err_txt = "".join(c.get("text", "") for c in (raw_obs.get("content") or []) if isinstance(c, Mapping))
                 raise RuntimeError(err_txt or "get_window_state returned isError=true")
@@ -6913,7 +7144,7 @@ class JevMcpServer:
                     raise
                 diff_fallback_used = True
                 fallback_args = dict(obs_call_args, include_diff=False, tree_format="both")
-                raw_obs = driver.call_tool("get_window_state", fallback_args)
+                raw_obs = driver.call_tool("get_window_state", fallback_args, timeout_s=obs_rpc_timeout_s)
                 if raw_obs.get("isError"):
                     err_txt = "".join(c.get("text", "") for c in (raw_obs.get("content") or []) if isinstance(c, Mapping))
                     raise RuntimeError(err_txt or "get_window_state fallback returned isError=true")
@@ -7311,7 +7542,7 @@ class JevMcpServer:
                 for e in pre_obs["elements"]
             ]
             try:
-                select_req = validate_select_request(
+                raw_browser_req = _fit_select_request_to_byte_budget(
                     {
                         "goal": goal,
                         "pid": 1,
@@ -7320,6 +7551,10 @@ class JevMcpServer:
                         "elements": browser_select_els[: self.max_elements_cap],
                         "candidates": [{"id": c["id"], "description": c["description"]} for c in bound_cands],
                     },
+                    max_json_bytes=self.max_json_bytes,
+                )
+                select_req = validate_select_request(
+                    raw_browser_req,
                     max_elements=self.max_elements_cap,
                     max_candidates=self.max_candidates,
                     max_json_bytes=self.max_json_bytes,
@@ -7539,7 +7774,10 @@ class JevMcpServer:
                     time.sleep(min(0.10, max(0.01, rem_settle - min_browser_read_s)))
                     if settle_deadline - time.monotonic() < min_browser_read_s:
                         break
-                    post_obs = _read_post_browser_obs(poll_deadline=settle_deadline)
+                    try:
+                        post_obs = _read_post_browser_obs(poll_deadline=settle_deadline)
+                    except TimeoutError:
+                        break
                     verify_polls += 1
                     state_changed, post_ok, verify_reason = check_browser_postcondition(
                         expected_post,

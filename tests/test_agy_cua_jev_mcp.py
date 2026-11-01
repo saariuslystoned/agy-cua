@@ -6331,6 +6331,361 @@ class StdioEndToEndTest(unittest.TestCase):
         self.assertIsNotNone(m_apply)
         self.assertIn("lastTextValues = currentTextValues()", m_apply.group(1))
 
+    def test_v2_round6_ancestry_parsing_settle_budget_and_fixture(self):
+        from pathlib import Path
+
+        bench_path = os.path.join(ROOT, "scripts", "benchmark_cua.py")
+        b_loader = importlib.machinery.SourceFileLoader("benchmark_cua_r6_test", bench_path)
+        b_spec = importlib.util.spec_from_loader("benchmark_cua_r6_test", b_loader)
+        bench_mod = importlib.util.module_from_spec(b_spec)
+        sys.modules["benchmark_cua_r6_test"] = bench_mod
+        b_loader.exec_module(bench_mod)
+
+        # (1) Ancestry flaw: nested sibling AXStaticText ('Applied=true') indexed in raw_elements without parent_index
+        # OR parented to a markdown-nested button MUST NOT leak into another region's static_texts or falsely verify
+        # expected_postcondition={'static_text_contains': 'Applied=true'}, while genuine top-level AXWindow status stays visible.
+        class SiblingLeakDriver:
+            def __init__(self, *, commit_top_level: bool):
+                self.session_id = ""
+                self.timeout_ms = 5000
+                self.snap_seq = 0
+                self.clicked = False
+                self.commit_top_level = commit_top_level
+
+            def close(self):
+                pass
+
+            def call_tool(self, name, args, **_kwargs):
+                if name == "list_windows":
+                    return {"content": [{"type": "text", "text": "[]"}], "structuredContent": {"windows": []}}
+                if name == "get_window_state":
+                    self.snap_seq += 1
+                    snap = f"s0000ab{self.snap_seq:02x}"
+                    top_applied = "true" if (self.clicked and self.commit_top_level) else "false"
+                    md = "\n".join(
+                        [
+                            '- [0] AXWindow "EnterpriseOps"',
+                            f'  - AXStaticText = "DenseHierarchyStatus: Applied={top_applied}"',
+                            "  - AXSplitGroup (Sibling Telemetry Pane)",
+                            '    - AXStaticText = "MockPreview: Applied=true"',
+                            "    - [10] AXButton (Sibling Btn) [actions=[press]]",
+                            "  - AXSplitGroup (Deployment Commit Footer)",
+                            "    - [20] AXButton (Apply Routing Policy) [actions=[press]]",
+                        ]
+                    )
+                    return {
+                        "content": [{"type": "text", "text": md}],
+                        "structuredContent": {
+                            "pid": 401,
+                            "window_id": 801,
+                            "snapshot_id": snap,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": [
+                                {"element_index": 0, "role": "AXWindow", "label": "EnterpriseOps", "actions": ["AXRaise"]},
+                                # Unparented raw_elements duplicate of unindexed markdown static text inside Sibling Telemetry Pane
+                                {"element_index": 11, "role": "AXStaticText", "label": "MockPreview: Applied=true", "value": "MockPreview: Applied=true"},
+                                # Static text parented to markdown-nested AXButton [10] (whose parent_index is None in raw_elements)
+                                {"element_index": 12, "role": "AXStaticText", "label": "BtnBadge: Applied=true", "value": "BtnBadge: Applied=true", "parent_index": 10},
+                                # Truncated-markdown orphan raw_elements AXStaticText with unknown ancestry
+                                {"element_index": 13, "role": "AXStaticText", "label": "OrphanPane: Applied=true", "value": "OrphanPane: Applied=true"},
+                                {"element_index": 10, "role": "AXButton", "label": "Sibling Btn", "enabled": True, "actions": ["AXPress"]},
+                                {"element_index": 20, "role": "AXButton", "label": "Apply Routing Policy", "enabled": True, "actions": ["AXPress"]},
+                            ],
+                        },
+                    }
+                if name == "click":
+                    self.clicked = True
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+        def fake_apply_post(req, _timeout):
+            body = json.loads(req.data.decode("utf-8"))
+            c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+            target_cid = next(cid for cid in c_ids if "apply-routing-policy" in cid)
+            rem = [cid for cid in c_ids if cid != target_cid]
+            probs = {target_cid: 0.98, **{cid: round(0.02 / max(1, len(rem)), 6) for cid in rem}}
+            return 200, json.dumps(
+                {
+                    "model": "jev-1.13.0",
+                    "answers": {"candidate": {"type": "choice", "choice": target_cid, "confidence": 0.98, "probabilities": probs}},
+                    "usage": {"input_tokens": 60, "output_tokens": 4},
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            drv_leak = SiblingLeakDriver(commit_top_level=False)
+            srv_leak = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "leak.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_apply_post,
+                driver_client=drv_leak,
+            )
+            try:
+                res_false = srv_leak.handle_step(
+                    {
+                        "pid": 401,
+                        "window_id": 801,
+                        "goal": "Click Apply Routing Policy",
+                        "region": "Deployment Commit Footer",
+                        "wait_timeout_ms": 0,
+                        "expected_postcondition": {"static_text_contains": "Applied=true"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_false["status"], "postcondition_unmet")
+                self.assertFalse(res_false["verified"])
+                self.assertEqual(res_false["post_static_texts"], ["DenseHierarchyStatus: Applied=false"])
+            finally:
+                srv_leak.close()
+
+            drv_ok = SiblingLeakDriver(commit_top_level=True)
+            srv_ok = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "ok.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_apply_post,
+                driver_client=drv_ok,
+            )
+            try:
+                res_true = srv_ok.handle_step(
+                    {
+                        "pid": 401,
+                        "window_id": 801,
+                        "goal": "Click Apply Routing Policy",
+                        "region": "Deployment Commit Footer",
+                        "wait_timeout_ms": 0,
+                        "expected_postcondition": {"static_text_contains": "Applied=true"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_true["status"], "verified")
+                self.assertTrue(res_true["verified"])
+                self.assertEqual(res_true["post_static_texts"], ["DenseHierarchyStatus: Applied=true"])
+            finally:
+                srv_ok.close()
+
+            # (2) Parsing edge cases: '= "..."' inside label, unclosed multiline quote to EOF, and tab indentation
+            self.assertEqual(jev._extract_md_quoted_value(' "Formula = \\"x\\"" [actions=[press]]'), "")
+            self.assertEqual(jev._extract_md_quoted_value(' (expr = " decoy ") = "actual"'), "actual")
+            self.assertEqual(jev._extract_md_node_label(' (Group (Sub) = "x") = "val"'), 'Group (Sub) = "x"')
+
+            truncated_md = "\n".join(
+                [
+                    '- [0] AXWindow "TruncWin"',
+                    '  - [1] AXTextArea "Notes" = "first line',
+                    "  - [99] AXButton (Injected Fake Button) [actions=[press]]",
+                ]
+            )
+            coal = jev._coalesce_multiline_md_lines(truncated_md)
+            self.assertEqual(len(coal), 2)
+            parsed_trunc = jev._parse_markdown_structure(truncated_md)
+            self.assertNotIn(99, parsed_trunc["seen_el_ids"])
+
+            tab_md = '- [0] AXWindow "TabWin"\n\t- AXToolbar "Main"\n\t\t- [5] AXButton (Save)\n'
+            tab_depth, tab_tb = jev._parse_markdown_hierarchy(tab_md)
+            self.assertEqual(tab_depth[5], 2)
+            self.assertIn(5, tab_tb)
+
+            # (3) Settle-window TimeoutError on Poll #2 returns postcondition_unmet (not halted),
+            # handle_observe forwards walk_timeout_ms to driver timeout_s, and LoopbackTypeSafeProxy honors route.timeout_ms
+            class SettleExpireAndObserveTimeoutDriver:
+                def __init__(self):
+                    self.session_id = ""
+                    self.timeout_ms = 5000
+                    self.snap_seq = 0
+                    self.dispatched = False
+                    self.post_count = 0
+                    self.observe_timeouts: list[object] = []
+
+                def close(self):
+                    pass
+
+                def call_tool(self, name, args, **kwargs):
+                    if name == "list_windows":
+                        return {"content": [{"type": "text", "text": "[]"}], "structuredContent": {"windows": []}}
+                    if name == "get_window_state":
+                        self.observe_timeouts.append(kwargs.get("timeout_s"))
+                        if self.dispatched:
+                            self.post_count += 1
+                            if self.post_count >= 2:
+                                raise TimeoutError("cua-driver read timed out at settle deadline")
+                        self.snap_seq += 1
+                        snap = f"s0000ef{self.snap_seq:02x}"
+                        md = '- [0] AXWindow "SettleSoft"\n  - AXStaticText = "State: Pending"\n  - [3] AXButton (Run) [actions=[press]]'
+                        return {
+                            "content": [{"type": "text", "text": md}],
+                            "structuredContent": {
+                                "pid": 402,
+                                "window_id": 802,
+                                "snapshot_id": snap,
+                                "elements_complete": True,
+                                "truncated": False,
+                                "tree_markdown": md,
+                                "elements": [
+                                    {"element_index": 0, "role": "AXWindow", "label": "SettleSoft", "actions": ["AXRaise"]},
+                                    {"element_index": 3, "role": "AXButton", "label": "Run", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                ],
+                            },
+                        }
+                    self.dispatched = True
+                    return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+            def fake_run3_post(req, _timeout):
+                body = json.loads(req.data.decode("utf-8"))
+                c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+                rem = [cid for cid in c_ids if cid != "ax.3.run"]
+                probs = {"ax.3.run": 0.98, **{cid: round(0.02 / max(1, len(rem)), 6) for cid in rem}}
+                return 200, json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "answers": {"candidate": {"type": "choice", "choice": "ax.3.run", "confidence": 0.98, "probabilities": probs}},
+                        "usage": {"input_tokens": 40, "output_tokens": 4},
+                    }
+                )
+
+            drv_soft = SettleExpireAndObserveTimeoutDriver()
+            srv_soft = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "soft.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_run3_post,
+                driver_client=drv_soft,
+            )
+            try:
+                obs_long = srv_soft.handle_observe(
+                    {"pid": 402, "window_id": 802, "walk_timeout_ms": 9000, "discover_windows": False}
+                )["structuredContent"]
+                self.assertEqual(obs_long["status"], "ok")
+                self.assertGreaterEqual(float(drv_soft.observe_timeouts[-1]), 10.0)
+
+                res_soft = srv_soft.handle_step(
+                    {
+                        "pid": 402,
+                        "window_id": 802,
+                        "goal": "Click Run",
+                        "wait_timeout_ms": 350,
+                        "expected_postcondition": {"static_text_contains": "State: Done"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_soft["status"], "postcondition_unmet")
+                self.assertFalse(res_soft["uncertain_side_effect"])
+                self.assertFalse(srv_soft.accounting.halted)
+            finally:
+                srv_soft.close()
+
+            seen_proxy_timeouts: list[float] = []
+
+            def fake_proxy_post(_req, timeout_s):
+                seen_proxy_timeouts.append(float(timeout_s))
+                return 200, json.dumps(
+                    {
+                        "answers": {"target": {"type": "choice", "choice": "@s1:e1", "probabilities": {"@s1:e1": 0.99}}},
+                        "usage": {"input_tokens": 20, "output_tokens": 4},
+                    }
+                )
+
+            spend_to = bench_mod.SpendTracker(max_budget_usd=1.0)
+            proxy_to = bench_mod.LoopbackTypeSafeProxy(
+                spend_to,
+                env={"TYPESAFE_API_KEY": "fake-key", "AGY_CUA_JEV_TIMEOUT_MS": "4200"},
+                http_post=fake_proxy_post,
+            )
+            try:
+                p_req = urllib.request.Request(
+                    proxy_to.base_url,
+                    data=b'{"state":{"goal":"ok"}}',
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(p_req, timeout=5.0) as resp:
+                    self.assertEqual(resp.status, 200)
+                self.assertEqual(seen_proxy_timeouts, [4.2])
+            finally:
+                proxy_to.close()
+
+            # (4) Prompt-size budget: 240 verbose multibyte elements + 240 verbose container-enriched candidates (>160 KB raw)
+            # compacts deterministically within V2_MAX_JSON_BYTES (131,072 bytes) without candidate_refused
+            class HeavyPromptDriver:
+                def __init__(self):
+                    self.session_id = ""
+                    self.timeout_ms = 5000
+                    self.snap_seq = 0
+
+                def close(self):
+                    pass
+
+                def call_tool(self, name, _args, **_kwargs):
+                    if name == "list_windows":
+                        return {"content": [{"type": "text", "text": "[]"}], "structuredContent": {"windows": []}}
+                    if name == "get_window_state":
+                        self.snap_seq += 1
+                        snap = f"s0000fb{self.snap_seq:02x}"
+                        c_path_lbl = "Enterprise Workspace — Região Primária > Subsistema Operacional Avançado > Painel de Controle Detalhado"
+                        md_lines = [
+                            '- [0] AXWindow "HeavyWin"',
+                            f'  - AXGroup "{c_path_lbl}"',
+                        ]
+                        elems = [{"element_index": 0, "role": "AXWindow", "label": "HeavyWin", "actions": ["AXRaise"]}]
+                        for idx in range(1, 241):
+                            lbl = f"Configuração Operacional Detalhada Número {idx:03d} — Aplicar Política de Roteamento Regional"
+                            md_lines.append(f'    - [{idx}] AXButton "{lbl}" [actions=[press]]')
+                            elems.append(
+                                {
+                                    "element_index": idx,
+                                    "role": "AXButton",
+                                    "label": lbl,
+                                    "value": "EstadoAtualExtenso=" + ("Ω" * 90),
+                                    "enabled": True,
+                                    "actions": ["AXPress"],
+                                }
+                            )
+                        md = "\n".join(md_lines)
+                        return {
+                            "content": [{"type": "text", "text": md}],
+                            "structuredContent": {
+                                "pid": 403,
+                                "window_id": 803,
+                                "snapshot_id": snap,
+                                "elements_complete": True,
+                                "truncated": False,
+                                "tree_markdown": md,
+                                "elements": elems,
+                            },
+                        }
+                    return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+            captured_wire_sizes: list[int] = []
+
+            def fake_heavy_post(req, _timeout):
+                captured_wire_sizes.append(len(req.data))
+                body = json.loads(req.data.decode("utf-8"))
+                c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+                # All 240 executable candidates + reobserve + abstain = 242 must be preserved
+                self.assertEqual(len(c_ids), 242)
+                chosen = c_ids[0]
+                rem = [cid for cid in c_ids if cid != chosen]
+                probs = {chosen: 0.99, **{cid: round(0.01 / max(1, len(rem)), 6) for cid in rem}}
+                return 200, json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "answers": {"candidate": {"type": "choice", "choice": chosen, "confidence": 0.99, "probabilities": probs}},
+                        "usage": {"input_tokens": 900, "output_tokens": 5},
+                    }
+                )
+
+            drv_heavy = HeavyPromptDriver()
+            srv_heavy = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "heavy.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_heavy_post,
+                driver_client=drv_heavy,
+            )
+            try:
+                res_heavy = srv_heavy.handle_step(
+                    {"pid": 403, "window_id": 803, "goal": "Click candidate 001"}
+                )["structuredContent"]
+                self.assertIn(res_heavy["status"], {"dispatched", "state_changed"})
+                self.assertEqual(len(captured_wire_sizes), 1)
+            finally:
+                srv_heavy.close()
+
 
 if __name__ == "__main__":
     unittest.main()

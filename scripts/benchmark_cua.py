@@ -2861,8 +2861,9 @@ class LoopbackTypeSafeProxy:
                     method="POST",
                 )
                 t0 = time.perf_counter()
+                upstream_timeout_s = max(1.0, proxy_ref.route.timeout_ms / 1000.0)
                 try:
-                    status, resp_text = proxy_ref._http_post(req, 15.0)
+                    status, resp_text = proxy_ref._http_post(req, upstream_timeout_s)
                 except Exception as exc:
                     code = getattr(exc, "code", 0)
                     with proxy_ref._lock:
