@@ -6126,6 +6126,211 @@ class StdioEndToEndTest(unittest.TestCase):
             finally:
                 srv_amb.close()
 
+    def test_v2_round5_host_reap_canary_abort_focus_join_and_query_prefix(self):
+        """Regression coverage for Copilot Round-5 findings:
+        1) Detached `process_group(0)` (`start_new_session=True`) `command_host` stopped & verified on timeout,
+           and benchmark halts (`RuntimeError`) if host cleanup cannot be confirmed.
+        2) `_run_ad_cli` & `_run_jev_node_helper` reject canary-bearing output before returning (`proxy.raise_if_error()` first).
+        3) `FocusMonitor.__exit__` waits for slow in-flight worker probes before taking final sample and freezes counters.
+        4) `_expand_direct_observation_elements` restricts `max_elements` expansion strictly to the matched `query` prefix.
+        5) `bench_fixture.swift` updates `lastTextValues` when recording commit snapshots so pre-commit AX writes do not clear `applied_snapshot`.
+        """
+        import re
+        import shutil
+        import threading
+        import time
+        from pathlib import Path
+
+        bench_path = os.path.join(ROOT, "scripts", "benchmark_cua.py")
+        b_loader = importlib.machinery.SourceFileLoader("benchmark_cua_round5_test", bench_path)
+        b_spec = importlib.util.spec_from_loader("benchmark_cua_round5_test", b_loader)
+        bench_mod = importlib.util.module_from_spec(b_spec)
+        sys.modules["benchmark_cua_round5_test"] = bench_mod
+        b_loader.exec_module(bench_mod)
+
+        # (1) Detached `start_new_session=True` command_host holding owner.lock + .sock inside _AD_BENCH_TMPDIR
+        ad_tmp = bench_mod._create_ad_isolated_tmpdir()
+        try:
+            pid_record = ad_tmp / "detached_host.pid"
+            host_sub = ad_tmp / f"agent-desktop-host-{os.getuid()}"
+            host_sub.mkdir(mode=0o700, parents=True, exist_ok=True)
+            lock_file = host_sub / "deadbeef01234567.owner.lock"
+            sock_file = host_sub / "deadbeef01234567.sock"
+            detached_host_code = (
+                "import fcntl, os, socket, time; "
+                f"lf = open({str(lock_file)!r}, 'w'); "
+                "fcntl.flock(lf, fcntl.LOCK_EX); "
+                f"s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.bind({str(sock_file)!r}); s.listen(1); "
+                f"open({str(pid_record)!r}, 'w').write(str(os.getpid())); "
+                "time.sleep(30)"
+            )
+            cli_spawner = (
+                "import subprocess, sys, time; "
+                f"subprocess.Popen([sys.executable, '-c', {detached_host_code!r}], start_new_session=True); "
+                "time.sleep(30)"
+            )
+            env_isolated = {"TMPDIR": str(ad_tmp), "_AD_BENCH_TMPDIR": str(ad_tmp)}
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._run_ad_cli(
+                    sys.executable,
+                    ["-c", cli_spawner, "click", "@s1:e1"],
+                    env=env_isolated,
+                    timeout_s=0.35,
+                )
+            self.assertTrue(pid_record.exists())
+            detached_pid = int(pid_record.read_text(encoding="utf-8").strip())
+            self.assertFalse(bench_mod._pid_is_alive(detached_pid))
+            self.assertFalse(bench_mod._is_flock_held(lock_file))
+            self.assertFalse(bench_mod._is_unix_socket_live(sock_file))
+
+            # If _stop_ad_command_host cannot confirm cleanup, timeout promotes to RuntimeError to halt benchmark
+            orig_stop = bench_mod._stop_ad_command_host
+            try:
+                bench_mod._stop_ad_command_host = lambda *_a, **_kw: False
+                with self.assertRaisesRegex(RuntimeError, "halting benchmark"):
+                    bench_mod._run_ad_cli(
+                        sys.executable,
+                        ["-c", "import time; time.sleep(5)", "click", "@s1:e1"],
+                        env=env_isolated,
+                        timeout_s=0.05,
+                    )
+            finally:
+                bench_mod._stop_ad_command_host = orig_stop
+        finally:
+            shutil.rmtree(ad_tmp, ignore_errors=True)
+
+        # (2) Canary-bearing output rejected before _run_ad_cli or _run_jev_node_helper returns
+        with self.assertRaises(bench_mod.ArmActionError) as ad_leak_ctx:
+            bench_mod._run_ad_cli(
+                sys.executable,
+                [
+                    "-c",
+                    'import json; print(json.dumps({"ok": True, "data": {"val": "CANARY-VAULT-SECRET-9941"}}))',
+                    "snapshot",
+                ],
+                env={},
+            )
+        self.assertTrue(ad_leak_ctx.exception.canary_leaked)
+
+        spend = bench_mod.SpendTracker(max_budget_usd=1.0)
+        proxy = bench_mod.LoopbackTypeSafeProxy(
+            spend,
+            env={"TYPESAFE_API_KEY": "fake-test-key"},
+        )
+        try:
+            with self.assertRaises(bench_mod.ArmActionError) as jev_leak_ctx:
+                bench_mod._run_jev_node_helper(
+                    [sys.executable, "-c", 'print("{\\"stop\\":\\"done\\",\\"leak\\":\\"CANARY-VAULT-SECRET-9941\\"}")'],
+                    env={},
+                    proxy=proxy,
+                    timeout_s=5.0,
+                    tool_name="jev_desktop_run",
+                )
+            self.assertTrue(jev_leak_ctx.exception.canary_leaked)
+            self.assertTrue(proxy.canary_leaked)
+
+            # proxy.raise_if_error() still takes precedence over ArmActionError when both occur
+            proxy.budget_exc.append(RuntimeError("Proxy budget limit hit"))
+            with self.assertRaisesRegex(RuntimeError, "Proxy budget limit hit"):
+                bench_mod._run_jev_node_helper(
+                    [sys.executable, "-c", 'print("CANARY-VAULT-SECRET-9941")'],
+                    env={},
+                    proxy=proxy,
+                    timeout_s=5.0,
+                    tool_name="jev_desktop_act",
+                )
+            proxy.budget_exc.clear()
+        finally:
+            proxy.close()
+
+        # (3) FocusMonitor.__exit__ waits for slow in-flight worker sample before taking final sample
+        orig_sample = bench_mod.sample_frontmost_info
+        call_lock = threading.Lock()
+        call_num = 0
+        worker_entered = threading.Event()
+
+        def slow_worker_sample():
+            nonlocal call_num
+            with call_lock:
+                call_num += 1
+                idx = call_num
+            if idx == 1:
+                return (900, "com.apple.Terminal")
+            if idx == 2:
+                worker_entered.set()
+                time.sleep(0.25)
+                return (100, "com.agycua.benchfixture")
+            return (900, "com.apple.Terminal")
+
+        try:
+            bench_mod.sample_frontmost_info = slow_worker_sample
+            with bench_mod.FocusMonitor(target_pid=100, target_bundle="com.agycua.benchfixture", interval_s=0.5) as fmon:
+                self.assertTrue(worker_entered.wait(timeout=2.0))
+            # Worker violation (call 2) + final synchronous sample (call 3) must both be complete before __exit__ returns
+            self.assertFalse(fmon._thread.is_alive())
+            self.assertEqual(fmon.violations, 1)
+            self.assertEqual(fmon.samples, 3)
+            self.assertEqual(fmon.probe_errors, 0)
+        finally:
+            bench_mod.sample_frontmost_info = orig_sample
+
+        # (4) _expand_direct_observation_elements preserves query filtering under large req_max_elements
+        q_raw_els = [
+            {"element_index": 1, "role": "AXTextField", "label": "Incident Ticket ID", "value": "", "enabled": True, "actions": ["AXConfirm"]},
+            *[
+                {"element_index": 10 + i, "role": "AXButton", "label": f"Inspect Row {i:02d}", "enabled": True, "actions": ["AXPress"]}
+                for i in range(1, 21)
+            ],
+        ]
+        q_ws = {
+            "structuredContent": {
+                "pid": 222,
+                "window_id": 822,
+                "snapshot_id": "s0000ab90",
+                "app_name": "BenchFixture",
+                "window_title": "AGYCuaBench-dense-hierarchy",
+                "elements_complete": True,
+                "truncated": False,
+                "elements": q_raw_els,
+                "tree_markdown": '- AXWindow "AGYCuaBench-dense-hierarchy"\n',
+            }
+        }
+        obs_one = bench_mod.jev_mod.extract_window_observation(q_ws, expected_pid=222, expected_window_id=822, query="Incident Ticket ID")
+        expanded_one = bench_mod._expand_direct_observation_elements(obs_one, 500)
+        self.assertEqual([e["element_index"] for e in expanded_one], [1])
+
+        obs_zero = bench_mod.jev_mod.extract_window_observation(q_ws, expected_pid=222, expected_window_id=822, query="NonExistentWidget")
+        expanded_zero = bench_mod._expand_direct_observation_elements(obs_zero, 500)
+        self.assertEqual(expanded_zero, [])
+
+        wide_raw_els = [
+            {"element_index": i, "role": "AXButton", "label": f"Btn {i}", "enabled": True, "actions": ["AXPress"]}
+            for i in range(1, 75)
+        ]
+        wide_ws = {
+            "structuredContent": {
+                "pid": 222,
+                "window_id": 822,
+                "snapshot_id": "s0000ab91",
+                "app_name": "BenchFixture",
+                "window_title": "WideWindow",
+                "elements_complete": True,
+                "truncated": False,
+                "elements": wide_raw_els,
+                "tree_markdown": '- AXWindow "WideWindow"\n',
+            }
+        }
+        obs_wide = bench_mod.jev_mod.extract_window_observation(wide_ws, expected_pid=222, expected_window_id=822)
+        self.assertEqual(len(obs_wide["elements"]), 64)
+        expanded_wide = bench_mod._expand_direct_observation_elements(obs_wide, 70)
+        self.assertEqual(len(expanded_wide), 70)
+
+        # (5) bench_fixture.swift updates lastTextValues inside denseApplyClicked before recording applied_snapshot
+        fixture_src = (Path(ROOT) / "scripts" / "bench_fixture.swift").read_text(encoding="utf-8")
+        m_apply = re.search(r"func denseApplyClicked\([^)]*\)\s*\{(.*?)\n    \}", fixture_src, flags=re.DOTALL)
+        self.assertIsNotNone(m_apply)
+        self.assertIn("lastTextValues = currentTextValues()", m_apply.group(1))
+
 
 if __name__ == "__main__":
     unittest.main()

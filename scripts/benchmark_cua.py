@@ -14,16 +14,20 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fcntl
 import importlib.machinery
 import importlib.util
 import io
 import json
 import os
 import re
+import shutil
 import signal
+import socket
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -521,50 +525,74 @@ class FocusMonitor:
         self.violations = 0
         self.probe_errors = 0
         self.samples = 0
+        self._lock = threading.Lock()
+        self._closed = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     def register_pid(self, pid: int | None, bundle_id: str | None = None) -> None:
-        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
-            self.extra_pids.add(pid)
-        if isinstance(bundle_id, str) and bundle_id.strip():
-            self.extra_bundles.add(bundle_id.strip())
+        with self._lock:
+            if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+                self.extra_pids.add(pid)
+            if isinstance(bundle_id, str) and bundle_id.strip():
+                self.extra_bundles.add(bundle_id.strip())
+
+    def _sample_once_internal(self, *, from_worker: bool = False) -> None:
+        f_pid, f_bundle = sample_frontmost_info()
+        with self._lock:
+            if from_worker and self._closed:
+                return
+            self.samples += 1
+            if f_pid is None:
+                self.probe_errors += 1
+                return
+            if self.initial_front_pid is None:
+                self.initial_front_pid = f_pid
+                self.initial_front_bundle = f_bundle
+            monitored_pids = {self.target_pid, *self.extra_pids}
+            monitored_bundles = ({self.target_bundle} if self.target_bundle else set()) | self.extra_bundles
+            is_target = f_pid in monitored_pids or (bool(f_bundle) and f_bundle in monitored_bundles)
+            if not is_target and self.monitor_browser and f_bundle:
+                b_low = f_bundle.lower()
+                if any(tok in b_low for tok in ("chromium", "chrome", "webkit", "safari")) and f_pid != self.initial_front_pid:
+                    is_target = True
+            if is_target:
+                self.violations += 1
 
     def sample_once(self) -> None:
-        self.samples += 1
-        f_pid, f_bundle = sample_frontmost_info()
-        if f_pid is None:
-            self.probe_errors += 1
-            return
-        if self.initial_front_pid is None:
-            self.initial_front_pid = f_pid
-            self.initial_front_bundle = f_bundle
-        monitored_pids = {self.target_pid, *self.extra_pids}
-        monitored_bundles = ({self.target_bundle} if self.target_bundle else set()) | self.extra_bundles
-        is_target = f_pid in monitored_pids or (bool(f_bundle) and f_bundle in monitored_bundles)
-        if not is_target and self.monitor_browser and f_bundle:
-            b_low = f_bundle.lower()
-            if any(tok in b_low for tok in ("chromium", "chrome", "webkit", "safari")) and f_pid != self.initial_front_pid:
-                is_target = True
-        if is_target:
-            self.violations += 1
+        self._sample_once_internal(from_worker=False)
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            self.sample_once()
+            self._sample_once_internal(from_worker=True)
             self._stop.wait(self.interval_s)
 
     def __enter__(self) -> FocusMonitor:
-        self.sample_once()
+        with self._lock:
+            self._closed = False
+        self._sample_once_internal(from_worker=False)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         self._stop.set()
+        worker_hung = False
         if self._thread is not None:
-            self._thread.join(timeout=2.0)
-        self.sample_once()
+            # sample_frontmost_info runs up to 2 attempts x 3.5s = 7.0s max; wait until worker finishes
+            self._thread.join(timeout=8.5)
+            if self._thread.is_alive():
+                worker_hung = True
+        with self._lock:
+            if worker_hung:
+                self._closed = True
+                self.probe_errors += 1
+        if not worker_hung:
+            self._sample_once_internal(from_worker=False)
+        with self._lock:
+            self._closed = True
+        if worker_hung and exc_type is None:
+            raise RuntimeError("FocusMonitor worker did not finish within 8.5s; focus counters uncertain")
 
 
 def get_window_screenshot_and_size(driver: jev_mod.DriverClient, pid: int, window_id: int) -> tuple[bytes, int, int, dict[str, Any]]:
@@ -1136,6 +1164,34 @@ class ArmActionError(RuntimeError):
     """An arm-local failed/uncertain action outcome. The arm is recorded as FAIL and no call is retried;
     the next arm starts from a freshly launched target. Budget/provider errors are NOT this type and stop the run."""
 
+    def __init__(self, message: str, *, canary_leaked: bool = False) -> None:
+        super().__init__(message)
+        self.canary_leaked = bool(canary_leaked)
+
+
+def _expand_direct_observation_elements(
+    obs: Mapping[str, Any],
+    req_max_elements: int | None,
+) -> list[dict[str, Any]]:
+    """Expand direct-arm elements up to `req_max_elements` while strictly preserving any `query` filter."""
+    els = list(obs.get("elements") or [])
+    if req_max_elements is None or req_max_elements <= len(els):
+        return els
+    raw_matched = obs.get("matched_elements_count")
+    if isinstance(raw_matched, int) and not isinstance(raw_matched, bool) and raw_matched >= 0:
+        matched_prefix = list(obs.get("all_elements") or [])[:raw_matched]
+    elif obs.get("query") is not None:
+        return els
+    else:
+        matched_prefix = list(obs.get("all_elements") or [])
+    all_els = [
+        e for e in matched_prefix
+        if e.get("can_click") or "set_value" in (e.get("supported_actions") or [])
+    ]
+    if len(all_els) > len(els):
+        return all_els[:req_max_elements]
+    return els
+
 
 def checked_call(driver: Any, tool: str, args: dict[str, Any]) -> dict[str, Any]:
     """Dispatch a mutating driver tool and fail closed on `isError` receipts.
@@ -1639,14 +1695,7 @@ def run_arm_agy_cua_direct(
         if audit_observation_for_canary(obs):
             canary_leaked = True
         snap = obs["snapshot_id"]
-        els = list(obs.get("elements") or [])
-        if req_max_elements is not None and req_max_elements > len(els):
-            all_els = [
-                e for e in (obs.get("all_elements") or [])
-                if e.get("can_click") or "set_value" in (e.get("supported_actions") or [])
-            ]
-            if len(all_els) > len(els):
-                els = all_els[:req_max_elements]
+        els = _expand_direct_observation_elements(obs, req_max_elements)
         lines = [
             f"snapshot_id: {snap} (pid={pid}, window_id={wid_val})",
             f"observation_truncated: {obs.get('observation_truncated', False)} (omitted_elements_count={obs.get('omitted_elements_count', 0)}, query_status={obs.get('query_status')!r})",
@@ -1943,12 +1992,14 @@ def run_arm_agy_cua_direct(
                         )
                         break
             try:
-                obs = jev_mod.extract_window_observation(
-                    ws,
-                    expected_pid=pid,
-                    expected_window_id=active_wid,
-                    query=q_arg.strip() if isinstance(q_arg, str) and q_arg.strip() else None,
-                )
+                obs_kwargs: dict[str, Any] = {
+                    "expected_pid": pid,
+                    "expected_window_id": active_wid,
+                    "query": q_arg.strip() if isinstance(q_arg, str) and q_arg.strip() else None,
+                }
+                if req_max_el is not None and req_max_el > 0:
+                    obs_kwargs["max_elements_cap"] = req_max_el
+                obs = jev_mod.extract_window_observation(ws, **obs_kwargs)
             except ValueError as exc:
                 raise ArmActionError(str(exc)) from exc
             observe_latencies_ms.append(round((time.perf_counter() - t_o) * 1000, 2))
@@ -3067,6 +3118,256 @@ def _run_grouped_subprocess(
     return subprocess.CompletedProcess(proc.args, proc.returncode, out or "", err or "")
 
 
+def _create_ad_isolated_tmpdir() -> Path:
+    """Create a short, private (0o700), symlink-free temp dir so `agent-desktop`'s command_host socket is arm-isolated."""
+    private_tmp = Path("/private/tmp")
+    base = private_tmp if private_tmp.is_dir() else Path(tempfile.gettempdir()).resolve()
+    created = Path(tempfile.mkdtemp(prefix="ad_t_", dir=str(base))).resolve()
+    created.chmod(0o700)
+    return created
+
+
+def _is_flock_held(lock_path: Path) -> bool:
+    try:
+        fd = os.open(str(lock_path), os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        return True
+    else:
+        return False
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _is_unix_socket_live(sock_path: Path) -> bool:
+    try:
+        st = sock_path.lstat()
+    except OSError:
+        return False
+    import stat as _stat_mod
+
+    if not _stat_mod.S_ISSOCK(st.st_mode):
+        return False
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.1)
+        try:
+            sock.connect(str(sock_path))
+            return True
+        except OSError:
+            return False
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 1:
+        return False
+    try:
+        reaped_pid, _ = os.waitpid(pid, os.WNOHANG)
+        if reaped_pid == pid:
+            return False
+    except (ChildProcessError, OSError):
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        ps_res = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "state="],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+        if ps_res.returncode != 0:
+            return False
+        if ps_res.stdout.strip().upper().startswith("Z"):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _discover_ad_host_pids(search_roots: list[Path]) -> set[int]:
+    pids: set[int] = set()
+    self_pid = os.getpid()
+    reg_files: list[str] = []
+    sock_prefixes: list[str] = []
+    for root in search_roots:
+        if not root.exists():
+            continue
+        sock_prefixes.append(str(root.resolve()) + os.sep)
+        try:
+            for item in root.rglob("*"):
+                if item.is_symlink():
+                    continue
+                if item.is_file():
+                    reg_files.append(str(item))
+        except OSError:
+            continue
+    if reg_files:
+        try:
+            res = subprocess.run(
+                ["lsof", "-n", "-P", "-t", "--", *reg_files[:64]],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                check=False,
+            )
+            for tok in (res.stdout or "").split():
+                if tok.isdigit():
+                    cand = int(tok)
+                    if cand > 1 and cand != self_pid:
+                        pids.add(cand)
+        except Exception:
+            pass
+    if sock_prefixes:
+        try:
+            ures = subprocess.run(
+                ["lsof", "-n", "-P", "-U", "-F", "pn"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                check=False,
+            )
+            cur_pid: int | None = None
+            for raw_ln in (ures.stdout or "").splitlines():
+                if raw_ln.startswith("p") and raw_ln[1:].isdigit():
+                    cur_pid = int(raw_ln[1:])
+                elif raw_ln.startswith("n") and cur_pid is not None and cur_pid > 1 and cur_pid != self_pid:
+                    spath = raw_ln[1:].strip()
+                    if any(spath.startswith(pref) for pref in sock_prefixes):
+                        pids.add(cur_pid)
+        except Exception:
+            pass
+    # Include direct children of discovered host PIDs before terminating them
+    for hpid in list(pids):
+        try:
+            cres = subprocess.run(
+                ["pgrep", "-P", str(hpid)],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+                check=False,
+            )
+            for tok in (cres.stdout or "").split():
+                if tok.isdigit():
+                    cpid = int(tok)
+                    if cpid > 1 and cpid != self_pid:
+                        pids.add(cpid)
+        except Exception:
+            pass
+    return pids
+
+
+def _stop_ad_command_host(env: Mapping[str, str], *, after_timeout: bool = False) -> bool:
+    """Stop any arm-owned `agent-desktop` `command_host` (`process_group(0)`) and confirm its locks/sockets are idle.
+
+    Returns True only when the isolated host directory is confirmed inactive; returns False if cleanup cannot be
+    confirmed so callers can halt the benchmark instead of advancing with pending AX executor work.
+    """
+    raw_tmp = env.get("_AD_BENCH_TMPDIR")
+    if not isinstance(raw_tmp, str) or not raw_tmp.strip():
+        return False
+    ad_tmp = Path(raw_tmp)
+    search_roots: list[Path] = [ad_tmp]
+    raw_home = env.get("AGENT_DESKTOP_HOME")
+    if isinstance(raw_home, str) and raw_home.strip():
+        hp = Path(raw_home)
+        if hp.exists() and not hp.is_symlink():
+            search_roots.append(hp)
+
+    def _has_entries() -> bool:
+        for r in search_roots:
+            if not r.exists():
+                continue
+            try:
+                if any(True for _ in r.rglob("*")):
+                    return True
+            except OSError:
+                continue
+        return False
+
+    if after_timeout:
+        time.sleep(0.04)
+    if not _has_entries():
+        return True
+
+    def _any_host_activity() -> bool:
+        for r in search_roots:
+            if not r.exists():
+                continue
+            try:
+                for p in r.rglob("*"):
+                    if p.is_symlink():
+                        continue
+                    if p.suffix == ".lock" and _is_flock_held(p):
+                        return True
+                    if p.suffix == ".sock" and _is_unix_socket_live(p):
+                        return True
+            except OSError:
+                return True
+        return False
+
+    discovered_pids = _discover_ad_host_pids(search_roots)
+    if not _any_host_activity() and not discovered_pids:
+        return True
+
+    all_seen_pids: set[int] = set(discovered_pids)
+    for sig, wait_budget_s in ((signal.SIGTERM, 0.5), (signal.SIGKILL, 0.5)):
+        cur_pids = _discover_ad_host_pids(search_roots) | {p for p in all_seen_pids if _pid_is_alive(p)}
+        all_seen_pids |= cur_pids
+        for hpid in cur_pids:
+            if hasattr(os, "killpg"):
+                try:
+                    os.killpg(hpid, sig)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+            try:
+                os.kill(hpid, sig)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        deadline = time.monotonic() + wait_budget_s
+        while time.monotonic() < deadline:
+            if not _any_host_activity() and all(not _pid_is_alive(p) for p in all_seen_pids):
+                break
+            time.sleep(0.025)
+        if not _any_host_activity() and all(not _pid_is_alive(p) for p in all_seen_pids):
+            break
+
+    late_pids = _discover_ad_host_pids(search_roots)
+    if late_pids:
+        all_seen_pids |= late_pids
+        for hpid in late_pids:
+            if hasattr(os, "killpg"):
+                try:
+                    os.killpg(hpid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+            try:
+                os.kill(hpid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        deadline2 = time.monotonic() + 0.25
+        while time.monotonic() < deadline2:
+            if not _any_host_activity() and all(not _pid_is_alive(p) for p in all_seen_pids):
+                break
+            time.sleep(0.02)
+
+    return (not _any_host_activity()) and all(not _pid_is_alive(p) for p in all_seen_pids)
+
+
 def _run_ad_cli(
     ad_bin: Path | str,
     argv: list[str],
@@ -3078,49 +3379,78 @@ def _run_ad_cli(
         raise ArmActionError("headed_or_cursor_forbidden_in_background_mode")
     subcmd = _extract_ad_subcommand(argv)
     is_read_only = subcmd in AD_READ_ONLY_COMMANDS
+    call_env = dict(env)
+    owned_tmp: Path | None = None
+    if not call_env.get("_AD_BENCH_TMPDIR"):
+        owned_tmp = _create_ad_isolated_tmpdir()
+        call_env["TMPDIR"] = str(owned_tmp)
+        call_env["_AD_BENCH_TMPDIR"] = str(owned_tmp)
     try:
-        proc = _run_grouped_subprocess([str(ad_bin), *argv], env=env, timeout_s=timeout_s)
-    except subprocess.TimeoutExpired as exc:
-        out_txt = _coerce_proc_text(exc.stdout) + "\n" + _coerce_proc_text(exc.stderr)
-        kind = "read" if is_read_only else "mutating"
-        suffix = "; canary_leaked=True" if contains_secret_canary(out_txt) else ""
-        raise ArmActionError(
-            f"agent-desktop {kind} command {subcmd!r} timed out after {timeout_s}s; action outcome unknown{suffix}"
-        ) from exc
-    raw_out = (proc.stdout or "").strip()
-    raw_err = (proc.stderr or "").strip()
-    leaked = contains_secret_canary(raw_out) or contains_secret_canary(raw_err)
-    parsed: Any
-    if not raw_out:
-        parsed = {"ok": False, "error": {"code": "EMPTY_STDOUT", "message": raw_err[:200]}}
-    else:
         try:
-            loaded = json.loads(raw_out)
-            parsed = loaded if isinstance(loaded, dict) else {"ok": False, "error": {"code": "INVALID_JSON", "message": raw_out[:200]}}
-        except ValueError:
-            parsed = {"ok": False, "error": {"code": "INVALID_JSON", "message": raw_out[:200]}}
+            proc = _run_grouped_subprocess([str(ad_bin), *argv], env=call_env, timeout_s=timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            host_stopped = _stop_ad_command_host(call_env, after_timeout=True)
+            out_txt = _coerce_proc_text(exc.stdout) + "\n" + _coerce_proc_text(exc.stderr)
+            leaked_to = contains_secret_canary(out_txt)
+            kind = "read" if is_read_only else "mutating"
+            suffix = "; canary_leaked=True" if leaked_to else ""
+            if not host_stopped:
+                raise RuntimeError(
+                    f"agent-desktop {kind} command {subcmd!r} timed out after {timeout_s}s and command_host "
+                    f"could not be confirmed stopped; halting benchmark{suffix}"
+                ) from exc
+            raise ArmActionError(
+                f"agent-desktop {kind} command {subcmd!r} timed out after {timeout_s}s; action outcome unknown{suffix}",
+                canary_leaked=leaked_to,
+            ) from exc
+        raw_out = (proc.stdout or "").strip()
+        raw_err = (proc.stderr or "").strip()
+        leaked = contains_secret_canary(raw_out) or contains_secret_canary(raw_err)
+        parsed: Any
+        if not raw_out:
+            parsed = {"ok": False, "error": {"code": "EMPTY_STDOUT", "message": raw_err[:200]}}
+        else:
+            try:
+                loaded = json.loads(raw_out)
+                parsed = loaded if isinstance(loaded, dict) else {"ok": False, "error": {"code": "INVALID_JSON", "message": raw_out[:200]}}
+            except ValueError:
+                parsed = {"ok": False, "error": {"code": "INVALID_JSON", "message": raw_out[:200]}}
 
-    if not is_read_only:
-        suffix = "; canary_leaked=True" if leaked else ""
-        if proc.returncode != 0 and bool(parsed.get("ok")):
+        if not is_read_only:
+            suffix = "; canary_leaked=True" if leaked else ""
+            if proc.returncode != 0 and bool(parsed.get("ok")):
+                raise ArmActionError(
+                    f"agent-desktop mutating command {subcmd!r} exited {proc.returncode} despite ok=true; action outcome unknown{suffix}",
+                    canary_leaked=leaked,
+                )
+            data_obj = parsed.get("data") if isinstance(parsed.get("data"), Mapping) else {}
+            data_disp = data_obj.get("disposition") if isinstance(data_obj.get("disposition"), Mapping) else {}
+            if data_disp.get("delivery") == "delivery_uncertain":
+                raise ArmActionError(
+                    f"agent-desktop mutating command {subcmd!r} reported delivery_uncertain; action outcome unknown{suffix}",
+                    canary_leaked=leaked,
+                )
+            if not bool(parsed.get("ok")) and not _is_ad_retry_safe(parsed):
+                err_obj = parsed.get("error") if isinstance(parsed.get("error"), Mapping) else {}
+                code = err_obj.get("code")
+                disp = err_obj.get("disposition") if isinstance(err_obj.get("disposition"), Mapping) else {}
+                raise ArmActionError(
+                    f"agent-desktop mutating command {subcmd!r} failed without safe retry disposition "
+                    f"(code={code!r}, retry={disp.get('retry')!r}); action outcome unknown{suffix}",
+                    canary_leaked=leaked,
+                )
+        if leaked:
             raise ArmActionError(
-                f"agent-desktop mutating command {subcmd!r} exited {proc.returncode} despite ok=true; action outcome unknown{suffix}"
+                f"agent-desktop command {subcmd!r} output contained secret canary; aborting arm before planner exposure",
+                canary_leaked=True,
             )
-        data_obj = parsed.get("data") if isinstance(parsed.get("data"), Mapping) else {}
-        data_disp = data_obj.get("disposition") if isinstance(data_obj.get("disposition"), Mapping) else {}
-        if data_disp.get("delivery") == "delivery_uncertain":
-            raise ArmActionError(
-                f"agent-desktop mutating command {subcmd!r} reported delivery_uncertain; action outcome unknown{suffix}"
-            )
-        if not bool(parsed.get("ok")) and not _is_ad_retry_safe(parsed):
-            err_obj = parsed.get("error") if isinstance(parsed.get("error"), Mapping) else {}
-            code = err_obj.get("code")
-            disp = err_obj.get("disposition") if isinstance(err_obj.get("disposition"), Mapping) else {}
-            raise ArmActionError(
-                f"agent-desktop mutating command {subcmd!r} failed without safe retry disposition "
-                f"(code={code!r}, retry={disp.get('retry')!r}); action outcome unknown{suffix}"
-            )
-    return parsed, leaked
+        return parsed, False
+    finally:
+        if owned_tmp is not None:
+            host_ok = _stop_ad_command_host(call_env, after_timeout=False)
+            shutil.rmtree(owned_tmp, ignore_errors=True)
+            if not host_ok and sys.exc_info()[0] is None:
+                raise RuntimeError("agent-desktop command_host could not be confirmed stopped after CLI invocation")
 
 
 def _run_jev_node_helper(
@@ -3131,23 +3461,50 @@ def _run_jev_node_helper(
     timeout_s: float,
     tool_name: str,
 ) -> tuple[subprocess.CompletedProcess[str], bool]:
-    """Run `scripts/jev/{run,act}.mjs` in its own process group and fail closed on timeout."""
+    """Run `scripts/jev/{run,act}.mjs` in its own process group and fail closed on timeout or canary leakage."""
+    call_env = dict(env)
+    owned_tmp: Path | None = None
+    if not call_env.get("_AD_BENCH_TMPDIR"):
+        owned_tmp = _create_ad_isolated_tmpdir()
+        call_env["TMPDIR"] = str(owned_tmp)
+        call_env["_AD_BENCH_TMPDIR"] = str(owned_tmp)
     try:
-        proc = _run_grouped_subprocess(cmd, env=env, timeout_s=timeout_s)
-    except subprocess.TimeoutExpired as exc:
-        out_txt = _coerce_proc_text(exc.stdout) + "\n" + _coerce_proc_text(exc.stderr)
-        if contains_secret_canary(out_txt):
+        try:
+            proc = _run_grouped_subprocess(cmd, env=call_env, timeout_s=timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            host_stopped = _stop_ad_command_host(call_env, after_timeout=True)
+            out_txt = _coerce_proc_text(exc.stdout) + "\n" + _coerce_proc_text(exc.stderr)
+            leaked_to = contains_secret_canary(out_txt)
+            if leaked_to:
+                with proxy._lock:
+                    proxy.canary_leaked = True
+            proxy.on_subprocess_timeout(tool_name)
+            if not host_stopped:
+                raise RuntimeError(
+                    f"{tool_name} timed out after {timeout_s}s and command_host could not be confirmed stopped; halting benchmark"
+                ) from exc
+            raise ArmActionError(
+                f"{tool_name} timed out after {timeout_s}s; action outcome unknown",
+                canary_leaked=leaked_to,
+            ) from exc
+
+        leaked = contains_secret_canary(proc.stdout or "") or contains_secret_canary(proc.stderr or "")
+        if leaked:
             with proxy._lock:
                 proxy.canary_leaked = True
-        proxy.on_subprocess_timeout(tool_name)
-        raise ArmActionError(f"{tool_name} timed out after {timeout_s}s; action outcome unknown") from exc
-
-    leaked = contains_secret_canary(proc.stdout or "") or contains_secret_canary(proc.stderr or "")
-    if leaked:
-        with proxy._lock:
-            proxy.canary_leaked = True
-    proxy.raise_if_error()
-    return proc, leaked
+        proxy.raise_if_error()
+        if leaked:
+            raise ArmActionError(
+                f"{tool_name} output contained secret canary; aborting arm before planner exposure",
+                canary_leaked=True,
+            )
+        return proc, False
+    finally:
+        if owned_tmp is not None:
+            host_ok = _stop_ad_command_host(call_env, after_timeout=False)
+            shutil.rmtree(owned_tmp, ignore_errors=True)
+            if not host_ok and sys.exc_info()[0] is None:
+                raise RuntimeError("agent-desktop command_host could not be confirmed stopped after Jev helper invocation")
 
 
 def _parse_jev_run_events(stdout_text: str, stderr_text: str) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
@@ -3230,11 +3587,14 @@ def run_arm_agent_desktop_direct(
         shutil.rmtree(ad_home, ignore_errors=True)
     ad_home.mkdir(mode=0o700, parents=True, exist_ok=True)
     ad_home.chmod(0o700)
+    ad_tmp_dir = _create_ad_isolated_tmpdir()
 
     ad_env = dict(os.environ)
     ad_env["AGENT_DESKTOP_HOME"] = str(ad_home)
     ad_env["AGENT_DESKTOP_BIN"] = str(ad_bin)
     ad_env["AGENT_DESKTOP_MACOS_HELPER_PATH"] = "/nonexistent-clipboard-disabled"
+    ad_env["TMPDIR"] = str(ad_tmp_dir)
+    ad_env["_AD_BENCH_TMPDIR"] = str(ad_tmp_dir)
     ad_env.pop("GEMINI_API_KEY", None)
     ad_env.pop("GOOGLE_API_KEY", None)
     ad_env.pop("TYPESAFE_API_KEY", None)
@@ -3576,7 +3936,12 @@ def run_arm_agent_desktop_direct(
             "trace": trace_events,
         }
     finally:
+        active_exc = sys.exc_info()[1]
+        host_stopped = _stop_ad_command_host(ad_env, after_timeout=False)
+        shutil.rmtree(ad_tmp_dir, ignore_errors=True)
         shutil.rmtree(ad_home, ignore_errors=True)
+        if not host_stopped and (active_exc is None or isinstance(active_exc, ArmActionError)):
+            raise RuntimeError("agent-desktop command_host could not be confirmed stopped during direct arm cleanup")
 
 
 def run_arm_agent_desktop_jev(
@@ -3602,12 +3967,15 @@ def run_arm_agent_desktop_jev(
         shutil.rmtree(ad_home, ignore_errors=True)
     ad_home.mkdir(mode=0o700, parents=True, exist_ok=True)
     ad_home.chmod(0o700)
+    ad_tmp_dir = _create_ad_isolated_tmpdir()
 
     proxy = LoopbackTypeSafeProxy(spend=spend)
     node_env = dict(os.environ)
     node_env["AGENT_DESKTOP_HOME"] = str(ad_home)
     node_env["AGENT_DESKTOP_BIN"] = str(ad_bin)
     node_env["AGENT_DESKTOP_MACOS_HELPER_PATH"] = "/nonexistent-clipboard-disabled"
+    node_env["TMPDIR"] = str(ad_tmp_dir)
+    node_env["_AD_BENCH_TMPDIR"] = str(ad_tmp_dir)
     node_env["TYPESAFE_BASE_URL"] = proxy.base_url
     node_env["TYPESAFE_MODEL"] = proxy.route.model
     node_env["TYPESAFE_API_KEY"] = "loopback-proxy"
@@ -3933,8 +4301,13 @@ def run_arm_agent_desktop_jev(
             "trace": trace_events,
         }
     finally:
+        active_exc = sys.exc_info()[1]
         proxy.close()
+        host_stopped = _stop_ad_command_host(node_env, after_timeout=False)
+        shutil.rmtree(ad_tmp_dir, ignore_errors=True)
         shutil.rmtree(ad_home, ignore_errors=True)
+        if not host_stopped and (active_exc is None or isinstance(active_exc, ArmActionError)):
+            raise RuntimeError("agent-desktop command_host could not be confirmed stopped during jev arm cleanup")
 
 
 def launch_target_for_task(
@@ -4441,6 +4814,7 @@ def main() -> int:
                         except Exception as exc:
                             # Persist the failed attempt and its (possibly retained) spend, then stop: no provider retry.
                             err_text = f"{type(exc).__name__}: {str(exc)[:500]}"
+                            exc_leaked = bool(getattr(exc, "canary_leaked", False)) or contains_secret_canary(err_text)
                             if contains_secret_canary(err_text):
                                 err_text = f"{type(exc).__name__}: <redacted>"
                             results.append({
@@ -4453,6 +4827,7 @@ def main() -> int:
                                 "thinking_level": active_thinking,
                                 "thinking_budget": effective_budget,
                                 "passed": False,
+                                "canary_leaked": exc_leaked,
                                 "verify_summary": f"aborted: {err_text}",
                                 "error": err_text,
                                 "wall_s": round(time.perf_counter() - t_start, 2),

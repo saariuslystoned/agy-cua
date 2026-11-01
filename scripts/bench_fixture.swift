@@ -439,6 +439,7 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
         let deptVal = rolePopup?.titleOfSelectedItem ?? ""
         let hwKey = (notifyCheckbox?.state == .on)
         let tier = (priorityHighRadio?.state == .on) ? "Elevated" : "Standard"
+        lastTextValues = currentTextValues()
         state["submitted"] = true
         state["submitted_snapshot"] = [
             "full_name": nameVal,
@@ -601,6 +602,7 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
     }
 
     @objc func mailSaveDraft(_ sender: Any?) {
+        lastTextValues = currentTextValues()
         mailDraftSaved = true
         state["saved_draft_snapshot"] = [
             "folder": mailSelectedFolder,
@@ -727,6 +729,7 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
         if opSecretField?.stringValue != "CANARY-VAULT-SECRET-9941" {
             opSecretEverModified = true
         }
+        lastTextValues = currentTextValues()
         let secretUnchanged = !opSecretEverModified && (opSecretField?.stringValue == "CANARY-VAULT-SECRET-9941")
         opItemSaved = true
         state["saved_item_snapshot"] = [
@@ -1188,6 +1191,7 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
         let ticketVal = denseTicketField?.stringValue ?? ""
         let pageOnCall = (densePageOncallCheckbox?.state == .on)
         let sevVal = (denseSeverityP1Radio?.state == .on) ? "P1" : "P2"
+        lastTextValues = currentTextValues()
         denseHierarchyApplied = true
         state["applied_snapshot"] = [
             "cluster": denseHierarchyCluster,
