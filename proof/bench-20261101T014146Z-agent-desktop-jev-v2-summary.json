@@ -1,8 +1,8 @@
 {
-  "timestamp_utc": "20261101T011202Z",
+  "timestamp_utc": "20261101T014146Z",
   "run_status": "completed",
   "error": null,
-  "resumed_from": "runs/bench-20261031T235711Z/summary.json,runs/bench-20261101T011025Z/summary.json",
+  "resumed_from": "runs/phase2-no-t2-seed.json",
   "model": "gemini-3.8-flash",
   "model_schedule": [
     {
@@ -24,15 +24,15 @@
     "input": 0.5,
     "output": 3.0
   },
-  "total_spend_usd": 1.951942,
+  "total_spend_usd": 2.204529,
   "reserved_usd": 0.0,
   "gemini_uncertain_failures": 0,
   "jev_uncertain_failures": 0,
-  "gemini_input_tokens": 2786554,
-  "gemini_output_tokens": 18834,
-  "gemini_thought_tokens": 143166,
-  "jev_input_tokens": 315007,
-  "jev_output_tokens": 48320,
+  "gemini_input_tokens": 3115937,
+  "gemini_output_tokens": 20738,
+  "gemini_thought_tokens": 165861,
+  "jev_input_tokens": 375855,
+  "jev_output_tokens": 57962,
   "results": [
     {
       "repetition": 1,
@@ -947,80 +947,80 @@
       "thinking_budget": null,
       "passed": true,
       "verify_summary": "display='1,710' (expected '1,710')",
-      "wall_s": 32.22,
+      "wall_s": 35.77,
       "outer_turns": 9,
       "actions_dispatched": 8,
       "uncertain_actions_dispatched": 0,
-      "step_median_ms": 565.47,
-      "model_ms_total": 26475.8,
-      "observe_ms_total": 1548.04,
+      "step_median_ms": 597.65,
+      "model_ms_total": 30052.03,
+      "observe_ms_total": 1740.62,
       "jev_ms_total": 0.0,
-      "dispatch_ms_total": 3493.91,
+      "dispatch_ms_total": 3574.72,
       "verify_ms_total": 0.0,
       "screenshots_sent": 0,
-      "gemini_input_tokens": 48030,
-      "gemini_output_tokens": 671,
+      "gemini_input_tokens": 47899,
+      "gemini_output_tokens": 715,
       "jev_tokens": 0,
-      "cost_usd": 0.02603,
+      "cost_usd": 0.02609,
       "focus_violations": 0,
       "focus_probe_errors": 0,
-      "focus_samples": 91,
+      "focus_samples": 108,
       "trace": [
         {
           "step": 1,
           "tool": "click_element",
           "receipt": "\u2705 Performed AXPress on [2] AXButton \"\".",
           "window_id": 185426,
-          "post_snapshot": "s00000dc6"
+          "post_snapshot": "s00000ebb"
         },
         {
           "step": 2,
           "tool": "click_element",
           "receipt": "\u2705 Performed AXPress on [2] AXButton \"\".",
           "window_id": 185426,
-          "post_snapshot": "s00000dc7"
+          "post_snapshot": "s00000ebc"
         },
         {
           "step": 3,
           "tool": "click_element",
           "receipt": "\u2705 Performed AXPress on [15] AXButton \"\".",
           "window_id": 185426,
-          "post_snapshot": "s00000dc8"
+          "post_snapshot": "s00000ebd"
         },
         {
           "step": 4,
           "tool": "click_element",
           "receipt": "\u2705 Performed AXPress on [6] AXButton \"\".",
           "window_id": 185426,
-          "post_snapshot": "s00000dc9"
+          "post_snapshot": "s00000ebe"
         },
         {
           "step": 5,
           "tool": "click_element",
           "receipt": "\u2705 Performed AXPress on [8] AXButton \"\".",
           "window_id": 185426,
-          "post_snapshot": "s00000dca"
+          "post_snapshot": "s00000ebf"
         },
         {
           "step": 6,
           "tool": "click_element",
           "receipt": "\u2705 Performed AXPress on [9] AXButton \"\".",
           "window_id": 185426,
-          "post_snapshot": "s00000dcb"
+          "post_snapshot": "s00000ec0"
         },
         {
           "step": 7,
           "tool": "click_element",
           "receipt": "\u2705 Performed AXPress on [10] AXButton \"\".",
           "window_id": 185426,
-          "post_snapshot": "s00000dcc"
+          "post_snapshot": "s00000ec1"
         },
         {
           "step": 8,
           "tool": "click_element",
           "receipt": "\u2705 Performed AXPress on [20] AXButton \"\".",
           "window_id": 185426,
-          "post_snapshot": "s00000dcd"
+          "post_snapshot": "s00000ec2"
         }
       ],
       "verify_detail": {
@@ -1042,71 +1042,71 @@
       "thinking_budget": null,
       "passed": true,
       "verify_summary": "display='1,710' (expected '1,710')",
-      "wall_s": 64.67,
-      "outer_turns": 2,
+      "wall_s": 99.03,
+      "outer_turns": 4,
       "actions_dispatched": 7,
       "uncertain_actions_dispatched": 0,
-      "step_median_ms": 843.96,
-      "model_ms_total": 57363.05,
-      "observe_ms_total": 401.12,
-      "jev_ms_total": 1489.57,
-      "dispatch_ms_total": 3348.82,
-      "verify_ms_total": 1342.88,
+      "step_median_ms": 977.9,
+      "model_ms_total": 90567.67,
+      "observe_ms_total": 584.51,
+      "jev_ms_total": 1935.96,
+      "dispatch_ms_total": 3927.53,
+      "verify_ms_total": 1082.28,
       "screenshots_sent": 0,
-      "gemini_input_tokens": 10916,
-      "gemini_output_tokens": 8105,
-      "jev_tokens": 18740,
-      "cost_usd": 0.03352,
+      "gemini_input_tokens": 37099,
+      "gemini_output_tokens": 10663,
+      "jev_tokens": 21551,
+      "cost_usd": 0.05485,
       "focus_violations": 0,
       "focus_probe_errors": 0,
-      "focus_samples": 192,
+      "focus_samples": 299,
       "trace": [
         {
           "turn": 1,
           "tool": "jev_batch",
+          "status": "postcondition_unmet",
+          "completed_count": 0,
+          "completed_steps": [],
+          "selected_ids": [],
+          "post_static_texts": [
+            "99\u00d7"
+          ],
+          "timings_ms": {
+            "observe_ms": 173.43,
+            "provider_ms": 252.87,
+            "dispatch_ms": 438.17,
+            "verify_ms": 128.13,
+            "total_ms": 1027.22
+          }
+        },
+        {
+          "turn": 2,
+          "tool": "jev_step",
           "status": "verified",
-          "completed_count": 7,
+          "action_dispatched": true,
+          "uncertain_side_effect": false,
+          "selected_id": "ax.2.all-clear",
+          "verified": true,
+          "post_static_texts": [
+            "0"
+          ],
+          "newly_opened_windows": [],
+          "timings_ms": {
+            "observe_ms": 104.43,
+            "provider_ms": 242.79,
+            "dispatch_ms": 653.4,
+            "verify_ms": 121.36,
+            "total_ms": 1151.81
+          }
+        },
+        {
+          "turn": 3,
+          "tool": "jev_batch",
+          "status": "verified",
+          "completed_count": 6,
           "completed_steps": [
             {
               "step_index": 0,
-              "goal": "Click Clear",
-              "mode": "jev",
-              "status": "verified",
-              "verification_outcome": "goal_verified",
-              "verified": true,
-              "uncertain_side_effect": false,
-              "reason": "expected_postcondition_verified",
-              "pre_snapshot_id": "s00000dd5",
-              "post_snapshot_id": "s00000dd6",
-              "pre_static_texts": [
-                "994"
-              ],
-              "post_static_texts": [
-                "0"
-              ],
-              "selected_id": "ax.2.clear",
-              "dispatched_tool": "click",
-              "dispatched_arguments": {
-                "pid": 73639,
-                "window_id": 185426,
-                "element_token": "s00000dd5:2",
-                "delivery_mode": "background"
-              },
-              "requested_model": "jev-1.13.0",
-              "returned_model": "jev-1.13.0",
-              "sdk_identity": "agy-cua-jev-stdlib/0.2.0",
-              "confidence": 1.0,
-              "observation_chained": false,
-              "timings_ms": {
-                "observe_ms": 195.84,
-                "provider_ms": 273.98,
-                "dispatch_ms": 732.83,
-                "verify_ms": 137.32,
-                "total_ms": 1370.18
-              }
-            },
-            {
-              "step_index": 1,
               "goal": "Click 3",
               "mode": "jev",
               "status": "verified",
@@ -1114,8 +1114,8 @@
               "verified": true,
               "uncertain_side_effect": false,
               "reason": "expected_postcondition_verified",
-              "pre_snapshot_id": "s00000dd6",
-              "post_snapshot_id": "s00000dd7",
+              "pre_snapshot_id": "s00000ece",
+              "post_snapshot_id": "s00000ecf",
               "pre_static_texts": [
                 "0"
               ],
@@ -1127,24 +1127,26 @@
               "dispatched_arguments": {
                 "pid": 73639,
                 "window_id": 185426,
-                "element_token": "s00000dd6:15",
+                "element_token": "s00000ece:15",
                 "delivery_mode": "background"
               },
               "requested_model": "jev-1.13.0",
               "returned_model": "jev-1.13.0",
-              "sdk_identity": "agy-cua-jev-stdlib/0.2.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.3.0",
               "confidence": 0.99,
-              "observation_chained": true,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": false,
               "timings_ms": {
-                "observe_ms": 0.0,
-                "provider_ms": 222.95,
-                "dispatch_ms": 460.41,
-                "verify_ms": 415.18,
-                "total_ms": 1126.7
+                "observe_ms": 92.55,
+                "provider_ms": 231.96,
+                "dispatch_ms": 449.52,
+                "verify_ms": 131.02,
+                "total_ms": 935.05
               }
             },
             {
-              "step_index": 2,
+              "step_index": 1,
               "goal": "Click 8",
               "mode": "jev",
               "status": "verified",
@@ -1152,8 +1154,8 @@
               "verified": true,
               "uncertain_side_effect": false,
               "reason": "expected_postcondition_verified",
-              "pre_snapshot_id": "s00000dd7",
-              "post_snapshot_id": "s00000dd8",
+              "pre_snapshot_id": "s00000ecf",
+              "post_snapshot_id": "s00000ed0",
               "pre_static_texts": [
                 "3"
               ],
@@ -1165,24 +1167,26 @@
               "dispatched_arguments": {
                 "pid": 73639,
                 "window_id": 185426,
-                "element_token": "s00000dd7:6",
+                "element_token": "s00000ecf:6",
                 "delivery_mode": "background"
               },
               "requested_model": "jev-1.13.0",
               "returned_model": "jev-1.13.0",
-              "sdk_identity": "agy-cua-jev-stdlib/0.2.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.3.0",
               "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
               "observation_chained": true,
               "timings_ms": {
                 "observe_ms": 0.0,
-                "provider_ms": 203.01,
-                "dispatch_ms": 413.68,
-                "verify_ms": 111.33,
-                "total_ms": 754.27
+                "provider_ms": 221.6,
+                "dispatch_ms": 432.69,
+                "verify_ms": 119.12,
+                "total_ms": 802.98
               }
             },
             {
-              "step_index": 3,
+              "step_index": 2,
               "goal": "Click Multiply",
               "mode": "jev",
               "status": "verified",
@@ -1190,8 +1194,8 @@
               "verified": true,
               "uncertain_side_effect": false,
               "reason": "expected_postcondition_verified",
-              "pre_snapshot_id": "s00000dd8",
-              "post_snapshot_id": "s00000dd9",
+              "pre_snapshot_id": "s00000ed0",
+              "post_snapshot_id": "s00000ed1",
               "pre_static_texts": [
                 "38"
               ],
@@ -1203,24 +1207,26 @@
               "dispatched_arguments": {
                 "pid": 73639,
                 "window_id": 185426,
-                "element_token": "s00000dd8:8",
+                "element_token": "s00000ed0:8",
                 "delivery_mode": "background"
               },
               "requested_model": "jev-1.13.0",
               "returned_model": "jev-1.13.0",
-              "sdk_identity": "agy-cua-jev-stdlib/0.2.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.3.0",
               "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
               "observation_chained": true,
               "timings_ms": {
                 "observe_ms": 0.0,
-                "provider_ms": 196.04,
-                "dispatch_ms": 435.74,
-                "verify_ms": 256.4,
-                "total_ms": 919.14
+                "provider_ms": 305.53,
+                "dispatch_ms": 686.21,
+                "verify_ms": 134.96,
+                "total_ms": 1157.12
               }
             },
             {
-              "step_index": 4,
+              "step_index": 3,
               "goal": "Click 4",
               "mode": "jev",
               "status": "verified",
@@ -1228,8 +1234,8 @@
               "verified": true,
               "uncertain_side_effect": false,
               "reason": "expected_postcondition_verified",
-              "pre_snapshot_id": "s00000dd9",
-              "post_snapshot_id": "s00000dda",
+              "pre_snapshot_id": "s00000ed1",
+              "post_snapshot_id": "s00000ed2",
               "pre_static_texts": [
                 "38\u00d7"
               ],
@@ -1241,24 +1247,26 @@
               "dispatched_arguments": {
                 "pid": 73639,
                 "window_id": 185426,
-                "element_token": "s00000dd9:9",
+                "element_token": "s00000ed1:9",
                 "delivery_mode": "background"
               },
               "requested_model": "jev-1.13.0",
               "returned_model": "jev-1.13.0",
-              "sdk_identity": "agy-cua-jev-stdlib/0.2.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.3.0",
               "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
               "observation_chained": true,
               "timings_ms": {
                 "observe_ms": 0.0,
-                "provider_ms": 187.27,
-                "dispatch_ms": 440.83,
-                "verify_ms": 115.82,
-                "total_ms": 772.49
+                "provider_ms": 250.41,
+                "dispatch_ms": 405.09,
+                "verify_ms": 121.05,
+                "total_ms": 808.42
               }
             },
             {
-              "step_index": 5,
+              "step_index": 4,
               "goal": "Click 5",
               "mode": "jev",
               "status": "verified",
@@ -1266,8 +1274,8 @@
               "verified": true,
               "uncertain_side_effect": false,
               "reason": "expected_postcondition_verified",
-              "pre_snapshot_id": "s00000dda",
-              "post_snapshot_id": "s00000ddb",
+              "pre_snapshot_id": "s00000ed2",
+              "post_snapshot_id": "s00000ed3",
               "pre_static_texts": [
                 "38\u00d74"
               ],
@@ -1279,24 +1287,26 @@
               "dispatched_arguments": {
                 "pid": 73639,
                 "window_id": 185426,
-                "element_token": "s00000dda:10",
+                "element_token": "s00000ed2:10",
                 "delivery_mode": "background"
               },
               "requested_model": "jev-1.13.0",
               "returned_model": "jev-1.13.0",
-              "sdk_identity": "agy-cua-jev-stdlib/0.2.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.3.0",
               "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
               "observation_chained": true,
               "timings_ms": {
                 "observe_ms": 0.0,
-                "provider_ms": 206.53,
-                "dispatch_ms": 416.56,
-                "verify_ms": 189.33,
-                "total_ms": 843.96
+                "provider_ms": 245.3,
+                "dispatch_ms": 411.0,
+                "verify_ms": 143.78,
+                "total_ms": 832.65
               }
             },
             {
-              "step_index": 6,
+              "step_index": 5,
               "goal": "Click Equals",
               "mode": "jev",
               "status": "verified",
@@ -1304,8 +1314,8 @@
               "verified": true,
               "uncertain_side_effect": false,
               "reason": "expected_postcondition_verified",
-              "pre_snapshot_id": "s00000ddb",
-              "post_snapshot_id": "s00000ddc",
+              "pre_snapshot_id": "s00000ed3",
+              "post_snapshot_id": "s00000ed4",
               "pre_static_texts": [
                 "38\u00d745"
               ],
@@ -1318,25 +1328,26 @@
               "dispatched_arguments": {
                 "pid": 73639,
                 "window_id": 185426,
-                "element_token": "s00000ddb:20",
+                "element_token": "s00000ed3:20",
                 "delivery_mode": "background"
               },
               "requested_model": "jev-1.13.0",
               "returned_model": "jev-1.13.0",
-              "sdk_identity": "agy-cua-jev-stdlib/0.2.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.3.0",
               "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
               "observation_chained": true,
               "timings_ms": {
                 "observe_ms": 0.0,
-                "provider_ms": 199.79,
-                "dispatch_ms": 448.77,
-                "verify_ms": 117.5,
-                "total_ms": 797.66
+                "provider_ms": 185.5,
+                "dispatch_ms": 451.45,
+                "verify_ms": 182.86,
+                "total_ms": 1151.64
               }
             }
           ],
           "selected_ids": [
-            "ax.2.clear",
             "ax.15.3",
             "ax.6.8",
             "ax.8.multiply",
@@ -1349,11 +1360,11 @@
             "1,710"
           ],
           "timings_ms": {
-            "observe_ms": 195.84,
-            "provider_ms": 1489.57,
-            "dispatch_ms": 3348.82,
-            "verify_ms": 1342.88,
-            "total_ms": 6588.15
+            "observe_ms": 92.55,
+            "provider_ms": 1440.3,
+            "dispatch_ms": 2835.96,
+            "verify_ms": 832.79,
+            "total_ms": 5690.05
           }
         }
       ],
@@ -1376,101 +1387,108 @@
       "thinking_budget": null,
       "passed": true,
       "verify_summary": "display='1,710' (expected '1,710')",
-      "wall_s": 43.2,
+      "wall_s": 51.23,
       "outer_turns": 12,
       "actions_dispatched": 8,
       "uncertain_actions_dispatched": 0,
-      "step_median_ms": 241.53,
-      "model_ms_total": 39366.74,
-      "observe_ms_total": 2141.54,
+      "step_median_ms": 249.98,
+      "model_ms_total": 46925.99,
+      "observe_ms_total": 2551.85,
       "jev_ms_total": 0.0,
-      "dispatch_ms_total": 745.26,
+      "dispatch_ms_total": 889.33,
       "verify_ms_total": 0.0,
       "screenshots_sent": 0,
-      "gemini_input_tokens": 146591,
-      "gemini_output_tokens": 1480,
+      "gemini_input_tokens": 139421,
+      "gemini_output_tokens": 1513,
       "jev_tokens": 0,
-      "cost_usd": 0.07773,
+      "cost_usd": 0.07425,
       "focus_violations": 0,
       "focus_probe_errors": 0,
-      "focus_samples": 125,
+      "focus_samples": 155,
       "trace": [
         {
           "step": 1,
           "tool": "ad_snapshot",
           "ok": true,
           "window_id": "w-185426",
-          "root": "@s25yhb6k3porct:e1"
+          "root": "@s1w4ywij0s5xzk:e1"
         },
         {
           "step": 2,
           "tool": "ad_click",
-          "ref": "@s25yhb6k3porct:e3",
+          "ref": "@s1w4ywij0s5xzk:e3",
           "ok": true,
           "error_code": null
         },
         {
           "step": 3,
-          "tool": "ad_click",
-          "ref": "@s3d0nzcee0ql6l:e3",
-          "ok": true,
-          "error_code": null
-        },
-        {
-          "step": 4,
           "tool": "ad_snapshot",
           "ok": true,
           "window_id": "w-185426",
-          "root": "@s2rgnbgazqmae1:e1"
+          "root": "@s1bnqbvox0kjdl:e1"
+        },
+        {
+          "step": 4,
+          "tool": "ad_click",
+          "ref": "@s1bnqbvox0kjdl:e3",
+          "ok": true,
+          "error_code": null
         },
         {
           "step": 5,
-          "tool": "ad_click",
-          "ref": "@s2rgnbgazqmae1:e16",
+          "tool": "ad_snapshot",
           "ok": true,
-          "error_code": null
+          "window_id": "w-185426",
+          "root": "@s2ac1xn0irn1aq:e1"
         },
         {
           "step": 6,
           "tool": "ad_click",
-          "ref": "@s20ps3yr78gwuj:e7",
+          "ref": "@s2ac1xn0irn1aq:e16",
           "ok": true,
           "error_code": null
         },
         {
           "step": 7,
           "tool": "ad_click",
-          "ref": "@s2tgbl8onpmmgh:e9",
+          "ref": "@s3rjnmveyiv2um:e7",
           "ok": true,
           "error_code": null
         },
         {
           "step": 8,
           "tool": "ad_click",
-          "ref": "@s29q5eugj2t8mw:e10",
+          "ref": "@s3f8ccvjqo9suw:e9",
           "ok": true,
           "error_code": null
         },
         {
           "step": 9,
           "tool": "ad_click",
-          "ref": "@s1qlna30vc4e1t:e11",
+          "ref": "@sch2nivulb3k3:e10",
           "ok": true,
           "error_code": null
         },
         {
           "step": 10,
           "tool": "ad_click",
-          "ref": "@s39kuihm0h9rft:e21",
+          "ref": "@s3zq3pam1mmyb:e11",
           "ok": true,
           "error_code": null
         },
         {
           "step": 11,
+          "tool": "ad_click",
+          "ref": "@scamavwdhy6ew:e21",
+          "ok": true,
+          "error_code": null
+        },
+        {
+          "step": 12,
           "tool": "ad_snapshot",
           "ok": true,
           "window_id": "w-185426",
-          "root": "@sqrep4eufs5co:e2"
+          "root": "@sa9eaaij2ika5:e2"
         }
       ],
       "verify_detail": {
@@ -1490,26 +1508,26 @@
       "model": "gemini-3.8-flash",
       "thinking_level": "high",
       "thinking_budget": null,
-      "passed": true,
-      "verify_summary": "display='1,710' (expected '1,710')",
-      "wall_s": 53.44,
-      "outer_turns": 11,
-      "actions_dispatched": 7,
+      "passed": false,
+      "verify_summary": "display='38\u00d7' (expected '1,710')",
+      "wall_s": 56.71,
+      "outer_turns": 12,
+      "actions_dispatched": 10,
       "uncertain_actions_dispatched": 0,
-      "step_median_ms": 256.61,
-      "model_ms_total": 44522.63,
-      "observe_ms_total": 4723.76,
-      "jev_ms_total": 1610.86,
-      "dispatch_ms_total": 185.49,
+      "step_median_ms": 603.15,
+      "model_ms_total": 45528.55,
+      "observe_ms_total": 5966.46,
+      "jev_ms_total": 2447.14,
+      "dispatch_ms_total": 427.2,
       "verify_ms_total": 0.0,
       "screenshots_sent": 0,
-      "gemini_input_tokens": 83026,
-      "gemini_output_tokens": 1972,
-      "jev_tokens": 17721,
-      "cost_usd": 0.05097,
+      "gemini_input_tokens": 85825,
+      "gemini_output_tokens": 1934,
+      "jev_tokens": 27386,
+      "cost_usd": 0.05419,
       "focus_violations": 0,
       "focus_probe_errors": 0,
-      "focus_samples": 93,
+      "focus_samples": 172,
       "trace": [
         {
           "turn": 1,
@@ -1521,7 +1539,7 @@
           "turn": 2,
           "tool": "ad_snapshot_skeleton",
           "ok": true,
-          "root": "@s24gyoyyjtru6o:e1"
+          "root": "@s3fjj7q1nwllu1:e1"
         },
         {
           "turn": 3,
@@ -1540,7 +1558,7 @@
           "turn": 5,
           "tool": "ad_snapshot_skeleton",
           "ok": true,
-          "root": "@s2ayyox7wgejqp:e1"
+          "root": "@s3vimrqfiakt94:e1"
         },
         {
           "turn": 6,
@@ -1548,14 +1566,14 @@
           "decision": "act",
           "command": "click",
           "element": {
-            "ref": "@s24hs1b5ymy3mf:e11",
+            "ref": "@snq8dbnphvs07:e3",
             "role": "button",
-            "name": "5",
+            "name": "Clear",
             "where": "window \"Calculator\" > group > group > group > group"
           },
           "confidence": {
-            "target": 0.96,
-            "command": 1
+            "target": 1,
+            "command": 0.99
           },
           "notes": [],
           "executed": {
@@ -1567,17 +1585,52 @@
         },
         {
           "turn": 7,
+          "tool": "ad_snapshot_skeleton",
+          "ok": true,
+          "root": "@s3vimrqfiakt94:e1"
+        },
+        {
+          "turn": 8,
           "tool": "jev_desktop_act",
           "decision": "act",
           "command": "click",
           "element": {
-            "ref": "@s2776ok677utvn:e21",
+            "ref": "@s30pbc5ph6egkq:e3",
             "role": "button",
-            "name": "Equals",
+            "name": "All Clear",
             "where": "window \"Calculator\" > group > group > group > group"
           },
           "confidence": {
-            "target": 0.99,
+            "target": 0.92,
+            "command": 0.99
+          },
+          "notes": [],
+          "executed": {
+            "ok": true,
+            "delivery": "delivered_unverified",
+            "error": null
+          },
+          "post_static_texts": []
+        },
+        {
+          "turn": 9,
+          "tool": "ad_snapshot_skeleton",
+          "ok": true,
+          "root": "@s3vimrqfiakt94:e1"
+        },
+        {
+          "turn": 10,
+          "tool": "jev_desktop_act",
+          "decision": "act",
+          "command": "click",
+          "element": {
+            "ref": "@swhopjx07q1o4:e16",
+            "role": "button",
+            "name": "3",
+            "where": "window \"Calculator\" > group > group > group > group"
+          },
+          "confidence": {
+            "target": 0.95,
             "command": 1
           },
           "notes": [],
@@ -1589,30 +1642,57 @@
           "post_static_texts": []
         },
         {
-          "turn": 8,
-          "tool": "ad_snapshot_skeleton",
-          "ok": true,
-          "root": null
+          "turn": 11,
+          "tool": "jev_desktop_act",
+          "decision": "act",
+          "command": "click",
+          "element": {
+            "ref": "@s1h8xefe3nbm9g:e7",
+            "role": "button",
+            "name": "8",
+            "where": "window \"Calculator\" > group > group > group > group"
+          },
+          "confidence": {
+            "target": 1,
+            "command": 1
+          },
+          "notes": [],
+          "executed": {
+            "ok": true,
+            "delivery": "delivered_unverified",
+            "error": null
+          },
+          "post_static_texts": []
         },
         {
-          "turn": 9,
-          "tool": "ad_snapshot_skeleton",
-          "ok": true,
-          "root": "@s1v4k8jtcqzbz5:e1"
-        },
-        {
-          "turn": 10,
-          "tool": "ad_snapshot_skeleton",
-          "ok": true,
-          "root": "@s1v4k8jtcqzbz5:e2"
+          "turn": 12,
+          "tool": "jev_desktop_act",
+          "decision": "act",
+          "command": "click",
+          "element": {
+            "ref": "@s1hiti6zgf6hsk:e9",
+            "role": "button",
+            "name": "Multiply",
+            "where": "window \"Calculator\" > group > group > group > group"
+          },
+          "confidence": {
+            "target": 1,
+            "command": 1
+          },
+          "notes": [],
+          "executed": {
+            "ok": true,
+            "delivery": "delivered_unverified",
+            "error": null
+          },
+          "post_static_texts": []
         }
       ],
       "verify_detail": {
         "static_texts": [
-          "38\u00d745",
-          "1,710"
+          "38\u00d7"
         ],
-        "display": "1,710"
+        "display": "38\u00d7"
       }
     },
     {
@@ -1626,69 +1706,87 @@
       "thinking_budget": null,
       "passed": true,
       "verify_summary": "display='1,710' (expected '1,710')",
-      "wall_s": 61.88,
-      "outer_turns": 2,
+      "wall_s": 88.91,
+      "outer_turns": 3,
       "actions_dispatched": 7,
       "uncertain_actions_dispatched": 0,
-      "step_median_ms": 885.35,
-      "model_ms_total": 54622.57,
-      "observe_ms_total": 413.02,
-      "jev_ms_total": 1738.43,
-      "dispatch_ms_total": 3217.29,
-      "verify_ms_total": 975.98,
+      "step_median_ms": 920.94,
+      "model_ms_total": 79560.18,
+      "observe_ms_total": 432.19,
+      "jev_ms_total": 2130.13,
+      "dispatch_ms_total": 3656.6,
+      "verify_ms_total": 2505.34,
       "screenshots_sent": 0,
-      "gemini_input_tokens": 9939,
-      "gemini_output_tokens": 6724,
-      "jev_tokens": 18749,
-      "cost_usd": 0.02889,
+      "gemini_input_tokens": 19139,
+      "gemini_output_tokens": 9774,
+      "jev_tokens": 21553,
+      "cost_usd": 0.0432,
       "focus_violations": 0,
       "focus_probe_errors": 0,
-      "focus_samples": 182,
+      "focus_samples": 266,
       "trace": [
         {
           "turn": 1,
+          "tool": "jev_batch",
+          "status": "postcondition_unmet",
+          "completed_count": 0,
+          "completed_steps": [],
+          "selected_ids": [],
+          "post_static_texts": [
+            "99\u00d7"
+          ],
+          "timings_ms": {
+            "observe_ms": 124.31,
+            "provider_ms": 222.36,
+            "dispatch_ms": 427.75,
+            "verify_ms": 1340.21,
+            "total_ms": 2145.79
+          }
+        },
+        {
+          "turn": 2,
           "tool": "jev_batch",
           "status": "verified",
           "completed_count": 7,
           "completed_steps": [
             {
               "step_index": 0,
-              "goal": "Click Clear",
+              "goal": "Click All Clear",
               "mode": "jev",
               "status": "verified",
               "verification_outcome": "goal_verified",
               "verified": true,
               "uncertain_side_effect": false,
               "reason": "expected_postcondition_verified",
-              "pre_snapshot_id": "s00000e78",
-              "post_snapshot_id": "s00000e79",
+              "pre_snapshot_id": "s00000eef",
+              "post_snapshot_id": "s00000ef0",
               "pre_static_texts": [
-                "994"
+                "99\u00d7"
               ],
               "post_static_texts": [
                 "0"
               ],
-              "selected_id": "ax.2.clear",
+              "selected_id": "ax.2.all-clear",
               "dispatched_tool": "click",
               "dispatched_arguments": {
                 "pid": 73639,
                 "window_id": 185426,
-                "element_token": "s00000e78:2",
+                "element_token": "s00000eef:2",
                 "delivery_mode": "background"
               },
               "requested_model": "jev-1.13.0",
               "returned_model": "jev-1.13.0",
               "sdk_identity": "agy-cua-jev-stdlib/0.3.0",
-              "confidence": 1.0,
+              "confidence": 0.98,
               "reranked": false,
               "verify_polls": 1,
               "observation_chained": false,
               "timings_ms": {
-                "observe_ms": 215.86,
-                "provider_ms": 227.47,
-                "dispatch_ms": 408.93,
-                "verify_ms": 122.2,
-                "total_ms": 1002.27
+                "observe_ms": 100.69,
+                "provider_ms": 277.15,
+                "dispatch_ms": 398.93,
+                "verify_ms": 149.69,
+                "total_ms": 958.35
               }
             },
             {
@@ -1700,8 +1798,8 @@
               "verified": true,
               "uncertain_side_effect": false,
               "reason": "expected_postcondition_verified",
-              "pre_snapshot_id": "s00000e79",
-              "post_snapshot_id": "s00000e7a",
+              "pre_snapshot_id": "s00000ef0",
+              "post_snapshot_id": "s00000ef1",
               "pre_static_texts": [
                 "0"
               ],
@@ -1713,22 +1811,22 @@
               "dispatched_arguments": {
                 "pid": 73639,
                 "window_id": 185426,
-                "element_token": "s00000e79:15",
+                "element_token": "s00000ef0:15",
                 "delivery_mode": "background"
               },
               "requested_model": "jev-1.13.0",
               "returned_model": "jev-1.13.0",
               "sdk_identity": "agy-cua-jev-stdlib/0.3.0",
-              "confidence": 0.99,
+              "confidence": 1.0,
               "reranked": false,
               "verify_polls": 1,
               "observation_chained": true,
               "timings_ms": {
                 "observe_ms": 0.0,
-                "provider_ms": 210.32,
-                "dispatch_ms": 429.59,
-                "verify_ms": 178.19,
-                "total_ms": 848.12
+                "provider_ms": 283.0,
+                "dispatch_ms": 433.38,
+                "verify_ms": 136.88,
+                "total_ms": 883.54
               }
             },
             {
@@ -1740,8 +1838,8 @@
               "verified": true,
               "uncertain_side_effect": false,
               "reason": "expected_postcondition_verified",
-              "pre_snapshot_id": "s00000e7a",
-              "post_snapshot_id": "s00000e7b",
+              "pre_snapshot_id": "s00000ef1",
+              "post_snapshot_id": "s00000ef2",
               "pre_static_texts": [
                 "3"
               ],
@@ -1753,7 +1851,7 @@
               "dispatched_arguments": {
                 "pid": 73639,
                 "window_id": 185426,
-                "element_token": "s00000e7a:6",
+                "element_token": "s00000ef1:6",
                 "delivery_mode": "background"
               },
               "requested_model": "jev-1.13.0",
@@ -1765,10 +1863,10 @@
               "observation_chained": true,
               "timings_ms": {
                 "observe_ms": 0.0,
-                "provider_ms": 272.8,
-                "dispatch_ms": 424.42,
-                "verify_ms": 126.01,
-                "total_ms": 853.36
+                "provider_ms": 300.65,
+                "dispatch_ms": 420.47,
+                "verify_ms": 387.83,
+                "total_ms": 1142.3
               }
             },
             {
@@ -1780,8 +1878,8 @@
               "verified": true,
               "uncertain_side_effect": false,
               "reason": "expected_postcondition_verified",
-              "pre_snapshot_id": "s00000e7b",
-              "post_snapshot_id": "s00000e7c",
+              "pre_snapshot_id": "s00000ef2",
+              "post_snapshot_id": "s00000ef3",
               "pre_static_texts": [
                 "38"
               ],
@@ -1793,7 +1891,7 @@
               "dispatched_arguments": {
                 "pid": 73639,
                 "window_id": 185426,
-                "element_token": "s00000e7b:8",
+                "element_token": "s00000ef2:8",
                 "delivery_mode": "background"
               },
               "requested_model": "jev-1.13.0",
@@ -1805,10 +1903,10 @@
               "observation_chained": true,
               "timings_ms": {
                 "observe_ms": 0.0,
-                "provider_ms": 228.5,
-                "dispatch_ms": 401.93,
-                "verify_ms": 114.9,
-                "total_ms": 774.98
+                "provider_ms": 259.31,
+                "dispatch_ms": 419.51,
+                "verify_ms": 121.74,
+                "total_ms": 828.68
               }
             },
             {
@@ -1820,8 +1918,8 @@
               "verified": true,
               "uncertain_side_effect": false,
               "reason": "expected_postcondition_verified",
-              "pre_snapshot_id": "s00000e7c",
-              "post_snapshot_id": "s00000e7d",
+              "pre_snapshot_id": "s00000ef3",
+              "post_snapshot_id": "s00000ef4",
               "pre_static_texts": [
                 "38\u00d7"
               ],
@@ -1833,7 +1931,7 @@
               "dispatched_arguments": {
                 "pid": 73639,
                 "window_id": 185426,
-                "element_token": "s00000e7c:9",
+                "element_token": "s00000ef3:9",
                 "delivery_mode": "background"
               },
               "requested_model": "jev-1.13.0",
@@ -1845,10 +1943,10 @@
               "observation_chained": true,
               "timings_ms": {
                 "observe_ms": 0.0,
-                "provider_ms": 333.15,
-                "dispatch_ms": 405.21,
-                "verify_ms": 117.47,
-                "total_ms": 885.35
+                "provider_ms": 249.94,
+                "dispatch_ms": 422.85,
+                "verify_ms": 128.19,
+                "total_ms": 832.2
               }
             },
             {
@@ -1860,8 +1958,8 @@
               "verified": true,
               "uncertain_side_effect": false,
               "reason": "expected_postcondition_verified",
-              "pre_snapshot_id": "s00000e7d",
-              "post_snapshot_id": "s00000e7e",
+              "pre_snapshot_id": "s00000ef4",
+              "post_snapshot_id": "s00000ef5",
               "pre_static_texts": [
                 "38\u00d74"
               ],
@@ -1873,7 +1971,7 @@
               "dispatched_arguments": {
                 "pid": 73639,
                 "window_id": 185426,
-                "element_token": "s00000e7d:10",
+                "element_token": "s00000ef4:10",
                 "delivery_mode": "background"
               },
               "requested_model": "jev-1.13.0",
@@ -1885,10 +1983,10 @@
               "observation_chained": true,
               "timings_ms": {
                 "observe_ms": 0.0,
-                "provider_ms": 230.75,
-                "dispatch_ms": 706.68,
-                "verify_ms": 120.64,
-                "total_ms": 1087.68
+                "provider_ms": 266.48,
+                "dispatch_ms": 427.76,
+                "verify_ms": 121.68,
+                "total_ms": 846.57
               }
             },
             {
@@ -1900,8 +1998,8 @@
               "verified": true,
               "uncertain_side_effect": false,
               "reason": "expected_postcondition_verified",
-              "pre_snapshot_id": "s00000e7e",
-              "post_snapshot_id": "s00000e7f",
+              "pre_snapshot_id": "s00000ef5",
+              "post_snapshot_id": "s00000ef6",
               "pre_static_texts": [
                 "38\u00d745"
               ],
@@ -1914,7 +2012,7 @@
               "dispatched_arguments": {
                 "pid": 73639,
                 "window_id": 185426,
-                "element_token": "s00000e7e:20",
+                "element_token": "s00000ef5:20",
                 "delivery_mode": "background"
               },
               "requested_model": "jev-1.13.0",
@@ -1926,15 +2024,15 @@
               "observation_chained": true,
               "timings_ms": {
                 "observe_ms": 0.0,
-                "provider_ms": 235.44,
-                "dispatch_ms": 440.53,
-                "verify_ms": 196.57,
-                "total_ms": 1203.73
+                "provider_ms": 271.24,
+                "dispatch_ms": 705.95,
+                "verify_ms": 119.12,
+                "total_ms": 1128.12
               }
             }
           ],
           "selected_ids": [
-            "ax.2.clear",
+            "ax.2.all-clear",
             "ax.15.3",
             "ax.6.8",
             "ax.8.multiply",
@@ -1947,11 +2045,11 @@
             "1,710"
           ],
           "timings_ms": {
-            "observe_ms": 215.86,
-            "provider_ms": 1738.43,
-            "dispatch_ms": 3217.29,
-            "verify_ms": 975.98,
-            "total_ms": 6657.85
+            "observe_ms": 100.69,
+            "provider_ms": 1907.77,
+            "dispatch_ms": 3228.85,
+            "verify_ms": 1165.13,
+            "total_ms": 6622.42
           }
         }
       ],
@@ -9587,8 +9685,5 @@
         "window_title": "AGYCuaBench-dense-hierarchy"
       }
     }
-  ],
-  "cumulative_session_spend_usd": 1.977458,
-  "unmerged_smoke_spend_usd": 0.025516,
-  "budget_ceiling_usd": 2.5
+  ]
 }

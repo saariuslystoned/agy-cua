@@ -110,8 +110,82 @@ CUA_KEY_MAP = {
 }
 
 
+def _unescape_json_bmp_chars(text: str) -> str:
+    """Decode non-syntax JSON BMP \\uXXXX escapes so escaped canary strings are caught."""
+    if "\\u" not in text and "\\U" not in text:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        cp = int(match.group(1), 16)
+        if cp in (0x22, 0x5C) or cp < 0x20 or (0xD800 <= cp <= 0xDFFF):
+            return match.group(0)
+        return chr(cp)
+
+    return re.sub(r"\\u([0-9a-fA-F]{4})", _replace, text)
+
+
 def contains_secret_canary(text: str) -> bool:
-    return ("CANARY-VAULT-SECRET" in text) or ("\uf79a" in text) or ("\\uf79a" in text.lower())
+    if ("CANARY-VAULT-SECRET" in text) or ("\uf79a" in text) or ("\\uf79a" in text.lower()):
+        return True
+    if "\\u" in text or "\\U" in text:
+        unescaped = _unescape_json_bmp_chars(text)
+        return ("CANARY-VAULT-SECRET" in unescaped) or ("\uf79a" in unescaped)
+    return False
+
+
+def scrub_secret_canary_text(text: str) -> tuple[str, bool]:
+    """Detect and redact secret canary tokens (including JSON \\uXXXX escapes) in decoded text."""
+    if not contains_secret_canary(text):
+        return text, False
+    work = _unescape_json_bmp_chars(text)
+    scrubbed = re.sub(r"CANARY-VAULT-SECRET(?:-[0-9A-Za-z]+)?", "[REDACTED]", work)
+    scrubbed = scrubbed.replace("\uf79a", "")
+    scrubbed = re.sub(r"(?i)\\uf79a", "", scrubbed)
+    return scrubbed, True
+
+
+def scrub_proxy_json_payload(raw: bytes) -> tuple[bytes, bool]:
+    """Parse JSON request bytes, recursively scrub decoded strings, and re-encode UTF-8 JSON.
+
+    Raises ValueError on invalid UTF-8 or malformed JSON after auditing the raw bytes for canary leakage.
+    """
+    try:
+        decoded_raw = raw.decode("utf-8")
+        parsed = json.loads(decoded_raw) if decoded_raw.strip() else {}
+    except (UnicodeDecodeError, ValueError) as exc:
+        leaked = contains_secret_canary(raw.decode("utf-8", "replace"))
+        raise ValueError(f"invalid_proxy_json:{leaked}") from exc
+
+    leaked_any = False
+
+    def _walk(node: Any) -> Any:
+        nonlocal leaked_any
+        if isinstance(node, str):
+            cleaned, hit = scrub_secret_canary_text(node)
+            if hit:
+                leaked_any = True
+            return cleaned
+        if isinstance(node, list):
+            return [_walk(item) for item in node]
+        if isinstance(node, dict):
+            out: dict[Any, Any] = {}
+            for k, v in node.items():
+                if isinstance(k, str):
+                    ck, khit = scrub_secret_canary_text(k)
+                    if khit:
+                        leaked_any = True
+                else:
+                    ck = k
+                out[ck] = _walk(v)
+            return out
+        return node
+
+    scrubbed_obj = _walk(parsed)
+    encoded_str = json.dumps(scrubbed_obj, ensure_ascii=False)
+    if contains_secret_canary(encoded_str):
+        leaked_any = True
+        raise ValueError("canary_remained_after_scrub:True")
+    return encoded_str.encode("utf-8"), leaked_any
 
 
 def audit_contents_for_canary(contents: list[types.Content]) -> bool:
@@ -601,6 +675,19 @@ def _read_window_observation_resilient(
     raise last_err
 
 
+CALC_OPERATOR_LABELS: dict[str, tuple[str, ...]] = {
+    "*": ("Multiply", "×", "*"),
+    "×": ("Multiply", "×", "*"),
+    "/": ("Divide", "÷", "/"),
+    "÷": ("Divide", "÷", "/"),
+    "+": ("Add", "+"),
+    "-": ("Subtract", "−", "-"),
+    "−": ("Subtract", "−", "-"),
+    "=": ("Equals", "="),
+    ".": ("Point", "Decimal", "."),
+}
+
+
 def reset_calculator(driver: jev_mod.DriverClient, pid: int, window_id: int, *, seed_dirty: str | None = None) -> None:
     _wake_macos_app_nap(pid)
     time.sleep(0.05)
@@ -622,20 +709,42 @@ def reset_calculator(driver: jev_mod.DriverClient, pid: int, window_id: int, *, 
         time.sleep(0.20)
     if seed_dirty:
         for ch in str(seed_dirty):
+            _wake_macos_app_nap(pid)
             cur = _read_window_observation_resilient(driver, pid, window_id, timeout_ms=5000, attempts=3)
             snap = cur["snapshot_id"]
-            digit_el = next((e for e in cur["all_elements"] if e.get("label") == ch), None)
-            if digit_el is not None:
-                driver.call_tool(
-                    "click",
-                    {
-                        "pid": pid,
-                        "window_id": window_id,
-                        "element_token": f"{snap}:{digit_el['element_index']}",
-                        "delivery_mode": "background",
-                    },
+            acceptable_labels = {lbl.lower() for lbl in CALC_OPERATOR_LABELS.get(ch, (ch,))}
+            all_els = cur["all_elements"]
+            digit_el = next(
+                (
+                    e
+                    for e in all_els
+                    if str(e.get("role") or "") == "AXButton"
+                    and str(e.get("label") or "").strip().lower() in acceptable_labels
+                ),
+                None,
+            )
+            if digit_el is None:
+                digit_el = next(
+                    (
+                        e
+                        for e in all_els
+                        if str(e.get("role") or "") != "AXStaticText"
+                        and str(e.get("label") or "").strip().lower() in acceptable_labels
+                    ),
+                    None,
                 )
-                time.sleep(0.18)
+            if digit_el is None:
+                raise RuntimeError(f"reset_calculator: missing Calculator button for {ch!r}")
+            driver.call_tool(
+                "click",
+                {
+                    "pid": pid,
+                    "window_id": window_id,
+                    "element_token": f"{snap}:{digit_el['element_index']}",
+                    "delivery_mode": "background",
+                },
+            )
+            time.sleep(0.18)
 
 
 def verify_calculator_display(
@@ -2621,8 +2730,8 @@ class LoopbackTypeSafeProxy:
     """In-process 127.0.0.1 HTTP proxy for `agent-desktop-jev` (`act.mjs` / `run.mjs`).
 
     - Keeps the real Keychain `typesafe-jev` API key strictly inside Python (never in Node child env).
-    - Audits every outbound payload for `CANARY-VAULT-SECRET` before forwarding and scrubs any canary bytes.
-    - Reserves and settles exact Jev `usage.{input_tokens,output_tokens}` against `SpendTracker`.
+    - Parses JSON, recursively audits/scrubs decoded strings (including `\\uXXXX` escapes), and rejects malformed payloads.
+    - Reserves and settles exact Jev `usage.{input_tokens,output_tokens}` against `SpendTracker` under a lock.
     - Disables `run.mjs`'s 429/503/529 automatic retry loop by translating upstream errors to HTTP 400.
     """
 
@@ -2642,6 +2751,8 @@ class LoopbackTypeSafeProxy:
         self.budget_exc: list[RuntimeError] = []
         self.jev_latencies_ms: list[float] = []
         self.calls_used = 0
+        self._lock = threading.Lock()
+        self._active_slots: list[dict[str, bool]] = []
 
         eff_env = dict(os.environ) if env is None else dict(env)
         self.route = jev_mod.resolve_route(eff_env, jev_mod.read_keychain_secret)
@@ -2655,23 +2766,34 @@ class LoopbackTypeSafeProxy:
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length", "0") or 0)
                 raw = self.rfile.read(length) if length > 0 else b"{}"
-                body_str = raw.decode("utf-8", "replace")
-                if contains_secret_canary(body_str):
-                    proxy_ref.canary_leaked = True
-                    body_str = (
-                        body_str.replace("CANARY-VAULT-SECRET-9941", "[REDACTED]")
-                        .replace("CANARY-VAULT-SECRET", "[REDACTED]")
-                        .replace("\uf79a", "")
-                    )
                 try:
-                    proxy_ref.spend.reserve_before_call(JEV_RESERVE_ALLOWANCE_USD)
-                except RuntimeError as exc:
-                    proxy_ref.budget_exc.append(exc)
+                    scrubbed_bytes, leaked = scrub_proxy_json_payload(raw)
+                except ValueError as exc:
+                    if str(exc).endswith(":True"):
+                        with proxy_ref._lock:
+                            proxy_ref.canary_leaked = True
                     self.send_response(400)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
-                    self.wfile.write(b'{"error":"budget_exceeded"}')
+                    self.wfile.write(b'{"error":"invalid_json"}')
                     return
+                if leaked:
+                    with proxy_ref._lock:
+                        proxy_ref.canary_leaked = True
+
+                slot = {"abandoned": False}
+                with proxy_ref._lock:
+                    try:
+                        proxy_ref.spend.reserve_before_call(JEV_RESERVE_ALLOWANCE_USD)
+                    except RuntimeError as exc:
+                        proxy_ref.budget_exc.append(exc)
+                        self.send_response(400)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(b'{"error":"budget_exceeded"}')
+                        return
+                    proxy_ref._active_slots.append(slot)
+                    proxy_ref.calls_used += 1
 
                 headers = {
                     "Accept": "application/json",
@@ -2682,43 +2804,58 @@ class LoopbackTypeSafeProxy:
                     headers["Authorization"] = f"Bearer {proxy_ref.route.api_key}"
                 req = urllib.request.Request(
                     proxy_ref.route.endpoint,
-                    data=body_str.encode("utf-8"),
+                    data=scrubbed_bytes,
                     headers=headers,
                     method="POST",
                 )
-                proxy_ref.calls_used += 1
                 t0 = time.perf_counter()
                 try:
                     status, resp_text = proxy_ref._http_post(req, 15.0)
                 except Exception as exc:
                     code = getattr(exc, "code", 0)
-                    proxy_ref.spend.jev_calls += 1
-                    proxy_ref.spend.jev_uncertain_failures += 1
-                    proxy_ref.budget_exc.append(RuntimeError(f"Jev upstream transport/HTTP error ({code or type(exc).__name__})"))
+                    with proxy_ref._lock:
+                        if not slot["abandoned"]:
+                            if slot in proxy_ref._active_slots:
+                                proxy_ref._active_slots.remove(slot)
+                            proxy_ref.spend.jev_calls += 1
+                            proxy_ref.spend.jev_uncertain_failures += 1
+                            proxy_ref.budget_exc.append(
+                                RuntimeError(f"Jev upstream transport/HTTP error ({code or type(exc).__name__})")
+                            )
                     self.send_response(400)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
                     self.wfile.write(b'{"error":"upstream_failed"}')
                     return
-                proxy_ref.jev_latencies_ms.append(round((time.perf_counter() - t0) * 1000, 2))
-                try:
-                    accounted = proxy_ref.spend.settle_jev_request(
-                        status, resp_text, reserved_allowance_usd=JEV_RESERVE_ALLOWANCE_USD
-                    )
-                except RuntimeError as exc:
-                    proxy_ref.budget_exc.append(exc)
-                    self.send_response(400)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(b'{"error":"budget_exceeded"}')
-                    return
-                if not accounted:
-                    proxy_ref.budget_exc.append(RuntimeError(f"Jev usage unaccounted (HTTP {status}); reservation retained"))
-                    self.send_response(400)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(b'{"error":"usage_unaccounted"}')
-                    return
+                elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+                with proxy_ref._lock:
+                    if slot["abandoned"]:
+                        self.send_response(400)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(b'{"error":"abandoned_on_timeout"}')
+                        return
+                    if slot in proxy_ref._active_slots:
+                        proxy_ref._active_slots.remove(slot)
+                    proxy_ref.jev_latencies_ms.append(elapsed_ms)
+                    try:
+                        accounted = proxy_ref.spend.settle_jev_request(
+                            status, resp_text, reserved_allowance_usd=JEV_RESERVE_ALLOWANCE_USD
+                        )
+                    except RuntimeError as exc:
+                        proxy_ref.budget_exc.append(exc)
+                        self.send_response(400)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(b'{"error":"budget_exceeded"}')
+                        return
+                    if not accounted:
+                        proxy_ref.budget_exc.append(RuntimeError(f"Jev usage unaccounted (HTTP {status}); reservation retained"))
+                        self.send_response(400)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(b'{"error":"usage_unaccounted"}')
+                        return
 
                 out_status = 200 if (200 <= status < 300) else 400
                 resp_bytes = resp_text.encode("utf-8")
@@ -2742,8 +2879,24 @@ class LoopbackTypeSafeProxy:
         self._thread.start()
 
     def raise_if_error(self) -> None:
-        if self.budget_exc:
-            raise self.budget_exc[0]
+        with self._lock:
+            if self.budget_exc:
+                raise self.budget_exc[0]
+
+    def on_subprocess_timeout(self, tool_name: str) -> None:
+        """Preserve pending provider/budget errors or retain in-flight reservations on child timeout."""
+        with self._lock:
+            if self.budget_exc:
+                raise self.budget_exc[0]
+            if self._active_slots:
+                for slot in self._active_slots:
+                    slot["abandoned"] = True
+                    self.spend.jev_calls += 1
+                    self.spend.jev_uncertain_failures += 1
+                self._active_slots.clear()
+                err = RuntimeError(f"Jev request in flight during {tool_name} timeout; reservation retained")
+                self.budget_exc.append(err)
+                raise err
 
     def close(self) -> None:
         try:
@@ -2751,6 +2904,103 @@ class LoopbackTypeSafeProxy:
             self._server.server_close()
         except Exception:
             pass
+
+
+AD_READ_ONLY_COMMANDS: frozenset[str] = frozenset(
+    {
+        "snapshot",
+        "list-windows",
+        "list-apps",
+        "list-surfaces",
+        "get",
+        "is",
+        "find",
+        "screenshot",
+        "status",
+        "permissions",
+        "version",
+        "clipboard-get",
+        "wait",
+    }
+)
+
+
+def _coerce_proc_text(val: str | bytes | None) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, bytes):
+        return val.decode("utf-8", "replace")
+    return str(val)
+
+
+def _run_ad_cli(
+    ad_bin: Path | str,
+    argv: list[str],
+    *,
+    env: Mapping[str, str],
+    timeout_s: float = 15.0,
+) -> tuple[dict[str, Any], bool]:
+    if "--headed" in argv or "--cursor" in argv:
+        raise ArmActionError("headed_or_cursor_forbidden_in_background_mode")
+    subcmd = next((tok for tok in argv if not str(tok).startswith("-")), "")
+    try:
+        proc = subprocess.run(
+            [str(ad_bin), *argv],
+            env=dict(env),
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        out_txt = _coerce_proc_text(exc.stdout) + "\n" + _coerce_proc_text(exc.stderr)
+        kind = "read" if subcmd in AD_READ_ONLY_COMMANDS else "mutating"
+        suffix = "; canary_leaked=True" if contains_secret_canary(out_txt) else ""
+        raise ArmActionError(
+            f"agent-desktop {kind} command {subcmd!r} timed out after {timeout_s}s; action outcome unknown{suffix}"
+        ) from exc
+    raw_out = (proc.stdout or "").strip()
+    raw_err = (proc.stderr or "").strip()
+    leaked = contains_secret_canary(raw_out) or contains_secret_canary(raw_err)
+    try:
+        parsed = json.loads(raw_out) if raw_out else {"ok": False, "error": {"code": "EMPTY_STDOUT", "message": raw_err[:200]}}
+    except ValueError:
+        parsed = {"ok": False, "error": {"code": "INVALID_JSON", "message": raw_out[:200]}}
+    return parsed, leaked
+
+
+def _run_jev_node_helper(
+    cmd: list[str],
+    *,
+    env: Mapping[str, str],
+    proxy: LoopbackTypeSafeProxy,
+    timeout_s: float,
+    tool_name: str,
+) -> tuple[subprocess.CompletedProcess[str], bool]:
+    """Run `scripts/jev/{run,act}.mjs` and fail closed on timeout so unknown side effects abort the arm."""
+    try:
+        proc = subprocess.run(
+            cmd,
+            env=dict(env),
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        out_txt = _coerce_proc_text(exc.stdout) + "\n" + _coerce_proc_text(exc.stderr)
+        if contains_secret_canary(out_txt):
+            with proxy._lock:
+                proxy.canary_leaked = True
+        proxy.on_subprocess_timeout(tool_name)
+        raise ArmActionError(f"{tool_name} timed out after {timeout_s}s; action outcome unknown") from exc
+
+    leaked = contains_secret_canary(proc.stdout or "") or contains_secret_canary(proc.stderr or "")
+    if leaked:
+        with proxy._lock:
+            proxy.canary_leaked = True
+    proxy.raise_if_error()
+    return proc, leaked
 
 
 def _extract_ad_window_list(lw_res: Mapping[str, Any], *, pid: int | None = None) -> list[dict[str, Any]]:
@@ -2802,23 +3052,10 @@ def run_arm_agent_desktop_direct(
 
     def call_ad(argv: list[str], *, timeout_s: float = 15.0) -> dict[str, Any]:
         nonlocal canary_leaked
-        if "--headed" in argv or "--cursor" in argv:
-            raise ArmActionError("headed_or_cursor_forbidden_in_background_mode")
-        proc = subprocess.run(
-            [str(ad_bin), *argv],
-            env=ad_env,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-        )
-        raw_out = (proc.stdout or "").strip()
-        if contains_secret_canary(raw_out):
+        parsed, leaked = _run_ad_cli(ad_bin, argv, env=ad_env, timeout_s=timeout_s)
+        if leaked:
             canary_leaked = True
-        try:
-            return json.loads(raw_out) if raw_out else {"ok": False, "error": {"code": "EMPTY_STDOUT", "message": (proc.stderr or "")[:200]}}
-        except ValueError:
-            return {"ok": False, "error": {"code": "INVALID_JSON", "message": raw_out[:200]}}
+        return parsed
 
     def format_ad_snap(snap_res: Mapping[str, Any]) -> str:
         nonlocal canary_leaked
@@ -3191,23 +3428,10 @@ def run_arm_agent_desktop_jev(
 
     def call_ad(argv: list[str], *, timeout_s: float = 15.0) -> dict[str, Any]:
         nonlocal canary_leaked
-        if "--headed" in argv or "--cursor" in argv:
-            raise ArmActionError("headed_or_cursor_forbidden_in_background_mode")
-        proc = subprocess.run(
-            [str(ad_bin), *argv],
-            env=node_env,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-        )
-        raw_out = (proc.stdout or "").strip()
-        if contains_secret_canary(raw_out):
+        parsed, leaked = _run_ad_cli(ad_bin, argv, env=node_env, timeout_s=timeout_s)
+        if leaked:
             canary_leaked = True
-        try:
-            return json.loads(raw_out) if raw_out else {"ok": False, "error": {"code": "EMPTY_STDOUT", "message": (proc.stderr or "")[:200]}}
-        except ValueError:
-            return {"ok": False, "error": {"code": "INVALID_JSON", "message": raw_out[:200]}}
+        return parsed
 
     def read_status_texts(wid_s: str) -> list[str]:
         s = call_ad(["snapshot", "--app", app_name, "--window-id", wid_s, "--skeleton", "--compact"])
@@ -3397,12 +3621,12 @@ def run_arm_agent_desktop_jev(
                         cmd.extend(["--text", str(t_val)])
                     cmd.append(str(args.get("goal") or ""))
                     jev_before_len = len(proxy.jev_latencies_ms)
-                    try:
-                        proc = subprocess.run(cmd, env=node_env, capture_output=True, text=True, timeout=45.0, check=False)
-                        raw_lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
-                    except subprocess.TimeoutExpired:
-                        raw_lines = ['{"stop":"timeout"}']
-                    proxy.raise_if_error()
+                    proc, helper_leaked = _run_jev_node_helper(
+                        cmd, env=node_env, proxy=proxy, timeout_s=45.0, tool_name=name
+                    )
+                    if helper_leaked:
+                        canary_leaked = True
+                    raw_lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
                     events = []
                     run_actions = 0
                     for ln in raw_lines:
@@ -3450,11 +3674,12 @@ def run_arm_agent_desktop_jev(
                         cmd.extend(["--text", str(args["text"])])
                     cmd.append(str(args.get("intent") or ""))
                     jev_before_len = len(proxy.jev_latencies_ms)
-                    proc = subprocess.run(cmd, env=node_env, capture_output=True, text=True, timeout=25.0, check=False)
-                    proxy.raise_if_error()
-                    raw_out = (proc.stdout or "").strip()
-                    if contains_secret_canary(raw_out):
+                    proc, helper_leaked = _run_jev_node_helper(
+                        cmd, env=node_env, proxy=proxy, timeout_s=25.0, tool_name=name
+                    )
+                    if helper_leaked:
                         canary_leaked = True
+                    raw_out = (proc.stdout or "").strip()
                     try:
                         act_obj = json.loads(raw_out) if raw_out else {"ok": False, "error": (proc.stderr or "")[:200]}
                     except ValueError:

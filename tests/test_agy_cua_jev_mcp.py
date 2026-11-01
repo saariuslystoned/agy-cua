@@ -5343,6 +5343,149 @@ class StdioEndToEndTest(unittest.TestCase):
             finally:
                 srv_role_err.close()
 
+    def test_benchmark_copilot_review_regressions(self):
+        import urllib.request
+
+        bench_path = os.path.join(ROOT, "scripts", "benchmark_cua.py")
+        b_loader = importlib.machinery.SourceFileLoader("benchmark_cua_copilot_test", bench_path)
+        b_spec = importlib.util.spec_from_loader("benchmark_cua_copilot_test", b_loader)
+        bench_mod = importlib.util.module_from_spec(b_spec)
+        sys.modules["benchmark_cua_copilot_test"] = bench_mod
+        b_loader.exec_module(bench_mod)
+
+        # 1) LoopbackTypeSafeProxy scrubs JSON-escaped \uf79a and \u0043ANARY-VAULT-SECRET, and rejects malformed JSON
+        captured_upstream: list[str] = []
+
+        def fake_http_post(req, _timeout):
+            captured_upstream.append(req.data.decode("utf-8"))
+            return 200, json.dumps(
+                {
+                    "answers": {"target": {"type": "choice", "choice": "@s1:e1", "probabilities": {"@s1:e1": 0.99}}},
+                    "usage": {"input_tokens": 50, "output_tokens": 4},
+                }
+            )
+
+        spend = bench_mod.SpendTracker(max_budget_usd=1.0)
+        proxy = bench_mod.LoopbackTypeSafeProxy(
+            spend,
+            env={"TYPESAFE_API_KEY": "fake-test-key"},
+            http_post=fake_http_post,
+        )
+        try:
+            escaped_body = b'{"state":{"pw":"\\uf79a\\uf79a","note":"\\u0043ANARY-VAULT-SECRET-9941"}}'
+            req = urllib.request.Request(
+                proxy.base_url,
+                data=escaped_body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                self.assertEqual(resp.status, 200)
+            self.assertTrue(proxy.canary_leaked)
+            self.assertEqual(len(captured_upstream), 1)
+            self.assertNotIn("\uf79a", captured_upstream[0])
+            self.assertNotIn("\\uf79a", captured_upstream[0].lower())
+            self.assertNotIn("CANARY-VAULT-SECRET", captured_upstream[0])
+            self.assertEqual(json.loads(captured_upstream[0])["state"]["pw"], "")
+            self.assertEqual(json.loads(captured_upstream[0])["state"]["note"], "[REDACTED]")
+
+            # Malformed JSON must fail closed with HTTP 400 and 0 upstream calls while still flagging canary leaks
+            proxy.canary_leaked = False
+            bad_req = urllib.request.Request(
+                proxy.base_url,
+                data=b'{"state":{"note":"\\u0043ANARY-VAULT-SECRET-9941"',
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as http_ctx:
+                urllib.request.urlopen(bad_req, timeout=5.0)
+            self.assertEqual(http_ctx.exception.code, 400)
+            http_ctx.exception.close()
+            self.assertTrue(proxy.canary_leaked)
+            self.assertEqual(len(captured_upstream), 1)
+
+            # 2) _run_jev_node_helper & _run_ad_cli timeout fail-closed while preserving pending budget/provider errors
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._run_jev_node_helper(
+                    [sys.executable, "-c", "import time; time.sleep(2)"],
+                    env={},
+                    proxy=proxy,
+                    timeout_s=0.05,
+                    tool_name="jev_desktop_run",
+                )
+
+            proxy.budget_exc.append(RuntimeError("Budget ceiling exceeded in proxy"))
+            with self.assertRaisesRegex(RuntimeError, "Budget ceiling exceeded in proxy"):
+                bench_mod._run_jev_node_helper(
+                    [sys.executable, "-c", "import time; time.sleep(2)"],
+                    env={},
+                    proxy=proxy,
+                    timeout_s=0.05,
+                    tool_name="jev_desktop_run",
+                )
+            proxy.budget_exc.clear()
+
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._run_ad_cli(
+                    sys.executable,
+                    ["-c", "import time; time.sleep(2)", "click", "@s1:e1"],
+                    env={},
+                    timeout_s=0.05,
+                )
+        finally:
+            proxy.close()
+
+        # 3) reset_calculator maps '*' -> 'Multiply' (ignoring AXStaticText) and fails closed on missing buttons
+        class FakeCalcDriver:
+            def __init__(self):
+                self.snap_seq = 0
+                self.clicked_tokens: list[str] = []
+
+            def call_tool(self, name, args, **_kwargs):
+                if name == "get_window_state":
+                    self.snap_seq += 1
+                    snap = f"s0000ca{self.snap_seq:02x}"
+                    md = '- [0] AXWindow "Calculator"\n  - [1] AXStaticText = "9"\n  - [2] AXButton (Clear)\n  - [4] AXButton (9)\n  - [8] AXButton (Multiply)\n  - [9] AXButton (4)'
+                    return {
+                        "content": [{"type": "text", "text": md}],
+                        "structuredContent": {
+                            "pid": 77,
+                            "window_id": 301,
+                            "snapshot_id": snap,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": [
+                                {"element_index": 0, "role": "AXWindow", "label": "Calculator", "actions": ["AXRaise"]},
+                                {"element_index": 1, "role": "AXStaticText", "label": "9", "value": "9", "parent_index": 0},
+                                {"element_index": 2, "role": "AXButton", "label": "Clear", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                {"element_index": 4, "role": "AXButton", "label": "9", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                {"element_index": 8, "role": "AXButton", "label": "Multiply", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                {"element_index": 9, "role": "AXButton", "label": "4", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                            ],
+                        },
+                    }
+                if name == "click":
+                    self.clicked_tokens.append(str(args["element_token"]))
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+        orig_sleep = bench_mod.time.sleep
+        orig_wake = bench_mod._wake_macos_app_nap
+        bench_mod.time.sleep = lambda _s: None
+        bench_mod._wake_macos_app_nap = lambda _pid: None
+        try:
+            calc_drv = FakeCalcDriver()
+            bench_mod.reset_calculator(calc_drv, 77, 301, seed_dirty="99*4")
+            clicked_indices = [tok.split(":")[1] for tok in calc_drv.clicked_tokens]
+            # [2]=Clear, [4]=9, [4]=9, [8]=Multiply, [9]=4
+            self.assertEqual(clicked_indices, ["2", "4", "4", "8", "9"])
+
+            with self.assertRaisesRegex(RuntimeError, "missing Calculator button"):
+                bench_mod.reset_calculator(calc_drv, 77, 301, seed_dirty="99/4")
+        finally:
+            bench_mod.time.sleep = orig_sleep
+            bench_mod._wake_macos_app_nap = orig_wake
+
 
 if __name__ == "__main__":
     unittest.main()
