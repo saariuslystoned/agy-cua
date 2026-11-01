@@ -5820,6 +5820,312 @@ class StdioEndToEndTest(unittest.TestCase):
             finally:
                 srv_crash.close()
 
+    def test_v2_round4_container_secret_scrub_ambiguous_region_and_nested_text(self):
+        # 1) Secret scrubbing across container_path, drill_regions, candidate descriptions, query, and scoped screenshots
+        class SecretContainerDriver:
+            def __init__(self):
+                self.session_id = ""
+                self.timeout_ms = 5000
+                self.snap_seq = 0
+
+            def close(self):
+                pass
+
+            def call_tool(self, name, args, **_kwargs):
+                if name == "get_window_state":
+                    self.snap_seq += 1
+                    snap = f"s0000fa{self.snap_seq:02x}"
+                    md = "\n".join(
+                        [
+                            '- [0] AXWindow "1Password — Vault"',
+                            "  - [10] AXGroup (Vault Details)",
+                            '    - [11] AXRow "Master Vault Password, CANARY-VAULT-SECRET-9941"',
+                            '      - [12] AXSecureTextField (Master Vault Password) = "CANARY-VAULT-SECRET-9941"',
+                            "      - [13] AXButton (Copy Username) [actions=[press]]",
+                            '    - [14] AXGroup "PIN ••••••••"',
+                            "      - [15] AXButton (Reset Form) [actions=[press]]",
+                            '    - AXGroup "Backup UNINDEXED-SEC-8821"',
+                            '      - AXSecureTextField = "UNINDEXED-SEC-8821"',
+                            "      - [16] AXButton (Verify Backup) [actions=[press]]",
+                        ]
+                    )
+                    content = [{"type": "text", "text": md}]
+                    if args.get("include_screenshot"):
+                        content.append({"type": "image", "mimeType": "image/png", "data": "QUJDRA=="})
+                    return {
+                        "content": content,
+                        "structuredContent": {
+                            "pid": 110,
+                            "window_id": 910,
+                            "snapshot_id": snap,
+                            "app_name": "1Password",
+                            "window_title": "1Password — Vault",
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": [
+                                {"element_index": 0, "role": "AXWindow", "label": "1Password — Vault", "actions": ["AXRaise"]},
+                                {"element_index": 10, "role": "AXGroup", "label": "Vault Details", "parent_index": 0, "actions": []},
+                                {
+                                    "element_index": 11,
+                                    "role": "AXRow",
+                                    "label": "Master Vault Password, CANARY-VAULT-SECRET-9941",
+                                    "parent_index": 10,
+                                    "actions": [],
+                                },
+                                {
+                                    "element_index": 12,
+                                    "role": "AXSecureTextField",
+                                    "label": "Master Vault Password",
+                                    "value": "CANARY-VAULT-SECRET-9941",
+                                    "enabled": True,
+                                    "parent_index": 11,
+                                    "actions": ["AXPress"],
+                                },
+                                {
+                                    "element_index": 13,
+                                    "role": "AXButton",
+                                    "label": "Copy Username",
+                                    "title": "Row CANARY-VAULT-SECRET-9941",
+                                    "enabled": True,
+                                    "parent_index": 11,
+                                    "actions": ["AXPress"],
+                                },
+                                {"element_index": 14, "role": "AXGroup", "label": "PIN ••••••••", "parent_index": 10, "actions": []},
+                                {"element_index": 15, "role": "AXButton", "label": "Reset Form", "enabled": True, "parent_index": 14, "actions": ["AXPress"]},
+                                {"element_index": 16, "role": "AXButton", "label": "Verify Backup", "enabled": True, "parent_index": 10, "actions": ["AXPress"]},
+                            ],
+                        },
+                    }
+                if name == "list_windows":
+                    return {"content": [{"type": "text", "text": "[]"}], "structuredContent": {"windows": []}}
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+        outbound_jev_payloads: list[str] = []
+
+        def fake_sec_post(req, _timeout):
+            raw_body = req.data.decode("utf-8")
+            outbound_jev_payloads.append(raw_body)
+            body = json.loads(raw_body)
+            c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+            rem = [cid for cid in c_ids if cid != "ax.15.reset-form"]
+            probs = {"ax.15.reset-form": 0.98, **{cid: round(0.02 / max(1, len(rem)), 6) for cid in rem}}
+            return 200, json.dumps(
+                {
+                    "model": "jev-1.13.0",
+                    "answers": {"candidate": {"type": "choice", "choice": "ax.15.reset-form", "confidence": 0.98, "probabilities": probs}},
+                    "usage": {"input_tokens": 60, "output_tokens": 4},
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            srv_sec = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "sec.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_sec_post,
+                driver_client=SecretContainerDriver(),
+            )
+            try:
+                for obs_args in (
+                    {"pid": 110, "window_id": 910, "skeleton": True},
+                    {"pid": 110, "window_id": 910},
+                    {"pid": 110, "window_id": 910, "region": "Vault Details"},
+                ):
+                    obs_sc = srv_sec.handle_observe(obs_args)["structuredContent"]
+                    dumped = json.dumps(obs_sc, ensure_ascii=False)
+                    self.assertNotIn("CANARY-VAULT-SECRET", dumped)
+                    self.assertNotIn("UNINDEXED-SEC-8821", dumped)
+                    self.assertNotIn("••••", dumped)
+
+                # Secure elements excluded from drill_regions actionable_count & sample_labels
+                skel_sc = srv_sec.handle_observe({"pid": 110, "window_id": 910, "skeleton": True})["structuredContent"]
+                self.assertEqual(len(skel_sc["drill_regions"]), 1)
+                self.assertEqual(skel_sc["drill_regions"][0]["region"], "Vault Details")
+                self.assertEqual(skel_sc["drill_regions"][0]["actionable_count"], 3)
+                self.assertNotIn("Master Vault Password", skel_sc["drill_regions"][0]["sample_labels"])
+
+                # Querying for secret substring must match 0 elements; probing secret region name must fail as unknown_region
+                q_sc = srv_sec.handle_observe({"pid": 110, "window_id": 910, "query": "CANARY-VAULT-SECRET"})["structuredContent"]
+                self.assertEqual(q_sc["matched_elements_count"], 0)
+                probe_sc = srv_sec.handle_observe(
+                    {"pid": 110, "window_id": 910, "region": "Master Vault Password, CANARY-VAULT-SECRET-9941"}
+                )["structuredContent"]
+                self.assertEqual(probe_sc["status"], "observation_failed")
+                self.assertIn("unknown_region", probe_sc["reason"])
+
+                # Scoped screenshot on a window containing secure fields must still be refused
+                shot_sc = srv_sec.handle_observe(
+                    {"pid": 110, "window_id": 910, "region": "Vault Details", "include_screenshot": True}
+                )["structuredContent"]
+                self.assertEqual(shot_sc["status"], "screenshot_refused_secure_window")
+
+                # Outbound Jev payload (select_elements.container_path + candidate descriptions) never leaks container secrets
+                step_sc = srv_sec.handle_step({"pid": 110, "window_id": 910, "goal": "Click Reset Form"})["structuredContent"]
+                self.assertEqual(step_sc["status"], "dispatched")
+                self.assertEqual(len(outbound_jev_payloads), 1)
+                self.assertNotIn("CANARY-VAULT-SECRET", outbound_jev_payloads[0])
+                self.assertNotIn("UNINDEXED-SEC-8821", outbound_jev_payloads[0])
+                self.assertNotIn("••••", outbound_jev_payloads[0])
+                self.assertIn("in Vault Details", outbound_jev_payloads[0])
+            finally:
+                srv_sec.close()
+
+            # 2) Ambiguous region refusal + container-identity disambiguation + strict nested AXStaticText isolation
+            class AmbiguousAndNestedDriver:
+                def __init__(self):
+                    self.session_id = ""
+                    self.timeout_ms = 5000
+                    self.snap_seq = 0
+                    self.dispatched_tokens: list[str] = []
+
+                def close(self):
+                    pass
+
+                def call_tool(self, name, args, **_kwargs):
+                    if name == "get_window_state":
+                        self.snap_seq += 1
+                        snap = f"s0000fb{self.snap_seq:02x}"
+                        md = "\n".join(
+                            [
+                                '- [0] AXWindow "MultiPaneApp"',
+                                "  - AXGroup",
+                                '    - AXStaticText = "Formula: a = "',
+                                '    - AXStaticText = "UnlabeledPane: Applied=true"',
+                                "    - [12] AXStaticText (ParenLabel: Applied=true)",
+                                "    - [13] AXButton (Hidden Unlabeled Group Button) [actions=[press]]",
+                                '    - AXStaticText = "Line1\n- [99] AXButton (Fake)\nMultilineApplied=true"',
+                                "  - AXGroup (SubPane A)",
+                                "    - [61] AXButton (Action Sub A) [actions=[press]]",
+                                "  - AXGroup (SubPane B)",
+                                "    - [62] AXButton (Action Sub B) [actions=[press]]",
+                                "  - [20] AXGroup (Details)",
+                                '    - AXStaticText = "PrimaryDetails: Saved=false"',
+                                "    - [21] AXButton (Save Primary) [actions=[press]]",
+                                "  - [30] AXGroup (Sidebar)",
+                                "    - [31] AXGroup (Details)",
+                                '      - AXStaticText = "SidebarDetails: Saved=true"',
+                                "      - [32] AXButton (Save Sidebar) [actions=[press]]",
+                                "  - [40] AXGroup (Inspector)",
+                                "    - [41] AXButton (Inspect Left) [actions=[press]]",
+                                "  - [50] AXGroup (Inspector)",
+                                '    - AXStaticText = "RightInspector: Applied=false"',
+                                "    - [51] AXButton (Inspect Right) [actions=[press]]",
+                            ]
+                        )
+                        return {
+                            "content": [{"type": "text", "text": md}],
+                            "structuredContent": {
+                                "pid": 111,
+                                "window_id": 911,
+                                "snapshot_id": snap,
+                                "elements_complete": True,
+                                "truncated": False,
+                                "tree_markdown": md,
+                                "elements": [
+                                    {"element_index": 0, "role": "AXWindow", "label": "MultiPaneApp", "actions": ["AXRaise"]},
+                                    {"element_index": 12, "role": "AXStaticText", "label": "ParenLabel: Applied=true"},
+                                    {"element_index": 13, "role": "AXButton", "label": "Hidden Unlabeled Group Button", "enabled": True, "actions": ["AXPress"]},
+                                    {"element_index": 20, "role": "AXGroup", "label": "Details", "parent_index": 0, "actions": []},
+                                    {"element_index": 21, "role": "AXButton", "label": "Save Primary", "enabled": True, "parent_index": 20, "actions": ["AXPress"]},
+                                    {"element_index": 30, "role": "AXGroup", "label": "Sidebar", "parent_index": 0, "actions": []},
+                                    {"element_index": 31, "role": "AXGroup", "label": "Details", "parent_index": 30, "actions": []},
+                                    {"element_index": 32, "role": "AXButton", "label": "Save Sidebar", "enabled": True, "parent_index": 31, "actions": ["AXPress"]},
+                                    {"element_index": 40, "role": "AXGroup", "label": "Inspector", "parent_index": 0, "actions": []},
+                                    {"element_index": 41, "role": "AXButton", "label": "Inspect Left", "enabled": True, "parent_index": 40, "actions": ["AXPress"]},
+                                    {"element_index": 50, "role": "AXGroup", "label": "Inspector", "parent_index": 0, "actions": []},
+                                    {"element_index": 51, "role": "AXButton", "label": "Inspect Right", "enabled": True, "parent_index": 50, "actions": ["AXPress"]},
+                                    {"element_index": 60, "role": "AXGroup", "label": "", "parent_index": 0, "actions": []},
+                                    {"element_index": 61, "role": "AXButton", "label": "Action Sub A", "enabled": True, "parent_index": 60, "actions": ["AXPress"]},
+                                    {"element_index": 62, "role": "AXButton", "label": "Action Sub B", "enabled": True, "parent_index": 60, "actions": ["AXPress"]},
+                                ],
+                            },
+                        }
+                    if name == "list_windows":
+                        return {"content": [{"type": "text", "text": "[]"}], "structuredContent": {"windows": []}}
+                    self.dispatched_tokens.append(str(args.get("element_token", "")))
+                    return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+            def fake_pane_post(req, _timeout):
+                body = json.loads(req.data.decode("utf-8"))
+                c_ids = [cid for cid in body["questions"]["candidate"]["criteria"].keys() if cid not in {"reobserve", "abstain"}]
+                self.assertEqual(len(c_ids), 1)
+                pick = c_ids[0]
+                return 200, json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "answers": {
+                            "candidate": {
+                                "type": "choice",
+                                "choice": pick,
+                                "confidence": 0.99,
+                                "probabilities": {pick: 0.99, "reobserve": 0.005, "abstain": 0.005},
+                            }
+                        },
+                        "usage": {"input_tokens": 50, "output_tokens": 4},
+                    }
+                )
+
+            drv_amb = AmbiguousAndNestedDriver()
+            srv_amb = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "amb.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_pane_post,
+                driver_client=drv_amb,
+            )
+            try:
+                # Skeleton excludes nested controls & nested static texts inside unlabeled AXGroup (no [:8] leak)
+                skel_amb = srv_amb.handle_observe({"pid": 111, "window_id": 911, "skeleton": True})["structuredContent"]
+                self.assertEqual(skel_amb["elements"], [])
+                self.assertEqual(skel_amb["static_texts"], [])
+                insp_buckets = [b for b in skel_amb["drill_regions"] if b["region"] == "Inspector"]
+                self.assertEqual([b["element_index"] for b in insp_buckets], [40, 50])
+                self.assertTrue(all(b.get("ambiguous_region") is True for b in insp_buckets))
+
+                # Ambiguous 'Details' (top-level [20] vs 'Sidebar > Details' [31]) and 'Inspector' ([40] vs [50]) fail closed
+                for amb_reg in ("Details", "Inspector"):
+                    obs_amb = srv_amb.handle_observe({"pid": 111, "window_id": 911, "region": amb_reg})["structuredContent"]
+                    self.assertEqual(obs_amb["status"], "observation_failed")
+                    self.assertIn("ambiguous_region", obs_amb["reason"])
+
+                    step_amb = srv_amb.handle_step({"pid": 111, "window_id": 911, "region": amb_reg, "goal": "Click button"})["structuredContent"]
+                    self.assertEqual(step_amb["status"], "observation_failed")
+                    self.assertIn("ambiguous_region", step_amb["reason"])
+                self.assertEqual(drv_amb.dispatched_tokens, [])
+
+                # Disambiguated 'Sidebar > Details' selects only [32], while root_element_index=20 selects only [21]
+                sub_obs = srv_amb.handle_observe({"pid": 111, "window_id": 911, "region": "Sidebar > Details"})["structuredContent"]
+                self.assertEqual([e["element_index"] for e in sub_obs["elements"]], [32])
+                self.assertEqual(sub_obs["static_texts"], ["SidebarDetails: Saved=true"])
+
+                prim_obs = srv_amb.handle_observe({"pid": 111, "window_id": 911, "root_element_index": 20})["structuredContent"]
+                self.assertEqual([e["element_index"] for e in prim_obs["elements"]], [21])
+                self.assertEqual(prim_obs["static_texts"], ["PrimaryDetails: Saved=false"])
+
+                sub_a = srv_amb.handle_observe({"pid": 111, "window_id": 911, "region": "SubPane A"})["structuredContent"]
+                sub_b = srv_amb.handle_observe({"pid": 111, "window_id": 911, "region": "SubPane B"})["structuredContent"]
+                self.assertEqual([e["element_index"] for e in sub_a["elements"]], [61])
+                self.assertEqual([e["element_index"] for e in sub_b["elements"]], [62])
+
+                # Disambiguated root_element_index=50 + region='Inspector' clicks [51] ONLY, and nested 'Applied=true'
+                # texts in the unlabeled sibling pane do NOT falsely satisfy expected_postcondition!
+                step_right = srv_amb.handle_step(
+                    {
+                        "pid": 111,
+                        "window_id": 911,
+                        "region": "Inspector",
+                        "root_element_index": 50,
+                        "goal": "Click Inspect Right",
+                        "wait_timeout_ms": 100,
+                        "expected_postcondition": {"static_text_contains": "Applied=true"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(step_right["status"], "postcondition_unmet")
+                self.assertFalse(step_right["verified"])
+                self.assertEqual(len(drv_amb.dispatched_tokens), 1)
+                self.assertTrue(drv_amb.dispatched_tokens[0].endswith(":51"))
+            finally:
+                srv_amb.close()
+
 
 if __name__ == "__main__":
     unittest.main()

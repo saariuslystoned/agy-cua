@@ -919,17 +919,22 @@ _LEAF_CONTROL_ROLES = frozenset({
 })
 
 
+def _decode_md_escaped_str(raw: str) -> str:
+    safe_raw = raw.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+    try:
+        return str(json.loads(f'"{safe_raw}"')).replace("\u200e", "").strip()
+    except ValueError:
+        return raw.replace('\\"', '"').replace("\\n", "\n").replace("\\\\", "\\").replace("\u200e", "").strip()
+
+
 def _extract_md_node_label(rest: str) -> str:
     s = rest.strip()
     if not s or s.startswith("="):
         return ""
     if s.startswith('"'):
-        m_q = re.match(r'^"((?:[^"\\]|\\.)*)"', s)
+        m_q = re.match(r'^"((?:[^"\\]|\\.)*)"', s, flags=re.DOTALL)
         if m_q:
-            try:
-                return str(json.loads(f'"{m_q.group(1)}"')).replace("\u200e", "").strip()
-            except ValueError:
-                return m_q.group(1).replace("\u200e", "").strip()
+            return _decode_md_escaped_str(m_q.group(1))
     if s.startswith("("):
         head = s.split(" = ", 1)[0].strip()
         if head.startswith("(") and head.endswith(")"):
@@ -940,111 +945,272 @@ def _extract_md_node_label(rest: str) -> str:
     return ""
 
 
-def _matches_region(segments: list[str], region_filter: str) -> bool:
-    if not segments:
+def _extract_md_quoted_value(rest: str) -> str:
+    m_v = re.search(r'(?:^|\s)=\s*"((?:[^"\\]|\\.)*)"', rest, flags=re.DOTALL)
+    if not m_v:
+        return ""
+    return _decode_md_escaped_str(m_v.group(1))
+
+
+_PW_PLACEHOLDER_RE = re.compile(
+    r"^(?:enter\s+your\s+password|master\s+(?:vault\s+)?password|password|generate\s+password,\s+or\s+type\s+a\s+password)$",
+    re.IGNORECASE,
+)
+
+
+def _scan_quote_to_eol(text: str, start_idx: int) -> tuple[bool, int]:
+    """Scan inside a double-quoted literal starting at start_idx; return (closed, next_idx)."""
+    idx = start_idx
+    n = len(text)
+    escaped = False
+    while idx < n:
+        ch = text[idx]
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == '"':
+            return True, idx + 1
+        idx += 1
+    return False, n
+
+
+def _md_rest_has_unclosed_quote(rest: str) -> bool:
+    """Return True iff the remainder of a _TREE_MD_LINE_RE line leaves a quoted label or '= \"...\"' value unclosed."""
+    s = rest.lstrip(" \t")
+    pos = 0
+    if s.startswith('"'):
+        closed, pos = _scan_quote_to_eol(s, 1)
+        if not closed:
+            return True
+    elif s.startswith("("):
+        eq_pos = s.find(' = "')
+        close_p = s.find(")", 1, eq_pos if eq_pos != -1 else len(s))
+        pos = (close_p + 1) if close_p != -1 else (eq_pos if eq_pos != -1 else len(s))
+    m_eq = re.search(r'(?:^|\s)=\s*"', s[pos:])
+    if m_eq:
+        closed_val, _ = _scan_quote_to_eol(s, pos + m_eq.end())
+        if not closed_val:
+            return True
+    return False
+
+
+def _coalesce_multiline_md_lines(tree_md: str) -> list[str]:
+    """Join physical lines split across a multiline quoted label or value in tree_markdown."""
+    raw_lines = tree_md.splitlines()
+    out: list[str] = []
+    i = 0
+    n = len(raw_lines)
+    while i < n:
+        cur = raw_lines[i]
+        m = _TREE_MD_LINE_RE.match(cur)
+        if m and _md_rest_has_unclosed_quote(cur[m.end() :]):
+            j = i + 1
+            parts = [cur]
+            closed = False
+            while j < n:
+                nxt = raw_lines[j]
+                parts.append(nxt)
+                closed_here, after_idx = _scan_quote_to_eol(nxt, 0)
+                if closed_here:
+                    if not _md_rest_has_unclosed_quote(nxt[after_idx:]):
+                        closed = True
+                        break
+                j += 1
+            if closed:
+                out.append("\n".join(parts))
+                i = j + 1
+                continue
+        out.append(cur)
+        i += 1
+    return out
+
+
+def _contains_secret_or_mask(
+    text: str,
+    secret_values: set[str],
+    *,
+    strict_short: bool = False,
+) -> bool:
+    if not text:
         return False
-    norm_segs = [s.strip().lower() for s in segments if s.strip()]
-    parts = [p.strip().lower() for p in region_filter.split(">") if p.strip()]
-    if not parts:
+    if _BULLET_MASK_RE.search(text):
+        return True
+    if text in secret_values:
+        return True
+    for sv in secret_values:
+        if sv and (len(sv) >= 4 or strict_short) and sv in text:
+            return True
+    return False
+
+
+def _container_matches_region_parts(
+    clean_path_dedup: list[str],
+    own_clean_label: str,
+    parts: list[str],
+) -> bool:
+    own_norm = own_clean_label.strip().lower()
+    if not own_norm or not parts or own_norm != parts[-1]:
         return False
     if len(parts) == 1:
-        target = parts[0]
-        return any(s == target for s in norm_segs)
+        return True
+    anc_norms = [s.strip().lower() for s in clean_path_dedup[:-1] if s.strip()]
     pos = 0
-    for seg in norm_segs:
-        if seg == parts[pos]:
+    target_anc = parts[:-1]
+    for seg in anc_norms:
+        if seg == target_anc[pos]:
             pos += 1
-            if pos == len(parts):
+            if pos == len(target_anc):
                 return True
     return False
 
 
-def _parse_markdown_containers(
-    tree_md: str,
-) -> tuple[
-    dict[int, list[str]],
-    dict[int, set[int]],
-    dict[str, int],
-    set[int],
-    list[list[str]],
-    list[tuple[str, list[str], set[int], set[int]]],
-]:
-    """Parse container paths, ancestor index sets, region root indices, and scoped static texts from tree_markdown."""
-    container_segments_by_el: dict[int, list[str]] = {}
-    ancestor_indices_by_el: dict[int, set[int]] = {}
-    container_index_by_region: dict[str, int] = {}
-    known_container_indices: set[int] = set()
-    known_container_paths: list[list[str]] = []
-    md_static_entries: list[tuple[str, list[str], set[int], set[int]]] = []
-    node_by_level: dict[int, tuple[str, int | None, str]] = {}
+def _parse_markdown_structure(tree_md: str) -> dict[str, Any]:
+    """Parse container graph, element ancestry, static texts, and secure hints from tree_markdown."""
+    md_containers: dict[tuple[str, int], dict[str, Any]] = {}
+    md_anc_ckeys_by_el: dict[int, list[tuple[str, int]]] = {}
+    md_all_anc_ids_by_el: dict[int, set[int]] = {}
+    md_has_non_root_anc_by_el: dict[int, bool] = {}
+    md_has_nontoolbar_container_anc_by_el: dict[int, bool] = {}
+    md_seen_el_ids: set[int] = set()
+    md_window_root_ids: set[int] = set()
+    md_static_records: list[dict[str, Any]] = []
+    md_all_static_texts: list[str] = []
+    md_secure_ids: set[int] = set()
+    md_secure_values: set[str] = set()
+    has_unindexed_secure_md_node = False
+    node_by_level: dict[int, dict[str, Any]] = {}
 
-    for line in tree_md.splitlines():
+    for line_no, line in enumerate(_coalesce_multiline_md_lines(tree_md)):
         m = _TREE_MD_LINE_RE.match(line)
         if not m:
-            for st_raw in re.findall(r'AXStaticText = "([^"]*)"', line):
-                st_clean = st_raw.replace("\u200e", "").strip()
+            raw_ws = len(line) - len(line.lstrip(" \t"))
+            indent_cols = len(line[:raw_ws].expandtabs(2))
+            anc_nodes = [node_by_level[k] for k in sorted(node_by_level.keys()) if k < indent_cols]
+            anc_ckeys = [n["ckey"] for n in anc_nodes if n["ckey"] is not None]
+            all_anc_ids = {n["elem_idx"] for n in anc_nodes if n["elem_idx"] is not None}
+            has_non_root_anc = any(n["role"] not in WINDOW_ROOT_ROLES for n in anc_nodes) or (
+                indent_cols >= 2 and bool(node_by_level)
+            )
+            for st_raw in re.findall(r'AXStaticText\s*=\s*"((?:[^"\\]|\\.)*)"', line, flags=re.DOTALL):
+                st_clean = _decode_md_escaped_str(st_raw)
                 if st_clean:
-                    md_static_entries.append((st_clean, [], set(), set()))
+                    md_static_records.append(
+                        {
+                            "text": st_clean,
+                            "elem_idx": None,
+                            "anc_ckeys": list(anc_ckeys),
+                            "all_anc_ids": set(all_anc_ids),
+                            "has_non_root_anc": has_non_root_anc,
+                        }
+                    )
+                    if st_clean not in md_all_static_texts:
+                        md_all_static_texts.append(st_clean)
             continue
+
         indent, idx_str, role = m.group(1), m.group(2), m.group(3)
-        level = len(indent) // 2
-        for deeper in [k for k in node_by_level if k >= level]:
+        indent_cols = len(indent.expandtabs(2))
+        for deeper in [k for k in node_by_level if k >= indent_cols]:
             del node_by_level[deeper]
 
-        sorted_anc = sorted(node_by_level.keys())
-        all_anc_ids: set[int] = set()
-        non_root_anc_ids: set[int] = set()
-        anc_segments: list[str] = []
-        for k in sorted_anc:
-            a_role, a_idx, a_lbl = node_by_level[k]
-            if a_idx is not None:
-                all_anc_ids.add(a_idx)
-                if a_role not in WINDOW_ROOT_ROLES:
-                    non_root_anc_ids.add(a_idx)
-            if (
-                a_role not in WINDOW_ROOT_ROLES
-                and a_role not in MENU_BAR_ROLES
-                and a_role not in _LEAF_CONTROL_ROLES
-                and a_lbl
-                and (not anc_segments or anc_segments[-1] != a_lbl)
-            ):
-                anc_segments.append(a_lbl)
+        anc_nodes = [node_by_level[k] for k in sorted(node_by_level.keys())]
+        all_anc_ids = {n["elem_idx"] for n in anc_nodes if n["elem_idx"] is not None}
+        has_non_root_anc = any(n["role"] not in WINDOW_ROOT_ROLES for n in anc_nodes)
+        anc_ckeys = [n["ckey"] for n in anc_nodes if n["ckey"] is not None]
+        in_toolbar_anc = any(n["role"] == "AXToolbar" for n in anc_nodes)
+        has_nontoolbar_container_anc = (
+            any(n["ckey"] is not None and n["role"] != "AXToolbar" for n in anc_nodes) and not in_toolbar_anc
+        )
 
         own_idx = int(idx_str) if idx_str is not None else None
-        own_label = _extract_md_node_label(line[m.end() :])
-
-        if role not in WINDOW_ROOT_ROLES and role not in MENU_BAR_ROLES and role not in _LEAF_CONTROL_ROLES:
-            if own_idx is not None:
-                known_container_indices.add(own_idx)
-            if own_label:
-                curr_path = anc_segments + ([own_label] if not anc_segments or anc_segments[-1] != own_label else [])
-                known_container_paths.append(curr_path)
-                if own_idx is not None:
-                    container_index_by_region.setdefault(own_label, own_idx)
-        elif own_idx is not None and role in WINDOW_ROOT_ROLES:
-            known_container_indices.add(own_idx)
+        rest = line[m.end() :]
+        own_label = _extract_md_node_label(rest)
+        own_val = _extract_md_quoted_value(rest)
 
         if own_idx is not None:
-            ancestor_indices_by_el[own_idx] = set(all_anc_ids)
-            if anc_segments:
-                container_segments_by_el[own_idx] = list(anc_segments)
+            md_seen_el_ids.add(own_idx)
+            md_anc_ckeys_by_el[own_idx] = list(anc_ckeys)
+            md_all_anc_ids_by_el[own_idx] = set(all_anc_ids)
+            md_has_non_root_anc_by_el[own_idx] = has_non_root_anc
+            md_has_nontoolbar_container_anc_by_el[own_idx] = has_nontoolbar_container_anc
+            for ck in anc_ckeys:
+                if ck in md_containers:
+                    md_containers[ck]["desc_el_ids"].add(own_idx)
 
+        if role in WINDOW_ROOT_ROLES and own_idx is not None:
+            md_window_root_ids.add(own_idx)
+
+        if "secure" in role.lower():
+            if own_idx is not None:
+                md_secure_ids.add(own_idx)
+            else:
+                has_unindexed_secure_md_node = True
+            if own_val and not _PW_PLACEHOLDER_RE.match(own_val):
+                md_secure_values.add(own_val)
+
+        is_container = (
+            role not in WINDOW_ROOT_ROLES
+            and role not in MENU_BAR_ROLES
+            and role not in _LEAF_CONTROL_ROLES
+        )
+        own_ckey: tuple[str, int] | None = None
+        if is_container:
+            own_ckey = ("el", own_idx) if own_idx is not None else ("md", line_no)
+            existing_c = md_containers.get(own_ckey)
+            if existing_c is None:
+                md_containers[own_ckey] = {
+                    "ckey": own_ckey,
+                    "elem_idx": own_idx,
+                    "role": role,
+                    "raw_label": own_label,
+                    "strict_anc_ckeys": list(anc_ckeys),
+                    "anc_ckeys": list(anc_ckeys) + [own_ckey],
+                    "all_anc_el_ids": set(all_anc_ids),
+                    "desc_el_ids": {own_idx} if own_idx is not None else set(),
+                }
+            else:
+                if not existing_c["raw_label"] and own_label:
+                    existing_c["raw_label"] = own_label
+                existing_c["all_anc_el_ids"].update(all_anc_ids)
+
+        st_texts_on_line: list[str] = []
         if role == "AXStaticText":
-            for st_raw in re.findall(r'AXStaticText = "([^"]*)"', line):
-                st_clean = st_raw.replace("\u200e", "").strip()
-                if st_clean:
-                    md_static_entries.append((st_clean, list(anc_segments), set(all_anc_ids), set(non_root_anc_ids)))
+            primary_st = own_val if own_val else own_label
+            if primary_st:
+                st_texts_on_line.append(primary_st)
+        for st_raw in re.findall(r'AXStaticText\s*=\s*"((?:[^"\\]|\\.)*)"', line, flags=re.DOTALL):
+            st_clean = _decode_md_escaped_str(st_raw)
+            if st_clean and st_clean not in st_texts_on_line:
+                st_texts_on_line.append(st_clean)
+        for st_clean in st_texts_on_line:
+            md_static_records.append(
+                {
+                    "text": st_clean,
+                    "elem_idx": own_idx,
+                    "anc_ckeys": list(anc_ckeys),
+                    "all_anc_ids": set(all_anc_ids),
+                    "has_non_root_anc": has_non_root_anc,
+                }
+            )
+            if st_clean not in md_all_static_texts:
+                md_all_static_texts.append(st_clean)
 
-        node_by_level[level] = (role, own_idx, own_label)
+        node_by_level[indent_cols] = {"role": role, "elem_idx": own_idx, "ckey": own_ckey}
 
-    return (
-        container_segments_by_el,
-        ancestor_indices_by_el,
-        container_index_by_region,
-        known_container_indices,
-        known_container_paths,
-        md_static_entries,
-    )
+    return {
+        "containers": md_containers,
+        "anc_ckeys_by_el": md_anc_ckeys_by_el,
+        "all_anc_ids_by_el": md_all_anc_ids_by_el,
+        "has_non_root_anc_by_el": md_has_non_root_anc_by_el,
+        "has_nontoolbar_container_anc_by_el": md_has_nontoolbar_container_anc_by_el,
+        "seen_el_ids": md_seen_el_ids,
+        "window_root_ids": md_window_root_ids,
+        "static_records": md_static_records,
+        "all_static_texts": md_all_static_texts,
+        "secure_ids": md_secure_ids,
+        "secure_values": md_secure_values,
+        "has_unindexed_secure_node": has_unindexed_secure_md_node,
+    }
 
 
 def _parse_markdown_hierarchy(tree_md: str) -> tuple[dict[int, int], set[int]]:
@@ -1060,7 +1226,7 @@ def _parse_markdown_hierarchy_full(tree_md: str) -> tuple[dict[int, int], set[in
     md_menubar_ids: set[int] = set()
     md_unlabeled_value_ids: set[int] = set()
     role_by_level: dict[int, str] = {}
-    for line in tree_md.splitlines():
+    for line in _coalesce_multiline_md_lines(tree_md):
         m = _TREE_MD_LINE_RE.match(line)
         if not m:
             continue
@@ -2031,128 +2197,349 @@ def extract_window_observation(
         if (is_diff_payload and isinstance(baseline_observation, Mapping))
         else ""
     )
+    using_fallback_tree_md = bool(not sc.get("tree_markdown") and not text_blocks and fallback_tree_md)
     tree_md = str(sc.get("tree_markdown") or text_blocks or fallback_tree_md or "")
-    raw_static_texts = [t.replace("\u200e", "").strip() for t in re.findall(r'AXStaticText = "([^"]*)"', tree_md)]
-    for raw_el in raw_elements:
-        if isinstance(raw_el, Mapping) and str(raw_el.get("role") or "").strip() == "AXStaticText":
-            st_val = raw_el.get("value") if raw_el.get("value") not in (None, "") else raw_el.get("label")
-            if isinstance(st_val, str):
-                st_clean = st_val.replace("\u200e", "").strip()
-                if st_clean and st_clean not in raw_static_texts:
-                    raw_static_texts.append(st_clean)
     md_depth, md_toolbar_ids, md_menubar_ids, md_unlabeled_value_ids = _parse_markdown_hierarchy_full(tree_md)
-    (
-        container_segments_by_el,
-        ancestor_indices_by_el,
-        container_index_by_region,
-        known_container_indices,
-        known_container_paths,
-        md_static_entries,
-    ) = _parse_markdown_containers(tree_md)
+    md_struct = _parse_markdown_structure(tree_md)
 
     by_index: dict[int, Mapping[str, Any]] = {}
     for item in raw_elements:
         if isinstance(item, Mapping) and isinstance(item.get("element_index"), int):
             by_index[item["element_index"]] = item
 
-    def _parent_chain_meta(el_map: Mapping[str, Any]) -> tuple[list[str], set[int], set[int]]:
+    def _raw_el_static_text(el_map: Mapping[str, Any]) -> str:
+        st_val = el_map.get("value") if el_map.get("value") not in (None, "") else el_map.get("label")
+        return st_val.replace("\u200e", "").strip() if isinstance(st_val, str) else ""
+
+    raw_static_texts: list[str] = []
+    base_md_static_records: list[dict[str, Any]] = []
+    for rec in md_struct["static_records"]:
+        rec_idx = rec["elem_idx"]
+        if using_fallback_tree_md and rec_idx is not None:
+            cur_el = by_index.get(rec_idx)
+            if cur_el is None or str(cur_el.get("role") or "").strip() != "AXStaticText":
+                continue
+            if _raw_el_static_text(cur_el) != rec["text"]:
+                continue
+        base_md_static_records.append(
+            {
+                "text": rec["text"],
+                "elem_idx": rec_idx,
+                "anc_ckeys": list(rec["anc_ckeys"]),
+                "all_anc_ids": set(rec["all_anc_ids"]),
+                "has_non_root_anc": bool(rec["has_non_root_anc"]),
+            }
+        )
+        if rec["text"] not in raw_static_texts:
+            raw_static_texts.append(rec["text"])
+
+    for raw_el in raw_elements:
+        if isinstance(raw_el, Mapping) and str(raw_el.get("role") or "").strip() == "AXStaticText":
+            st_clean = _raw_el_static_text(raw_el)
+            if st_clean and st_clean not in raw_static_texts:
+                raw_static_texts.append(st_clean)
+
+    containers: dict[tuple[str, int], dict[str, Any]] = {
+        ck: {
+            "ckey": ck,
+            "elem_idx": cv["elem_idx"],
+            "role": cv["role"],
+            "raw_label": cv["raw_label"],
+            "strict_anc_ckeys": list(cv["strict_anc_ckeys"]),
+            "anc_ckeys": list(cv["anc_ckeys"]),
+            "all_anc_el_ids": set(cv["all_anc_el_ids"]),
+            "desc_el_ids": set(cv["desc_el_ids"]),
+        }
+        for ck, cv in md_struct["containers"].items()
+    }
+    window_root_ids: set[int] = set(md_struct["window_root_ids"])
+    known_container_indices: set[int] = {
+        cv["elem_idx"] for cv in containers.values() if cv["elem_idx"] is not None
+    } | set(window_root_ids)
+
+    def _raw_el_label(el_map: Mapping[str, Any]) -> str:
+        return str(
+            el_map.get("label")
+            if el_map.get("label") not in (None, "")
+            else (
+                el_map.get("title")
+                if el_map.get("title") not in (None, "")
+                else el_map.get("description") or ""
+            )
+        ).replace("\u200e", "").strip()
+
+    for idx_k, el_k in by_index.items():
+        k_role = str(el_k.get("role") or "").strip()
+        if k_role in WINDOW_ROOT_ROLES:
+            window_root_ids.add(idx_k)
+            known_container_indices.add(idx_k)
+        elif (
+            k_role
+            and k_role not in MENU_BAR_ROLES
+            and k_role not in _LEAF_CONTROL_ROLES
+        ):
+            known_container_indices.add(idx_k)
+            ck_el = ("el", idx_k)
+            k_lbl = _raw_el_label(el_k)
+            if ck_el not in containers:
+                containers[ck_el] = {
+                    "ckey": ck_el,
+                    "elem_idx": idx_k,
+                    "role": k_role,
+                    "raw_label": k_lbl,
+                    "strict_anc_ckeys": [],
+                    "anc_ckeys": [ck_el],
+                    "all_anc_el_ids": set(),
+                    "desc_el_ids": {idx_k},
+                }
+            elif not containers[ck_el]["raw_label"] and k_lbl:
+                containers[ck_el]["raw_label"] = k_lbl
+
+    def _dedup_ckeys(seq: list[tuple[str, int]]) -> list[tuple[str, int]]:
+        out_cks: list[tuple[str, int]] = []
+        seen_cks: set[tuple[str, int]] = set()
+        for ck in seq:
+            if ck not in seen_cks:
+                seen_cks.add(ck)
+                out_cks.append(ck)
+        return out_cks
+
+    def _parent_chain_info(
+        el_map: Mapping[str, Any],
+    ) -> tuple[list[tuple[str, int]], set[int], bool, bool]:
         seen_p: set[int] = set()
         curr_p = el_map.get("parent_index")
         all_p_ids: set[int] = set()
-        non_root_p_ids: set[int] = set()
-        rev_segs: list[str] = []
+        has_non_root_p = False
+        in_toolbar_p = False
+        has_nontoolbar_cont_p = False
+        rev_ckeys: list[tuple[str, int]] = []
         while isinstance(curr_p, int) and not isinstance(curr_p, bool) and curr_p not in seen_p:
             seen_p.add(curr_p)
             all_p_ids.add(curr_p)
             p_el = by_index.get(curr_p)
             if p_el is None:
-                non_root_p_ids.add(curr_p)
+                if curr_p not in window_root_ids:
+                    has_non_root_p = True
+                if curr_p in md_toolbar_ids:
+                    in_toolbar_p = True
+                ck_missing = ("el", curr_p)
+                if ck_missing in containers:
+                    c_miss = containers[ck_missing]
+                    for m_ck in reversed(c_miss["anc_ckeys"]):
+                        rev_ckeys.append(m_ck)
+                    all_p_ids.update(c_miss["all_anc_el_ids"])
+                    if c_miss["role"] != "AXToolbar" and curr_p not in md_toolbar_ids:
+                        has_nontoolbar_cont_p = True
+                elif curr_p not in window_root_ids and curr_p not in md_toolbar_ids:
+                    has_nontoolbar_cont_p = True
                 break
             p_role = str(p_el.get("role") or "").strip()
             if p_role not in WINDOW_ROOT_ROLES:
-                non_root_p_ids.add(curr_p)
-            p_lbl = str(
-                p_el.get("label")
-                if p_el.get("label") not in (None, "")
-                else (p_el.get("title") if p_el.get("title") not in (None, "") else p_el.get("description") or "")
-            ).replace("\u200e", "").strip()
-            if (
-                p_role not in WINDOW_ROOT_ROLES
-                and p_role not in MENU_BAR_ROLES
-                and p_role not in _LEAF_CONTROL_ROLES
-            ):
-                known_container_indices.add(curr_p)
-                if p_lbl:
-                    container_index_by_region.setdefault(p_lbl, curr_p)
-                    if not rev_segs or rev_segs[-1] != p_lbl:
-                        rev_segs.append(p_lbl)
-            elif p_role in WINDOW_ROOT_ROLES:
-                known_container_indices.add(curr_p)
+                has_non_root_p = True
+            if p_role == "AXToolbar" or curr_p in md_toolbar_ids:
+                in_toolbar_p = True
+            ck_p = ("el", curr_p)
+            if ck_p in containers:
+                rev_ckeys.append(ck_p)
+                if p_role != "AXToolbar" and curr_p not in md_toolbar_ids:
+                    has_nontoolbar_cont_p = True
             curr_p = p_el.get("parent_index")
-        segs_out = list(reversed(rev_segs))
-        if segs_out:
-            known_container_paths.append(segs_out)
-        return segs_out, all_p_ids, non_root_p_ids
+        return (
+            _dedup_ckeys(list(reversed(rev_ckeys))),
+            all_p_ids,
+            has_non_root_p,
+            bool(has_nontoolbar_cont_p and not in_toolbar_p),
+        )
+
+    el_anc_ckeys: dict[int, list[tuple[str, int]]] = {
+        k: list(v) for k, v in md_struct["anc_ckeys_by_el"].items()
+    }
+    ancestor_indices_by_el: dict[int, set[int]] = {
+        k: set(v) for k, v in md_struct["all_anc_ids_by_el"].items()
+    }
+    has_non_root_anc_by_el: dict[int, bool] = dict(md_struct["has_non_root_anc_by_el"])
+    has_nontoolbar_container_anc_by_el: dict[int, bool] = dict(
+        md_struct["has_nontoolbar_container_anc_by_el"]
+    )
 
     for idx_k, el_k in by_index.items():
-        k_role = str(el_k.get("role") or "").strip()
-        k_lbl = str(
-            el_k.get("label")
-            if el_k.get("label") not in (None, "")
-            else (el_k.get("title") if el_k.get("title") not in (None, "") else el_k.get("description") or "")
-        ).replace("\u200e", "").strip()
-        p_segs, p_all_ids, _ = _parent_chain_meta(el_k)
+        p_ckeys, p_all_ids, p_has_non_root, p_has_nt_cont = _parent_chain_info(el_k)
         ancestor_indices_by_el.setdefault(idx_k, set()).update(p_all_ids)
-        if not container_segments_by_el.get(idx_k) and p_segs:
-            container_segments_by_el[idx_k] = p_segs
-        if k_role not in WINDOW_ROOT_ROLES and k_role not in MENU_BAR_ROLES and k_role not in _LEAF_CONTROL_ROLES:
-            known_container_indices.add(idx_k)
-            if k_lbl:
-                container_index_by_region.setdefault(k_lbl, idx_k)
-                own_segs = list(container_segments_by_el.get(idx_k) or [])
-                if not own_segs or own_segs[-1] != k_lbl:
-                    own_segs.append(k_lbl)
-                known_container_paths.append(own_segs)
-        elif k_role in WINDOW_ROOT_ROLES:
-            known_container_indices.add(idx_k)
+        merged_cks = _dedup_ckeys(el_anc_ckeys.get(idx_k, []) + p_ckeys)
+        if merged_cks:
+            el_anc_ckeys[idx_k] = merged_cks
+        exp_depth = el_k.get("depth")
+        depth_nested = (
+            isinstance(exp_depth, int) and not isinstance(exp_depth, bool) and exp_depth >= 2
+        ) or (md_depth.get(idx_k, 1) >= 2 and str(el_k.get("role") or "") not in WINDOW_ROOT_ROLES)
+        has_non_root_anc_by_el[idx_k] = bool(
+            has_non_root_anc_by_el.get(idx_k, False) or p_has_non_root or depth_nested
+        )
+        has_nontoolbar_container_anc_by_el[idx_k] = bool(
+            has_nontoolbar_container_anc_by_el.get(idx_k, False) or p_has_nt_cont
+        )
+        for ck in merged_cks:
+            if ck in containers:
+                containers[ck]["desc_el_ids"].add(idx_k)
+        ck_own = ("el", idx_k)
+        if ck_own in containers:
+            c_own = containers[ck_own]
+            c_own["strict_anc_ckeys"] = _dedup_ckeys(
+                [ck for ck in (c_own["strict_anc_ckeys"] + merged_cks) if ck != ck_own]
+            )
+            c_own["anc_ckeys"] = c_own["strict_anc_ckeys"] + [ck_own]
+            c_own["all_anc_el_ids"].update(ancestor_indices_by_el[idx_k])
 
-    seen_md_st = {entry[0] for entry in md_static_entries}
+    # Alias unindexed markdown containers ("md", line_no) to unreferenced ("el", c_idx) containers
+    # on the same descendant spine (1-to-1, never collapsing disjoint or co-indexed containers).
+    unseen_el_ckeys = [
+        ck
+        for ck, cn in containers.items()
+        if ck[0] == "el" and cn["elem_idx"] not in md_struct["seen_el_ids"]
+    ]
+    md_only_ckeys = sorted(
+        [ck for ck in containers if ck[0] == "md"],
+        key=lambda ck: len(containers[ck]["strict_anc_ckeys"]),
+        reverse=True,
+    )
+    alias_map: dict[tuple[str, int], tuple[str, int]] = {}
+    used_el_targets: set[tuple[str, int]] = set()
+    for m_ck in md_only_ckeys:
+        m_node = containers[m_ck]
+        if not m_node["desc_el_ids"]:
+            continue
+        best_e: tuple[str, int] | None = None
+        for e_ck in unseen_el_ckeys:
+            if e_ck in used_el_targets:
+                continue
+            e_node = containers[e_ck]
+            e_idx = e_node["elem_idx"]
+            m_desc = m_node["desc_el_ids"] - ({e_idx} if e_idx is not None else set())
+            e_desc = e_node["desc_el_ids"] - ({e_idx} if e_idx is not None else set())
+            if m_node["role"] != e_node["role"] or m_node["raw_label"] != e_node["raw_label"]:
+                continue
+            if m_desc and m_desc == e_desc:
+                best_e = e_ck
+                break
+        if best_e is not None:
+            alias_map[m_ck] = best_e
+            used_el_targets.add(best_e)
+
+    if alias_map:
+        for m_ck, e_ck in alias_map.items():
+            m_node = containers.pop(m_ck)
+            e_node = containers[e_ck]
+            if not e_node["raw_label"] and m_node["raw_label"]:
+                e_node["raw_label"] = m_node["raw_label"]
+            e_node["strict_anc_ckeys"] = _dedup_ckeys(
+                [alias_map.get(ck, ck) for ck in (m_node["strict_anc_ckeys"] + e_node["strict_anc_ckeys"]) if alias_map.get(ck, ck) != e_ck]
+            )
+            e_node["all_anc_el_ids"].update(m_node["all_anc_el_ids"])
+            e_node["desc_el_ids"].update(m_node["desc_el_ids"])
+        for ck, cn in containers.items():
+            cn["strict_anc_ckeys"] = _dedup_ckeys(
+                [alias_map.get(ak, ak) for ak in cn["strict_anc_ckeys"] if alias_map.get(ak, ak) != ck]
+            )
+            cn["anc_ckeys"] = cn["strict_anc_ckeys"] + [ck]
+        for idx_e, cks_e in list(el_anc_ckeys.items()):
+            el_anc_ckeys[idx_e] = _dedup_ckeys([alias_map.get(ak, ak) for ak in cks_e])
+        for s_rec in base_md_static_records:
+            s_rec["anc_ckeys"] = _dedup_ckeys([alias_map.get(ak, ak) for ak in s_rec["anc_ckeys"]])
+
+    # Propagate transitive container ancestry and descendant element sets across merged chains.
+    for _ in range(min(16, len(containers) + 1)):
+        changed = False
+        for ck, cn in containers.items():
+            expanded: list[tuple[str, int]] = []
+            for ak in cn["strict_anc_ckeys"]:
+                if ak in containers:
+                    expanded.extend(containers[ak]["strict_anc_ckeys"])
+                expanded.append(ak)
+            dedup_strict = _dedup_ckeys([ak for ak in expanded if ak != ck and ak in containers])
+            if dedup_strict != cn["strict_anc_ckeys"]:
+                cn["strict_anc_ckeys"] = dedup_strict
+                cn["anc_ckeys"] = dedup_strict + [ck]
+                changed = True
+            for ak in cn["strict_anc_ckeys"]:
+                before_n = len(containers[ak]["desc_el_ids"])
+                containers[ak]["desc_el_ids"].update(cn["desc_el_ids"])
+                if len(containers[ak]["desc_el_ids"]) != before_n:
+                    changed = True
+                if containers[ak]["elem_idx"] is not None:
+                    cn["all_anc_el_ids"].add(containers[ak]["elem_idx"])
+        if not changed:
+            break
+
+    for idx_e, cks_e in list(el_anc_ckeys.items()):
+        expanded_el: list[tuple[str, int]] = []
+        for ak in cks_e:
+            if ak in containers:
+                expanded_el.extend(containers[ak]["anc_ckeys"])
+        el_anc_ckeys[idx_e] = _dedup_ckeys(expanded_el)
+
+    static_records: list[dict[str, Any]] = list(base_md_static_records)
+    for s_rec in static_records:
+        exp_st: list[tuple[str, int]] = []
+        for ak in s_rec["anc_ckeys"]:
+            if ak in containers:
+                exp_st.extend(containers[ak]["anc_ckeys"])
+        s_rec["anc_ckeys"] = _dedup_ckeys(exp_st)
+
     for raw_el in raw_elements:
         if isinstance(raw_el, Mapping) and str(raw_el.get("role") or "").strip() == "AXStaticText":
-            st_val = raw_el.get("value") if raw_el.get("value") not in (None, "") else raw_el.get("label")
-            if isinstance(st_val, str):
-                st_clean = st_val.replace("\u200e", "").strip()
-                if st_clean and st_clean not in seen_md_st:
-                    p_segs, p_all_ids, p_non_root_ids = _parent_chain_meta(raw_el)
-                    st_idx = raw_el.get("element_index")
-                    if isinstance(st_idx, int) and st_idx in container_segments_by_el and not p_segs:
-                        p_segs = list(container_segments_by_el[st_idx])
-                    if isinstance(st_idx, int) and st_idx in ancestor_indices_by_el:
-                        p_all_ids = p_all_ids | ancestor_indices_by_el[st_idx]
-                        p_non_root_ids = {
-                            aid
-                            for aid in p_all_ids
-                            if str((by_index.get(aid) or {}).get("role") or "") not in WINDOW_ROOT_ROLES
-                        }
-                    md_static_entries.append((st_clean, p_segs, p_all_ids, p_non_root_ids))
-                    seen_md_st.add(st_clean)
-
-    eff_region = region.strip() if isinstance(region, str) and region.strip() else None
-    if root_element_index is not None:
-        if root_element_index not in by_index and root_element_index not in known_container_indices:
-            raise ValueError(
-                f"unknown_root_element_index: element_index={root_element_index} not found in snapshot {snapshot_id}"
-            )
-    if eff_region is not None:
-        if not any(_matches_region(c_segs, eff_region) for c_segs in known_container_paths):
-            raise ValueError(f"unknown_region: region={eff_region!r} not found in window hierarchy")
+            st_clean = _raw_el_static_text(raw_el)
+            if not st_clean:
+                continue
+            st_idx = raw_el.get("element_index")
+            st_idx_int = st_idx if (isinstance(st_idx, int) and not isinstance(st_idx, bool)) else None
+            p_ckeys, p_all_ids, p_has_non_root, _ = _parent_chain_info(raw_el)
+            if st_idx_int is not None:
+                p_ckeys = _dedup_ckeys(el_anc_ckeys.get(st_idx_int, []) + p_ckeys)
+                p_all_ids = p_all_ids | ancestor_indices_by_el.get(st_idx_int, set())
+                p_has_non_root = bool(p_has_non_root or has_non_root_anc_by_el.get(st_idx_int, False))
+            exp_st_depth = raw_el.get("depth")
+            if isinstance(exp_st_depth, int) and not isinstance(exp_st_depth, bool) and exp_st_depth >= 2:
+                p_has_non_root = True
+            if p_ckeys:
+                p_has_non_root = True
+            matched_existing = False
+            if st_idx_int is not None:
+                for s_rec in static_records:
+                    if s_rec["elem_idx"] == st_idx_int and s_rec["text"] == st_clean:
+                        s_rec["anc_ckeys"] = _dedup_ckeys(s_rec["anc_ckeys"] + p_ckeys)
+                        s_rec["all_anc_ids"].update(p_all_ids)
+                        s_rec["has_non_root_anc"] = bool(s_rec["has_non_root_anc"] or p_has_non_root)
+                        matched_existing = True
+                        break
+            else:
+                for s_rec in static_records:
+                    if (
+                        s_rec["elem_idx"] is None
+                        and s_rec["text"] == st_clean
+                        and s_rec["anc_ckeys"] == p_ckeys
+                        and s_rec["has_non_root_anc"] == p_has_non_root
+                    ):
+                        s_rec["all_anc_ids"].update(p_all_ids)
+                        matched_existing = True
+                        break
+            if not matched_existing:
+                static_records.append(
+                    {
+                        "text": st_clean,
+                        "elem_idx": st_idx_int,
+                        "anc_ckeys": p_ckeys,
+                        "all_anc_ids": p_all_ids,
+                        "has_non_root_anc": p_has_non_root,
+                    }
+                )
 
     win_root_label = ""
     for raw_el in raw_elements:
         if isinstance(raw_el, Mapping) and str(raw_el.get("role") or "") in WINDOW_ROOT_ROLES and raw_el.get("label"):
             win_root_label = str(raw_el.get("label") or "")
             break
-    obs_context = {
+    obs_context: dict[str, Any] = {
         "app_name": sc.get("app_name") or (baseline_observation.get("app_name") if isinstance(baseline_observation, Mapping) else None),
         "window_title": sc.get("window_title") or win_root_label or (baseline_observation.get("window_title") if isinstance(baseline_observation, Mapping) else None),
     }
@@ -2163,6 +2550,127 @@ def extract_window_observation(
         by_index, obs_context, raw_static_texts, md_unlabeled_value_ids
     )
 
+    all_secure_ids: set[int] = set(extra_secure_ids) | set(md_struct["secure_ids"])
+    all_secret_values: set[str] = {
+        sv for sv in (redacted_static_values | md_struct["secure_values"]) if sv
+    }
+    for idx_s, el_s in by_index.items():
+        s_role = str(el_s.get("role") or "").strip()
+        s_subrole = str(el_s.get("subrole") or "").strip()
+        s_val = (
+            ""
+            if el_s.get("value") is None
+            else str(el_s.get("value") or "").replace("\u200e", "").strip()
+        )
+        s_lbl = _raw_el_label(el_s)
+        if (
+            "secure" in s_role.lower()
+            or "secure" in s_subrole.lower()
+            or idx_s in all_secure_ids
+            or bool(_BULLET_MASK_RE.search(s_val))
+            or bool(_BULLET_MASK_RE.search(s_lbl))
+        ):
+            all_secure_ids.add(idx_s)
+            if s_val and not _PW_PLACEHOLDER_RE.match(s_val):
+                all_secret_values.add(s_val)
+
+    if isinstance(obs_context.get("window_title"), str) and _contains_secret_or_mask(
+        obs_context["window_title"], all_secret_values
+    ):
+        obs_context["window_title"] = obs_context.get("app_name") or ""
+
+    def _dedup_consecutive_labels(labels: list[str]) -> list[str]:
+        deduped: list[str] = []
+        for lbl_item in labels:
+            if lbl_item and (not deduped or deduped[-1] != lbl_item):
+                deduped.append(lbl_item)
+        return deduped
+
+    for ck, cn in containers.items():
+        c_idx = cn["elem_idx"]
+        c_el = by_index.get(c_idx) if c_idx is not None else None
+        c_subrole = str((c_el or {}).get("subrole") or "")
+        c_val = (
+            ""
+            if not c_el or c_el.get("value") is None
+            else str(c_el.get("value") or "").replace("\u200e", "").strip()
+        )
+        c_has_sec_desc = bool(cn["desc_el_ids"] & all_secure_ids)
+        c_is_sec = (
+            (c_idx is not None and c_idx in all_secure_ids)
+            or ("secure" in cn["role"].lower())
+            or ("secure" in c_subrole.lower())
+            or _contains_secret_or_mask(c_val, all_secret_values, strict_short=c_has_sec_desc)
+        )
+        raw_c_lbl = cn["raw_label"]
+        cn["clean_label"] = (
+            ""
+            if (c_is_sec or _contains_secret_or_mask(raw_c_lbl, all_secret_values, strict_short=c_has_sec_desc))
+            else raw_c_lbl
+        )
+
+    for ck, cn in containers.items():
+        cn["clean_path_dedup"] = _dedup_consecutive_labels(
+            [containers[ak]["clean_label"] for ak in cn["anc_ckeys"] if ak in containers and containers[ak]["clean_label"]]
+        )
+
+    container_segments_by_el: dict[int, list[str]] = {}
+    for idx_e, cks_e in el_anc_ckeys.items():
+        segs_e = _dedup_consecutive_labels(
+            [containers[ak]["clean_label"] for ak in cks_e if ak in containers and containers[ak]["clean_label"]]
+        )
+        if segs_e:
+            container_segments_by_el[idx_e] = segs_e
+
+    eff_region = region.strip() if isinstance(region, str) and region.strip() else None
+    if root_element_index is not None:
+        if (
+            root_element_index not in by_index
+            and root_element_index not in known_container_indices
+            and root_element_index not in md_struct["seen_el_ids"]
+        ):
+            raise ValueError(
+                f"unknown_root_element_index: element_index={root_element_index} not found in snapshot {snapshot_id}"
+            )
+        if root_element_index in all_secure_ids:
+            raise ValueError(
+                f"secure_root_element_refused: element_index={root_element_index} targets a secure element"
+            )
+
+    target_region_ckey: tuple[str, int] | None = None
+    if eff_region is not None:
+        reg_parts = [p.strip().lower() for p in eff_region.split(">") if p.strip()]
+        if not reg_parts:
+            raise ValueError(f"unknown_region: region={eff_region!r} not found in window hierarchy")
+        matched_ckeys = [
+            ck
+            for ck, cn in containers.items()
+            if _container_matches_region_parts(cn["clean_path_dedup"], cn["clean_label"], reg_parts)
+            and (
+                root_element_index is None
+                or cn["elem_idx"] == root_element_index
+                or root_element_index in cn["all_anc_el_ids"]
+            )
+        ]
+        if not matched_ckeys:
+            raise ValueError(f"unknown_region: region={eff_region!r} not found in window hierarchy")
+        matched_roots = [
+            ck
+            for ck in matched_ckeys
+            if not any(
+                other != ck
+                and other in containers[ck]["strict_anc_ckeys"]
+                and containers[other]["clean_path_dedup"] == containers[ck]["clean_path_dedup"]
+                for other in matched_ckeys
+            )
+        ]
+        if len(matched_roots) > 1:
+            raise ValueError(
+                f"ambiguous_region: region={eff_region!r} matches {len(matched_roots)} distinct containers; "
+                "disambiguate with 'Parent > Child' or root_element_index"
+            )
+        target_region_ckey = matched_roots[0]
+
     eff_query: str | None = None
     if isinstance(query, str) and query.strip():
         eff_query = query.strip()
@@ -2171,6 +2679,7 @@ def extract_window_observation(
 
     compact_elements: list[dict[str, Any]] = []
     explicit_target_elements: list[dict[str, Any]] = []
+    window_secure_control_ids: set[int] = set()
 
     for idx in sorted(by_index.keys()):
         el = by_index[idx]
@@ -2197,15 +2706,13 @@ def extract_window_observation(
         is_secure = (
             "secure" in role.lower()
             or "secure" in subrole.lower()
-            or bool(_BULLET_MASK_RE.search(raw_val_str))
-            or bool(_BULLET_MASK_RE.search(label))
-            or (raw_val_str in redacted_static_values and bool(raw_val_str))
-            or (label in redacted_static_values and bool(label))
-            or (idx in extra_secure_ids)
+            or _contains_secret_or_mask(raw_val_str, all_secret_values)
+            or _contains_secret_or_mask(label, all_secret_values)
+            or (idx in all_secure_ids)
         )
-        if _BULLET_MASK_RE.search(label) or (label in redacted_static_values and bool(label)):
+        if _contains_secret_or_mask(label, all_secret_values):
             label = ""
-        if _BULLET_MASK_RE.search(synth_label) or (synth_label in redacted_static_values and bool(synth_label)):
+        if _contains_secret_or_mask(synth_label, all_secret_values):
             synth_label = ""
         if (
             (role in TEXT_INPUT_AX_ROLES or is_secure)
@@ -2218,8 +2725,7 @@ def extract_window_observation(
             if (
                 alt_str
                 and alt_str != raw_val_str
-                and not _BULLET_MASK_RE.search(alt_str)
-                and alt_str not in redacted_static_values
+                and not _contains_secret_or_mask(alt_str, all_secret_values)
             ):
                 label = alt_str
             else:
@@ -2234,6 +2740,8 @@ def extract_window_observation(
             and not supports_press
         ):
             continue
+        if is_secure:
+            window_secure_control_ids.add(idx)
         depth, in_toolbar = _element_depth_and_toolbar(idx, el, by_index, md_depth, md_toolbar_ids)
         if in_toolbar and role in TEXT_INPUT_AX_ROLES and not label and not synth_label and not is_secure:
             synth_label = "Search"
@@ -2295,14 +2803,22 @@ def extract_window_observation(
         matches_query = True
         if eff_query is not None:
             q_low = eff_query.lower()
+            raw_title_str = str(el.get("title") or "").replace("\u200e", "").strip()
+            raw_desc_str = str(el.get("description") or "").replace("\u200e", "").strip()
+            safe_title_str = (
+                "" if (is_secure or _contains_secret_or_mask(raw_title_str, all_secret_values)) else raw_title_str
+            )
+            safe_desc_str = (
+                "" if (is_secure or _contains_secret_or_mask(raw_desc_str, all_secret_values)) else raw_desc_str
+            )
             haystack = " ".join([
                 display_label,
                 raw_label_val,
                 role,
                 value or "",
                 " > ".join(el_segs),
-                str(el.get("title") or ""),
-                str(el.get("description") or ""),
+                safe_title_str,
+                safe_desc_str,
             ]).lower()
             matches_query = q_low in haystack
 
@@ -2313,14 +2829,25 @@ def extract_window_observation(
 
     window_total_actionable = len(compact_elements)
 
-    region_buckets: dict[str, dict[str, Any]] = {}
+    region_buckets: dict[tuple[str, int], dict[str, Any]] = {}
     for cel in compact_elements:
         c_idx = cel["element_index"]
-        c_segs = container_segments_by_el.get(c_idx) or []
-        if not c_segs:
+        if (
+            c_idx in all_secure_ids
+            or "secure" in str(cel.get("state") or "")
+            or not cel.get("supported_actions")
+        ):
             continue
-        top_reg = c_segs[0]
-        bucket = region_buckets.get(top_reg)
+        anc_cks = el_anc_ckeys.get(c_idx, [])
+        top_ck = next(
+            (ak for ak in anc_cks if ak in containers and containers[ak]["clean_label"]),
+            None,
+        )
+        if top_ck is None:
+            continue
+        top_node = containers[top_ck]
+        top_reg = top_node["clean_label"]
+        bucket = region_buckets.get(top_ck)
         if bucket is None:
             bucket = {
                 "region": top_reg,
@@ -2328,43 +2855,69 @@ def extract_window_observation(
                 "subregions": [],
                 "sample_labels": [],
             }
-            if top_reg in container_index_by_region:
-                bucket["element_index"] = container_index_by_region[top_reg]
-            region_buckets[top_reg] = bucket
+            if top_node["elem_idx"] is not None:
+                bucket["element_index"] = top_node["elem_idx"]
+            region_buckets[top_ck] = bucket
         bucket["actionable_count"] += 1
-        if len(c_segs) > 1 and c_segs[1] not in bucket["subregions"] and len(bucket["subregions"]) < 8:
-            bucket["subregions"].append(c_segs[1])
+        top_pos = anc_cks.index(top_ck)
+        next_sub = next(
+            (
+                containers[ak]["clean_label"]
+                for ak in anc_cks[top_pos + 1 :]
+                if ak in containers
+                and containers[ak]["clean_label"]
+                and containers[ak]["clean_label"] != top_reg
+            ),
+            None,
+        )
+        if next_sub and next_sub not in bucket["subregions"] and len(bucket["subregions"]) < 8:
+            bucket["subregions"].append(next_sub)
         c_lbl = str(cel.get("label") or "").strip()
-        if c_lbl and c_lbl not in bucket["sample_labels"] and len(bucket["sample_labels"]) < 4:
+        if (
+            c_lbl
+            and not _contains_secret_or_mask(c_lbl, all_secret_values)
+            and c_lbl not in bucket["sample_labels"]
+            and len(bucket["sample_labels"]) < 4
+        ):
             bucket["sample_labels"].append(c_lbl)
     drill_regions: list[dict[str, Any]] = list(region_buckets.values())
+    top_name_counts: dict[str, int] = {}
+    for b_item in drill_regions:
+        norm_r = str(b_item["region"]).strip().lower()
+        top_name_counts[norm_r] = top_name_counts.get(norm_r, 0) + 1
+    for b_item in drill_regions:
+        if top_name_counts.get(str(b_item["region"]).strip().lower(), 0) > 1:
+            b_item["ambiguous_region"] = True
 
     def _el_in_subtree_scope(cel: Mapping[str, Any]) -> bool:
         c_idx = cel["element_index"]
-        c_segs = container_segments_by_el.get(c_idx) or []
+        c_anc_cks = el_anc_ckeys.get(c_idx, [])
         c_anc_ids = ancestor_indices_by_el.get(c_idx, set())
-        if eff_region is not None and not _matches_region(c_segs, eff_region):
+        if target_region_ckey is not None and target_region_ckey not in c_anc_cks:
             return False
-        if root_element_index is not None and c_idx != root_element_index and root_element_index not in c_anc_ids:
+        if (
+            root_element_index is not None
+            and c_idx != root_element_index
+            and root_element_index not in c_anc_ids
+            and ("el", root_element_index) not in c_anc_cks
+        ):
             return False
         return True
 
-    if eff_region is not None or root_element_index is not None:
+    def _el_in_skeleton_scope(cel: Mapping[str, Any]) -> bool:
+        if cel.get("in_toolbar"):
+            return True
+        c_idx = cel["element_index"]
+        if has_nontoolbar_container_anc_by_el.get(c_idx, False) or el_anc_ckeys.get(c_idx):
+            return False
+        return bool(cel.get("depth", 1) <= SKELETON_SHALLOW_MAX_DEPTH)
+
+    if target_region_ckey is not None or root_element_index is not None:
         scoped_compact_elements = [e for e in compact_elements if _el_in_subtree_scope(e)]
         scoped_explicit_elements = [e for e in explicit_target_elements if _el_in_subtree_scope(e)]
     elif skeleton:
-        scoped_compact_elements = [
-            e
-            for e in compact_elements
-            if not container_segments_by_el.get(e["element_index"])
-            and (e.get("in_toolbar") or e.get("depth", 1) <= SKELETON_SHALLOW_MAX_DEPTH)
-        ]
-        scoped_explicit_elements = [
-            e
-            for e in explicit_target_elements
-            if not container_segments_by_el.get(e["element_index"])
-            and (e.get("in_toolbar") or e.get("depth", 1) <= SKELETON_SHALLOW_MAX_DEPTH)
-        ]
+        scoped_compact_elements = [e for e in compact_elements if _el_in_skeleton_scope(e)]
+        scoped_explicit_elements = [e for e in explicit_target_elements if _el_in_skeleton_scope(e)]
     else:
         scoped_compact_elements = compact_elements
         scoped_explicit_elements = explicit_target_elements
@@ -2372,26 +2925,35 @@ def extract_window_observation(
     all_clean_static_texts = [
         t
         for t in raw_static_texts
-        if not _BULLET_MASK_RE.search(t) and t not in redacted_static_values
+        if t and not _contains_secret_or_mask(t, all_secret_values)
     ]
-    if not skeleton and eff_region is None and root_element_index is None:
+    if not skeleton and target_region_ckey is None and root_element_index is None:
         static_texts = all_clean_static_texts
     else:
         scoped_st: list[str] = []
-        for st_txt, st_segs, st_all_ids, st_non_root_ids in md_static_entries:
-            if _BULLET_MASK_RE.search(st_txt) or st_txt in redacted_static_values or st_txt in scoped_st:
+        for s_rec in static_records:
+            st_txt = s_rec["text"]
+            st_elem_idx = s_rec["elem_idx"]
+            if (
+                not st_txt
+                or st_txt in scoped_st
+                or (st_elem_idx is not None and st_elem_idx in all_secure_ids)
+                or _contains_secret_or_mask(st_txt, all_secret_values)
+            ):
                 continue
-            is_top_level_st = not st_segs and not st_non_root_ids
-            if eff_region is not None or root_element_index is not None:
-                in_reg = eff_region is None or _matches_region(st_segs, eff_region)
-                in_root = root_element_index is None or root_element_index in st_all_ids
+            is_top_level_st = (not s_rec["has_non_root_anc"]) and (not s_rec["anc_ckeys"])
+            if target_region_ckey is not None or root_element_index is not None:
+                in_reg = target_region_ckey is None or (target_region_ckey in s_rec["anc_ckeys"])
+                in_root = root_element_index is None or (
+                    st_elem_idx == root_element_index
+                    or root_element_index in s_rec["all_anc_ids"]
+                    or ("el", root_element_index) in s_rec["anc_ckeys"]
+                )
                 if is_top_level_st or (in_reg and in_root):
                     scoped_st.append(st_txt)
             elif skeleton:
                 if is_top_level_st:
                     scoped_st.append(st_txt)
-        if skeleton and eff_region is None and root_element_index is None and not scoped_st:
-            scoped_st = all_clean_static_texts[:8]
         static_texts = scoped_st
 
     # Prioritize toolbar controls first, then primary content controls, then secondary sidebar lists, breaking ties by depth and element_index
@@ -2546,13 +3108,11 @@ def extract_window_observation(
         "drill_regions": drill_regions,
         "static_texts": static_texts,
         "indexed_element_ids": {e["element_index"] for e in all_elements},
-        "secure_element_ids": {
-            e["element_index"] for e in all_elements if "secure" in str(e.get("state") or "")
-        }
-        | extra_secure_ids,
+        "secure_element_ids": window_secure_control_ids | extra_secure_ids | set(md_struct["secure_ids"]),
         "elements": bounded_elements,
         "all_elements": all_elements,
         "auto_candidates": auto_candidates,
+        "_has_unindexed_secure_node": bool(md_struct["has_unindexed_secure_node"]),
         "_raw_elements": [dict(e) for e in raw_elements if isinstance(e, Mapping)],
         "_tree_markdown": tree_md,
     }
@@ -6390,7 +6950,9 @@ class JevMcpServer:
                 is_error=True,
             )
 
-        secure_redacted_count = len(obs.get("secure_element_ids") or ())
+        secure_redacted_count = len(obs.get("secure_element_ids") or ()) + int(
+            bool(obs.get("_has_unindexed_secure_node"))
+        )
         if want_screenshot and secure_redacted_count > 0:
             refused_payload = {
                 "schema": "agy_cua.jev_observe_v1",
