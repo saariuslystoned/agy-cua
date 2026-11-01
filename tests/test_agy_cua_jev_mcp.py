@@ -4894,7 +4894,7 @@ class StdioEndToEndTest(unittest.TestCase):
                 req = urllib.request.Request(
                     proxy.base_url,
                     data=b'{"state":{"note":"CANARY-VAULT-SECRET-9941"}}',
-                    headers={"Content-Type": "application/json"},
+                    headers={"Content-Type": "application/json", "Authorization": proxy.auth_header},
                     method="POST",
                 )
                 with urllib.request.urlopen(req, timeout=5.0) as resp:
@@ -5376,7 +5376,7 @@ class StdioEndToEndTest(unittest.TestCase):
             req = urllib.request.Request(
                 proxy.base_url,
                 data=escaped_body,
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", "Authorization": proxy.auth_header},
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=5.0) as resp:
@@ -5394,7 +5394,7 @@ class StdioEndToEndTest(unittest.TestCase):
             bad_req = urllib.request.Request(
                 proxy.base_url,
                 data=b'{"state":{"note":"\\u0043ANARY-VAULT-SECRET-9941"',
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", "Authorization": proxy.auth_header},
                 method="POST",
             )
             with self.assertRaises(urllib.error.HTTPError) as http_ctx:
@@ -6591,7 +6591,7 @@ class StdioEndToEndTest(unittest.TestCase):
                 p_req = urllib.request.Request(
                     proxy_to.base_url,
                     data=b'{"state":{"goal":"ok"}}',
-                    headers={"Content-Type": "application/json"},
+                    headers={"Content-Type": "application/json", "Authorization": proxy_to.auth_header},
                     method="POST",
                 )
                 with urllib.request.urlopen(p_req, timeout=5.0) as resp:
@@ -6685,6 +6685,200 @@ class StdioEndToEndTest(unittest.TestCase):
                 self.assertEqual(len(captured_wire_sizes), 1)
             finally:
                 srv_heavy.close()
+
+    def test_v2_round7_proxy_auth_slot_identity_calc_seed_and_canary_flag(self):
+        import threading
+
+        bench_path = os.path.join(ROOT, "scripts", "benchmark_cua.py")
+        b_loader = importlib.machinery.SourceFileLoader("benchmark_cua_r7_test", bench_path)
+        b_spec = importlib.util.spec_from_loader("benchmark_cua_r7_test", b_loader)
+        bench_mod = importlib.util.module_from_spec(b_spec)
+        sys.modules["benchmark_cua_r7_test"] = bench_mod
+        b_loader.exec_module(bench_mod)
+
+        # (1) LoopbackTypeSafeProxy rejects unauthenticated or wrong-token requests with HTTP 401 before forwarding
+        upstream_calls = 0
+
+        def fake_up_post(_req, _timeout):
+            nonlocal upstream_calls
+            upstream_calls += 1
+            return 200, json.dumps(
+                {
+                    "answers": {"target": {"type": "choice", "choice": "@s1:e1", "probabilities": {"@s1:e1": 0.99}}},
+                    "usage": {"input_tokens": 10, "output_tokens": 2},
+                }
+            )
+
+        spend_auth = bench_mod.SpendTracker(max_budget_usd=1.0)
+        proxy_auth = bench_mod.LoopbackTypeSafeProxy(
+            spend_auth,
+            env={"TYPESAFE_API_KEY": "real-key"},
+            http_post=fake_up_post,
+        )
+        try:
+            self.assertNotEqual(proxy_auth.auth_token, "loopback-proxy")
+            self.assertGreaterEqual(len(proxy_auth.auth_token), 32)
+            for bad_headers in (
+                {"Content-Type": "application/json"},
+                {"Content-Type": "application/json", "Authorization": "Bearer loopback-proxy"},
+                {"Content-Type": "application/json", "Authorization": "Bearer wrong-token"},
+            ):
+                unauth_req = urllib.request.Request(
+                    proxy_auth.base_url,
+                    data=b'{"state":{"goal":"spend"}}',
+                    headers=bad_headers,
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as unauth_ctx:
+                    urllib.request.urlopen(unauth_req, timeout=5.0)
+                self.assertEqual(unauth_ctx.exception.code, 401)
+                unauth_ctx.exception.close()
+            self.assertEqual(upstream_calls, 0)
+            self.assertEqual(spend_auth.total_usd, 0.0)
+            self.assertEqual(spend_auth.reserved_usd, 0.0)
+        finally:
+            proxy_auth.close()
+
+        # (2) Concurrent requests remove their own slot by identity (out-of-order completion never abandons the wrong slot)
+        req1_entered = threading.Event()
+        release_req1 = threading.Event()
+        req2_done = threading.Event()
+
+        def concurrent_up_post(req, _timeout):
+            payload = json.loads(req.data.decode("utf-8"))
+            tag = payload["state"]["tag"]
+            if tag == "slow-first":
+                req1_entered.set()
+                release_req1.wait(timeout=5.0)
+            return 200, json.dumps(
+                {
+                    "answers": {"target": {"type": "choice", "choice": "@s1:e1", "probabilities": {"@s1:e1": 0.99}}},
+                    "usage": {"input_tokens": 50, "output_tokens": 5},
+                }
+            )
+
+        spend_conc = bench_mod.SpendTracker(max_budget_usd=1.0)
+        proxy_conc = bench_mod.LoopbackTypeSafeProxy(
+            spend_conc,
+            env={"TYPESAFE_API_KEY": "real-key"},
+            http_post=concurrent_up_post,
+        )
+        try:
+            r1_status: list[int] = []
+
+            def send_slow_first():
+                rq = urllib.request.Request(
+                    proxy_conc.base_url,
+                    data=b'{"state":{"tag":"slow-first"}}',
+                    headers={"Content-Type": "application/json", "Authorization": proxy_conc.auth_header},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(rq, timeout=5.0) as rp:
+                        r1_status.append(rp.status)
+                except urllib.error.HTTPError as he:
+                    r1_status.append(he.code)
+                    he.close()
+
+            t1 = threading.Thread(target=send_slow_first)
+            t1.start()
+            self.assertTrue(req1_entered.wait(timeout=2.0))
+
+            # Second request arrives later and finishes FIRST (out of order); must remove ONLY its own slot!
+            rq2 = urllib.request.Request(
+                proxy_conc.base_url,
+                data=b'{"state":{"tag":"fast-second"}}',
+                headers={"Content-Type": "application/json", "Authorization": proxy_conc.auth_header},
+                method="POST",
+            )
+            with urllib.request.urlopen(rq2, timeout=5.0) as rp2:
+                self.assertEqual(rp2.status, 200)
+            req2_done.set()
+
+            # Subprocess timeout now abandons the still-in-flight slow-first slot and retains its reservation
+            with self.assertRaisesRegex(RuntimeError, "reservation retained"):
+                proxy_conc.on_subprocess_timeout("jev_desktop_run")
+            release_req1.set()
+            t1.join(timeout=3.0)
+            # Slow-first saw slot["abandoned"] == True -> HTTP 400 and did NOT release its retained reservation!
+            self.assertEqual(r1_status, [400])
+            self.assertGreater(spend_conc.reserved_usd, 0.0)
+        finally:
+            release_req1.set()
+            proxy_conc.close()
+
+        # (3) reset_calculator uses checked_call and aborts immediately when a seed click returns isError=True
+        class RejectMultiplyCalcDriver:
+            def __init__(self):
+                self.snap_seq = 0
+                self.clicked_tokens: list[str] = []
+
+            def call_tool(self, name, args, **_kwargs):
+                if name == "get_window_state":
+                    self.snap_seq += 1
+                    snap = f"s0000cb{self.snap_seq:02x}"
+                    md = '- [0] AXWindow "Calculator"\n  - [1] AXStaticText = "9"\n  - [2] AXButton (Clear)\n  - [4] AXButton (9)\n  - [8] AXButton (Multiply)\n  - [9] AXButton (4)'
+                    return {
+                        "content": [{"type": "text", "text": md}],
+                        "structuredContent": {
+                            "pid": 77,
+                            "window_id": 301,
+                            "snapshot_id": snap,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": [
+                                {"element_index": 0, "role": "AXWindow", "label": "Calculator", "actions": ["AXRaise"]},
+                                {"element_index": 1, "role": "AXStaticText", "label": "9", "value": "9", "parent_index": 0},
+                                {"element_index": 2, "role": "AXButton", "label": "Clear", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                {"element_index": 4, "role": "AXButton", "label": "9", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                {"element_index": 8, "role": "AXButton", "label": "Multiply", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                {"element_index": 9, "role": "AXButton", "label": "4", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                            ],
+                        },
+                    }
+                if name == "click":
+                    tok = str(args["element_token"])
+                    self.clicked_tokens.append(tok)
+                    if tok.endswith(":8"):
+                        return {"isError": True, "content": [{"type": "text", "text": "element action rejected"}]}
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+        orig_sleep = bench_mod.time.sleep
+        orig_wake = bench_mod._wake_macos_app_nap
+        bench_mod.time.sleep = lambda _s: None
+        bench_mod._wake_macos_app_nap = lambda _pid: None
+        try:
+            bad_calc = RejectMultiplyCalcDriver()
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod.reset_calculator(bad_calc, 77, 301, seed_dirty="99*4")
+            # Aborted right at Multiply (':8') before clicking final digit '4' (':9')
+            self.assertEqual([t.split(":")[1] for t in bad_calc.clicked_tokens], ["2", "4", "4", "8"])
+        finally:
+            bench_mod.time.sleep = orig_sleep
+            bench_mod._wake_macos_app_nap = orig_wake
+
+        # (4) Fatal provider/budget RuntimeError preserves accumulated canary_leaked=True attribute
+        spend_cf = bench_mod.SpendTracker(max_budget_usd=1.0)
+        proxy_cf = bench_mod.LoopbackTypeSafeProxy(
+            spend_cf,
+            env={"TYPESAFE_API_KEY": "real-key"},
+            http_post=fake_up_post,
+        )
+        try:
+            proxy_cf.budget_exc.append(RuntimeError("Budget ceiling hit during Jev call"))
+            with self.assertRaisesRegex(RuntimeError, "Budget ceiling hit during Jev call") as cf_ctx:
+                bench_mod._run_jev_node_helper(
+                    [sys.executable, "-c", 'print("CANARY-VAULT-SECRET-9941")'],
+                    env={},
+                    proxy=proxy_cf,
+                    timeout_s=5.0,
+                    tool_name="jev_desktop_act",
+                )
+            self.assertNotIsInstance(cf_ctx.exception, bench_mod.ArmActionError)
+            self.assertTrue(getattr(cf_ctx.exception, "canary_leaked", False))
+        finally:
+            proxy_cf.close()
 
 
 if __name__ == "__main__":

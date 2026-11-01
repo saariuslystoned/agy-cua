@@ -15,12 +15,14 @@ from __future__ import annotations
 import argparse
 import base64
 import fcntl
+import hmac
 import importlib.machinery
 import importlib.util
 import io
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -721,12 +723,13 @@ def reset_calculator(driver: jev_mod.DriverClient, pid: int, window_id: int, *, 
     _wake_macos_app_nap(pid)
     time.sleep(0.05)
     # Press Escape to dismiss any open popup menu and clear Calculator to 0
-    driver.call_tool("press_key", {"pid": pid, "window_id": window_id, "key": "escape", "delivery_mode": "background"})
+    checked_call(driver, "press_key", {"pid": pid, "window_id": window_id, "key": "escape", "delivery_mode": "background"})
     time.sleep(0.20)
     obs = _read_window_observation_resilient(driver, pid, window_id, timeout_ms=5000, attempts=3)
     clear_cands = [c for c in obs["auto_candidates"] if any(k in c["id"] for k in ("all-clear", "clear"))]
     if clear_cands:
-        driver.call_tool(
+        checked_call(
+            driver,
             "click",
             {
                 "pid": pid,
@@ -764,7 +767,8 @@ def reset_calculator(driver: jev_mod.DriverClient, pid: int, window_id: int, *, 
                 )
             if digit_el is None:
                 raise RuntimeError(f"reset_calculator: missing Calculator button for {ch!r}")
-            driver.call_tool(
+            checked_call(
+                driver,
                 "click",
                 {
                     "pid": pid,
@@ -1167,6 +1171,14 @@ class ArmActionError(RuntimeError):
     def __init__(self, message: str, *, canary_leaked: bool = False) -> None:
         super().__init__(message)
         self.canary_leaked = bool(canary_leaked)
+
+
+def _attach_canary_flag(exc: BaseException | None, leaked: bool) -> None:
+    if exc is not None and leaked:
+        try:
+            setattr(exc, "canary_leaked", True)
+        except Exception:
+            pass
 
 
 def _expand_direct_observation_elements(
@@ -2737,6 +2749,7 @@ def run_arm_agy_cua_jev(
             "trace": trace_events,
         }
     finally:
+        _attach_canary_flag(sys.exc_info()[1], canary_leaked)
         jev_server.close()
 
 
@@ -2803,8 +2816,10 @@ class LoopbackTypeSafeProxy:
         self.budget_exc: list[RuntimeError] = []
         self.jev_latencies_ms: list[float] = []
         self.calls_used = 0
+        self.auth_token = secrets.token_urlsafe(32)
+        self.auth_header = f"Bearer {self.auth_token}"
         self._lock = threading.Lock()
-        self._active_slots: list[dict[str, bool]] = []
+        self._active_slots: dict[int, dict[str, bool]] = {}
 
         eff_env = dict(os.environ) if env is None else dict(env)
         self.route = jev_mod.resolve_route(eff_env, jev_mod.read_keychain_secret)
@@ -2816,7 +2831,28 @@ class LoopbackTypeSafeProxy:
 
         class ProxyHandler(http.server.BaseHTTPRequestHandler):
             def do_POST(self) -> None:
-                length = int(self.headers.get("Content-Length", "0") or 0)
+                got_auth = (self.headers.get("Authorization") or "").strip()
+                if not hmac.compare_digest(got_auth, proxy_ref.auth_header):
+                    self.send_response(401)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"unauthorized"}')
+                    self.close_connection = True
+                    return
+
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or 0)
+                except ValueError:
+                    length = -1
+                if length < 0 or length > 4 * 1024 * 1024:
+                    self.send_response(413 if length > 0 else 400)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"invalid_content_length"}')
+                    self.close_connection = True
+                    return
                 raw = self.rfile.read(length) if length > 0 else b"{}"
                 try:
                     scrubbed_bytes, leaked = scrub_proxy_json_payload(raw)
@@ -2834,6 +2870,7 @@ class LoopbackTypeSafeProxy:
                         proxy_ref.canary_leaked = True
 
                 slot = {"abandoned": False}
+                slot_id = id(slot)
                 with proxy_ref._lock:
                     try:
                         proxy_ref.spend.reserve_before_call(JEV_RESERVE_ALLOWANCE_USD)
@@ -2844,7 +2881,7 @@ class LoopbackTypeSafeProxy:
                         self.end_headers()
                         self.wfile.write(b'{"error":"budget_exceeded"}')
                         return
-                    proxy_ref._active_slots.append(slot)
+                    proxy_ref._active_slots[slot_id] = slot
                     proxy_ref.calls_used += 1
 
                 headers = {
@@ -2868,8 +2905,7 @@ class LoopbackTypeSafeProxy:
                     code = getattr(exc, "code", 0)
                     with proxy_ref._lock:
                         if not slot["abandoned"]:
-                            if slot in proxy_ref._active_slots:
-                                proxy_ref._active_slots.remove(slot)
+                            proxy_ref._active_slots.pop(slot_id, None)
                             proxy_ref.spend.jev_calls += 1
                             proxy_ref.spend.jev_uncertain_failures += 1
                             proxy_ref.budget_exc.append(
@@ -2888,8 +2924,7 @@ class LoopbackTypeSafeProxy:
                         self.end_headers()
                         self.wfile.write(b'{"error":"abandoned_on_timeout"}')
                         return
-                    if slot in proxy_ref._active_slots:
-                        proxy_ref._active_slots.remove(slot)
+                    proxy_ref._active_slots.pop(slot_id, None)
                     proxy_ref.jev_latencies_ms.append(elapsed_ms)
                     try:
                         accounted = proxy_ref.spend.settle_jev_request(
@@ -2934,20 +2969,25 @@ class LoopbackTypeSafeProxy:
     def raise_if_error(self) -> None:
         with self._lock:
             if self.budget_exc:
-                raise self.budget_exc[0]
+                err = self.budget_exc[0]
+                _attach_canary_flag(err, self.canary_leaked)
+                raise err
 
     def on_subprocess_timeout(self, tool_name: str) -> None:
         """Preserve pending provider/budget errors or retain in-flight reservations on child timeout."""
         with self._lock:
             if self.budget_exc:
-                raise self.budget_exc[0]
+                err0 = self.budget_exc[0]
+                _attach_canary_flag(err0, self.canary_leaked)
+                raise err0
             if self._active_slots:
-                for slot in self._active_slots:
+                for slot in self._active_slots.values():
                     slot["abandoned"] = True
                     self.spend.jev_calls += 1
                     self.spend.jev_uncertain_failures += 1
                 self._active_slots.clear()
                 err = RuntimeError(f"Jev request in flight during {tool_name} timeout; reservation retained")
+                _attach_canary_flag(err, self.canary_leaked)
                 self.budget_exc.append(err)
                 raise err
 
@@ -3396,10 +3436,12 @@ def _run_ad_cli(
             kind = "read" if is_read_only else "mutating"
             suffix = "; canary_leaked=True" if leaked_to else ""
             if not host_stopped:
-                raise RuntimeError(
+                rt_err = RuntimeError(
                     f"agent-desktop {kind} command {subcmd!r} timed out after {timeout_s}s and command_host "
                     f"could not be confirmed stopped; halting benchmark{suffix}"
-                ) from exc
+                )
+                _attach_canary_flag(rt_err, leaked_to)
+                raise rt_err from exc
             raise ArmActionError(
                 f"agent-desktop {kind} command {subcmd!r} timed out after {timeout_s}s; action outcome unknown{suffix}",
                 canary_leaked=leaked_to,
@@ -3464,11 +3506,14 @@ def _run_jev_node_helper(
 ) -> tuple[subprocess.CompletedProcess[str], bool]:
     """Run `scripts/jev/{run,act}.mjs` in its own process group and fail closed on timeout or canary leakage."""
     call_env = dict(env)
+    if call_env.get("TYPESAFE_API_KEY") in (None, "", "loopback-proxy"):
+        call_env["TYPESAFE_API_KEY"] = proxy.auth_token
     owned_tmp: Path | None = None
     if not call_env.get("_AD_BENCH_TMPDIR"):
         owned_tmp = _create_ad_isolated_tmpdir()
         call_env["TMPDIR"] = str(owned_tmp)
         call_env["_AD_BENCH_TMPDIR"] = str(owned_tmp)
+    local_leaked = False
     try:
         try:
             proc = _run_grouped_subprocess(cmd, env=call_env, timeout_s=timeout_s)
@@ -3477,20 +3522,24 @@ def _run_jev_node_helper(
             out_txt = _coerce_proc_text(exc.stdout) + "\n" + _coerce_proc_text(exc.stderr)
             leaked_to = contains_secret_canary(out_txt)
             if leaked_to:
+                local_leaked = True
                 with proxy._lock:
                     proxy.canary_leaked = True
             proxy.on_subprocess_timeout(tool_name)
             if not host_stopped:
-                raise RuntimeError(
+                rt_err = RuntimeError(
                     f"{tool_name} timed out after {timeout_s}s and command_host could not be confirmed stopped; halting benchmark"
-                ) from exc
+                )
+                _attach_canary_flag(rt_err, bool(local_leaked or proxy.canary_leaked))
+                raise rt_err from exc
             raise ArmActionError(
                 f"{tool_name} timed out after {timeout_s}s; action outcome unknown",
-                canary_leaked=leaked_to,
+                canary_leaked=bool(local_leaked or proxy.canary_leaked),
             ) from exc
 
         leaked = contains_secret_canary(proc.stdout or "") or contains_secret_canary(proc.stderr or "")
         if leaked:
+            local_leaked = True
             with proxy._lock:
                 proxy.canary_leaked = True
         proxy.raise_if_error()
@@ -3501,11 +3550,16 @@ def _run_jev_node_helper(
             )
         return proc, False
     finally:
+        active_exc = sys.exc_info()[1]
+        accumulated_leaked = bool(local_leaked or proxy.canary_leaked)
+        _attach_canary_flag(active_exc, accumulated_leaked)
         if owned_tmp is not None:
             host_ok = _stop_ad_command_host(call_env, after_timeout=False)
             shutil.rmtree(owned_tmp, ignore_errors=True)
-            if not host_ok and sys.exc_info()[0] is None:
-                raise RuntimeError("agent-desktop command_host could not be confirmed stopped after Jev helper invocation")
+            if not host_ok and active_exc is None:
+                rt_cleanup = RuntimeError("agent-desktop command_host could not be confirmed stopped after Jev helper invocation")
+                _attach_canary_flag(rt_cleanup, accumulated_leaked)
+                raise rt_cleanup
 
 
 def _parse_jev_run_events(stdout_text: str, stderr_text: str) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
@@ -3938,11 +3992,14 @@ def run_arm_agent_desktop_direct(
         }
     finally:
         active_exc = sys.exc_info()[1]
+        _attach_canary_flag(active_exc, canary_leaked)
         host_stopped = _stop_ad_command_host(ad_env, after_timeout=False)
         shutil.rmtree(ad_tmp_dir, ignore_errors=True)
         shutil.rmtree(ad_home, ignore_errors=True)
         if not host_stopped and (active_exc is None or isinstance(active_exc, ArmActionError)):
-            raise RuntimeError("agent-desktop command_host could not be confirmed stopped during direct arm cleanup")
+            rt_direct = RuntimeError("agent-desktop command_host could not be confirmed stopped during direct arm cleanup")
+            _attach_canary_flag(rt_direct, canary_leaked)
+            raise rt_direct
 
 
 def run_arm_agent_desktop_jev(
@@ -3979,7 +4036,7 @@ def run_arm_agent_desktop_jev(
     node_env["_AD_BENCH_TMPDIR"] = str(ad_tmp_dir)
     node_env["TYPESAFE_BASE_URL"] = proxy.base_url
     node_env["TYPESAFE_MODEL"] = proxy.route.model
-    node_env["TYPESAFE_API_KEY"] = "loopback-proxy"
+    node_env["TYPESAFE_API_KEY"] = proxy.auth_token
     node_env["JEV_VERIFY_MS"] = "1200"
     node_env.pop("GEMINI_API_KEY", None)
     node_env.pop("GOOGLE_API_KEY", None)
@@ -4303,12 +4360,16 @@ def run_arm_agent_desktop_jev(
         }
     finally:
         active_exc = sys.exc_info()[1]
+        arm_leaked = bool(canary_leaked or proxy.canary_leaked)
+        _attach_canary_flag(active_exc, arm_leaked)
         proxy.close()
         host_stopped = _stop_ad_command_host(node_env, after_timeout=False)
         shutil.rmtree(ad_tmp_dir, ignore_errors=True)
         shutil.rmtree(ad_home, ignore_errors=True)
         if not host_stopped and (active_exc is None or isinstance(active_exc, ArmActionError)):
-            raise RuntimeError("agent-desktop command_host could not be confirmed stopped during jev arm cleanup")
+            rt_jev = RuntimeError("agent-desktop command_host could not be confirmed stopped during jev arm cleanup")
+            _attach_canary_flag(rt_jev, arm_leaked)
+            raise rt_jev
 
 
 def launch_target_for_task(
@@ -4701,7 +4762,10 @@ def main() -> int:
                         try:
                             with AppNapKeepAlive(pid, enabled=(task.target_kind == "calculator")):
                                 if task.setup_fn is not None:
-                                    task.setup_fn(harness_driver, pid, wid)
+                                    try:
+                                        task.setup_fn(harness_driver, pid, wid)
+                                    except ArmActionError as setup_exc:
+                                        raise RuntimeError(f"task setup failed: {setup_exc}") from setup_exc
                                 t_start = time.perf_counter()
                                 with FocusMonitor(pid, target_bundle, monitor_browser=bool(task.use_loopback_portal)) as focus_mon:
                                     if arm_id == "google-cua-bg":
