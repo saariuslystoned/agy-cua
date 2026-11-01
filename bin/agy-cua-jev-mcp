@@ -3190,22 +3190,38 @@ def extract_window_observation(
         for nr in native_regions:
             nr_key = nr["label"].lower()
             nr_by_norm.setdefault(nr_key, []).append(nr)
-        seen_drill_norms: set[str] = set()
+        used_nr_tokens: set[str] = set()
+        seen_drill_el_ids: set[int] = {
+            b["element_index"]
+            for b in drill_regions
+            if isinstance(b.get("element_index"), int) and not isinstance(b.get("element_index"), bool)
+        }
         for b_item in drill_regions:
             norm_b = str(b_item["region"]).strip().lower()
-            seen_drill_norms.add(norm_b)
             cand_nrs = nr_by_norm.get(norm_b) or []
-            if len(cand_nrs) == 1:
-                b_item["region_token"] = cand_nrs[0]["region_token"]
-            elif len(cand_nrs) > 1 and "element_index" in b_item:
+            matched_nr: dict[str, Any] | None = None
+            if "element_index" in b_item:
                 for c_nr in cand_nrs:
-                    if c_nr.get("element_index") == b_item["element_index"]:
-                        b_item["region_token"] = c_nr["region_token"]
+                    if c_nr["region_token"] not in used_nr_tokens and c_nr.get("element_index") == b_item["element_index"]:
+                        matched_nr = c_nr
                         break
+            elif len(cand_nrs) == 1:
+                c0 = cand_nrs[0]
+                if c0["region_token"] not in used_nr_tokens and (
+                    c0.get("element_index") is None or c0.get("element_index") not in seen_drill_el_ids
+                ):
+                    matched_nr = c0
+            if matched_nr is not None:
+                b_item["region_token"] = matched_nr["region_token"]
+                used_nr_tokens.add(matched_nr["region_token"])
         if native_root_token is None and (bool(sc.get("truncated", False)) or skeleton):
             for nr in native_regions:
-                if nr["depth"] <= 2 and nr["label"].lower() not in seen_drill_norms:
-                    seen_drill_norms.add(nr["label"].lower())
+                if (
+                    nr["depth"] <= 2
+                    and nr["region_token"] not in used_nr_tokens
+                    and (nr.get("element_index") is None or nr.get("element_index") not in seen_drill_el_ids)
+                ):
+                    used_nr_tokens.add(nr["region_token"])
                     unwalked_item: dict[str, Any] = {
                         "region": nr["label"],
                         "region_token": nr["region_token"],
@@ -3216,6 +3232,7 @@ def extract_window_observation(
                     }
                     if "element_index" in nr:
                         unwalked_item["element_index"] = nr["element_index"]
+                        seen_drill_el_ids.add(nr["element_index"])
                     drill_regions.append(unwalked_item)
     top_name_counts: dict[str, int] = {}
     for b_item in drill_regions:
@@ -3503,6 +3520,11 @@ def extract_window_observation(
         "elements": bounded_elements,
         "all_elements": all_elements,
         "auto_candidates": auto_candidates,
+        "_container_paths": {
+            idx: " > ".join(segs)[:240]
+            for idx, segs in container_segments_by_el.items()
+            if segs
+        },
         "_has_unindexed_secure_node": bool(md_struct["has_unindexed_secure_node"]),
         "_raw_elements": [dict(e) for e in raw_elements if isinstance(e, Mapping)],
         "_tree_markdown": tree_md,
@@ -3573,6 +3595,13 @@ def build_bound_candidates(
                     else f" ({d_reg.get('actionable_count', 0)} controls)"
                 )
                 detail_parts: list[str] = []
+                if d_reg.get("ambiguous_region"):
+                    if isinstance(d_reg.get("element_index"), int) and not isinstance(d_reg.get("element_index"), bool):
+                        detail_parts.append(f"pane #{r_pos + 1}, root_element_index={d_reg['element_index']}")
+                    elif isinstance(d_reg.get("region_token"), str) and d_reg["region_token"]:
+                        detail_parts.append(f"pane #{r_pos + 1}, token={d_reg['region_token']}")
+                    else:
+                        detail_parts.append(f"pane #{r_pos + 1}")
                 if subregs:
                     detail_parts.append(f"subregions: {subregs}")
                 if samples:
@@ -3587,6 +3616,8 @@ def build_bound_candidates(
                     d_args["region"] = reg_lbl
                 if isinstance(d_reg.get("element_index"), int) and not isinstance(d_reg.get("element_index"), bool):
                     d_args["root_element_index"] = d_reg["element_index"]
+                if isinstance(d_reg.get("region_token"), str) and ":" in d_reg["region_token"]:
+                    d_args["region_token"] = d_reg["region_token"]
                 drill_cands.append(
                     {
                         "id": dcid,
@@ -6146,7 +6177,7 @@ class JevMcpServer:
                 retry_args.setdefault("include_menubar", False)
             if (
                 not self.v1_compat
-                and (skeleton or region is not None or root_element_index is not None)
+                and (skeleton or region is not None or root_element_index is not None or explicit_root_token is not None)
                 and not caller_specified_max_elements
             ):
                 retry_args["max_elements"] = 2000
@@ -7437,8 +7468,10 @@ class JevMcpServer:
         already_in_target_state: bool | None = None
         pre_checkbox_label: str | None = None
         pre_checkbox_container_path: str = ""
+        pre_ambiguous_same_container_cb = False
         if authorized["tool"] in {"check", "uncheck"}:
             pre_els_chk = pre_obs.get("all_elements") or pre_obs.get("elements") or pre_obs.get("_raw_elements") or []
+            pre_cpaths = pre_obs.get("_container_paths") if isinstance(pre_obs.get("_container_paths"), Mapping) else {}
             cb_el = next(
                 (
                     e
@@ -7448,7 +7481,26 @@ class JevMcpServer:
                 None,
             )
             pre_checkbox_label = str(cb_el.get("label") or "") if isinstance(cb_el, Mapping) else None
-            pre_checkbox_container_path = str(cb_el.get("container_path") or "") if isinstance(cb_el, Mapping) else ""
+            pre_checkbox_container_path = str(
+                (cb_el.get("container_path") if isinstance(cb_el, Mapping) else None)
+                or pre_cpaths.get(target_el_idx)
+                or ""
+            )
+            if pre_checkbox_label:
+                same_scope_cbs = [
+                    e
+                    for e in pre_els_chk
+                    if isinstance(e, Mapping)
+                    and e.get("role") == "AXCheckBox"
+                    and str(e.get("label") or "") == pre_checkbox_label
+                    and str(
+                        e.get("container_path")
+                        or (pre_cpaths.get(e.get("element_index")) if isinstance(e.get("element_index"), int) else "")
+                        or ""
+                    )
+                    == pre_checkbox_container_path
+                ]
+                pre_ambiguous_same_container_cb = len(same_scope_cbs) > 1
             cb_raw_val = (
                 (cb_el.get("value") if cb_el.get("value") is not None else cb_el.get("value_state"))
                 if isinstance(cb_el, Mapping)
@@ -7675,6 +7727,30 @@ class JevMcpServer:
                     return False
                 desired_b = authorized["tool"] == "check"
                 obs_sec_ids = set(obs_check.get("secure_element_ids") or ())
+                obs_cpaths = (
+                    obs_check.get("_container_paths")
+                    if isinstance(obs_check.get("_container_paths"), Mapping)
+                    else {}
+                )
+
+                def _cpath_matches(elem: Mapping[str, Any]) -> bool:
+                    e_idx = elem.get("element_index")
+                    cand_cp = str(
+                        elem.get("container_path")
+                        or (obs_cpaths.get(e_idx) if isinstance(e_idx, int) else "")
+                        or ""
+                    )
+                    if cand_cp == pre_checkbox_container_path:
+                        return True
+                    if (
+                        pre_checkbox_container_path
+                        and pre_obs.get("native_root_element_token") is not None
+                        and obs_check.get("native_root_element_token") is None
+                        and cand_cp.endswith(f" > {pre_checkbox_container_path}")
+                    ):
+                        return True
+                    return False
+
                 els_c = obs_check.get("all_elements") or obs_check.get("elements") or obs_check.get("_raw_elements") or []
                 cand_el = next(
                     (
@@ -7685,10 +7761,11 @@ class JevMcpServer:
                         and e.get("element_index") not in obs_sec_ids
                         and e.get("role") == "AXCheckBox"
                         and (not pre_checkbox_label or str(e.get("label") or "") == pre_checkbox_label)
+                        and _cpath_matches(e)
                     ),
                     None,
                 )
-                if cand_el is None and pre_checkbox_label:
+                if cand_el is None and pre_checkbox_label and not pre_ambiguous_same_container_cb:
                     lbl_matches = [
                         e
                         for e in els_c
@@ -7696,13 +7773,8 @@ class JevMcpServer:
                         and e.get("element_index") not in obs_sec_ids
                         and e.get("role") == "AXCheckBox"
                         and str(e.get("label") or "") == pre_checkbox_label
+                        and _cpath_matches(e)
                     ]
-                    if len(lbl_matches) > 1 and pre_checkbox_container_path:
-                        lbl_matches = [
-                            e
-                            for e in lbl_matches
-                            if str(e.get("container_path") or "") == pre_checkbox_container_path
-                        ]
                     if len(lbl_matches) == 1:
                         cand_el = lbl_matches[0]
                 if cand_el is None:

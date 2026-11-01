@@ -7536,15 +7536,50 @@ class StdioEndToEndTest(unittest.TestCase):
                                 "actions": ["AXPress"],
                             },
                         ]
+                    elif self.mode == "cross_pane_shift" and self.n >= 2:
+                        # Pane A collapsed; Pane B's identically labeled 'Enable Key' shifted into element_index=2!
+                        els = [
+                            {"element_index": 0, "role": "AXWindow", "label": "Provisioning"},
+                            {"element_index": 1, "role": "AXGroup", "label": "Pane B", "depth": 1, "parent_index": 0},
+                            {
+                                "element_index": 2,
+                                "role": "AXCheckBox",
+                                "label": "Enable Key",
+                                "value": "1",
+                                "enabled": True,
+                                "depth": 2,
+                                "parent_index": 1,
+                                "actions": ["AXPress"],
+                            },
+                        ]
+                    elif self.mode == "cross_pane_sole_survivor" and self.n >= 2:
+                        # Pane A closed; ONLY Pane B's 'Enable Key' remains at element_index=9
+                        els = [
+                            {"element_index": 0, "role": "AXWindow", "label": "Provisioning"},
+                            {"element_index": 8, "role": "AXGroup", "label": "Pane B", "depth": 1, "parent_index": 0},
+                            {
+                                "element_index": 9,
+                                "role": "AXCheckBox",
+                                "label": "Enable Key",
+                                "value": "1",
+                                "enabled": True,
+                                "depth": 2,
+                                "parent_index": 8,
+                                "actions": ["AXPress"],
+                            },
+                        ]
                     else:
                         els = [
                             {"element_index": 0, "role": "AXWindow", "label": "Provisioning"},
+                            {"element_index": 1, "role": "AXGroup", "label": "Pane A", "depth": 1, "parent_index": 0},
                             {
                                 "element_index": 2,
                                 "role": "AXCheckBox",
                                 "label": "Enable Key",
                                 "value": "1" if self.mode == "stale" else "0",
                                 "enabled": True,
+                                "depth": 2,
+                                "parent_index": 1,
                                 "actions": ["AXPress"],
                             },
                         ]
@@ -7560,7 +7595,7 @@ class StdioEndToEndTest(unittest.TestCase):
                         },
                     }
 
-            for bad_mode in ("stale", "shifted"):
+            for bad_mode in ("stale", "shifted", "cross_pane_shift", "cross_pane_sole_survivor"):
                 bad_srv = jev.JevMcpServer(
                     env={"TYPESAFE_API_KEY": "test-key"},
                     driver_client=StaleOrShiftedCheckboxDriver(bad_mode),
@@ -7592,6 +7627,39 @@ class StdioEndToEndTest(unittest.TestCase):
                     self.assertFalse(bad_step["structuredContent"]["verified"], (bad_mode, bad_step["structuredContent"]))
                 finally:
                     bad_srv.close()
+
+            # 7. Distinct sibling panes sharing the same label ('Inspector') are both preserved & flagged ambiguous
+            dup_pane_obs = jev.extract_window_observation(
+                {
+                    "structuredContent": {
+                        "pid": 88,
+                        "window_id": 707,
+                        "snapshot_id": "s00008801",
+                        "elements_complete": False,
+                        "truncated": True,
+                        "regions": [
+                            {"label": "Inspector", "region_token": "s00008801:r0", "role": "AXGroup", "depth": 1, "element_index": 1},
+                            {"label": "Inspector", "region_token": "s00008801:r1", "role": "AXGroup", "depth": 1},
+                        ],
+                        "elements": [
+                            {"element_index": 0, "role": "AXWindow", "label": "Studio"},
+                            {"element_index": 1, "role": "AXGroup", "label": "Inspector", "depth": 1, "parent_index": 0},
+                            {"element_index": 2, "role": "AXButton", "label": "Align Left", "enabled": True, "depth": 2, "parent_index": 1, "actions": ["AXPress"]},
+                        ],
+                    },
+                    "content": [{"type": "text", "text": 'AXWindow "Studio"'}],
+                },
+                expected_pid=88,
+                expected_window_id=707,
+                enrich_descriptions=True,
+            )
+            insp_drills = [r for r in dup_pane_obs["drill_regions"] if r["region"] == "Inspector"]
+            self.assertEqual(len(insp_drills), 2, dup_pane_obs["drill_regions"])
+            self.assertEqual([r["region_token"] for r in insp_drills], ["s00008801:r0", "s00008801:r1"])
+            self.assertTrue(all(r.get("ambiguous_region") is True for r in insp_drills))
+            dup_cands = jev.build_bound_candidates(None, dup_pane_obs, enrich_descriptions=True)
+            drill_cids = [c["id"] for c in dup_cands if c["id"].startswith("drill.")]
+            self.assertEqual(drill_cids, ["drill.0.inspector", "drill.1.inspector"])
         finally:
             srv.close()
 
