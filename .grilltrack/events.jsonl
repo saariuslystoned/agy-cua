@@ -1,0 +1,1 @@
+{"action": "ledger_compacted", "at": "2026-11-01T03:59:30+00:00", "data": {"archive_ref": ".grilltrack/archive/compacted-gt-20261018033247-a85fd1.json", "archived_decision_ids": ["bench-001", "bench-002", "obs-001"], "trimmed_history_entries": 7}, "event_id": "34a303cc-a56d-4790-b03d-46bb8ca246ec"}
