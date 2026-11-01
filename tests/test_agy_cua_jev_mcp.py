@@ -7625,8 +7625,41 @@ class StdioEndToEndTest(unittest.TestCase):
                         {"pid": 88, "window_id": 606, "goal": "Check Enable Key", "wait_timeout_ms": 0}
                     )
                     self.assertFalse(bad_step["structuredContent"]["verified"], (bad_mode, bad_step["structuredContent"]))
+                    self.assertTrue(bad_step["isError"], (bad_mode, bad_step["structuredContent"]))
+                    # Reset driver sequence to n=0 so pre_obs is Pane A ("0") and post_obs transitions to bad_mode!
+                    bad_srv._driver_client.n = 0
+                    bad_batch = bad_srv.handle_batch(
+                        {
+                            "pid": 88,
+                            "window_id": 606,
+                            "steps": [
+                                {
+                                    "goal": "Check Enable Key",
+                                    "expected_postcondition": {"element_value_equals": "1"},
+                                    "wait_timeout_ms": 0,
+                                }
+                            ],
+                        }
+                    )
+                    self.assertTrue(bad_batch["isError"], (bad_mode, bad_batch["structuredContent"]))
+                    self.assertFalse(bad_batch["structuredContent"]["verified"])
                 finally:
                     bad_srv.close()
+
+            # 6b. Stale explicit_root_token on ambiguous unwalked pane fails closed (never silently widens to full window)
+            fake_drv.fail_next_root_token = True
+            stale_ambig = srv._call_get_window_state(
+                fake_drv,
+                {"pid": 88, "window_id": 505, "include_screenshot": False, "tree_format": "both"},
+                pid=88,
+                window_id=505,
+                skeleton=False,
+                region=None,
+                root_element_index=None,
+                explicit_root_token="s00001001:r9",
+                allow_cached_root_token=False,
+            )
+            self.assertTrue(stale_ambig.get("isError"))
 
             # 7. Distinct sibling panes sharing the same label ('Inspector') are both preserved & flagged ambiguous
             dup_pane_obs = jev.extract_window_observation(

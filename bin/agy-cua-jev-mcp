@@ -6172,12 +6172,15 @@ class JevMcpServer:
                 except Exception:
                     pass
             self._window_token_cache.pop((pid, window_id), None)
+            has_python_scope = bool(skeleton or region is not None or root_element_index is not None)
+            if explicit_root_token is not None and not has_python_scope:
+                return raw
             retry_args = dict(base_args)
             if supports_mb:
                 retry_args.setdefault("include_menubar", False)
             if (
                 not self.v1_compat
-                and (skeleton or region is not None or root_element_index is not None or explicit_root_token is not None)
+                and has_python_scope
                 and not caller_specified_max_elements
             ):
                 retry_args["max_elements"] = 2000
@@ -7795,11 +7798,15 @@ class JevMcpServer:
             )
             fresh_post_snap = post_obs.get("snapshot_id") != pre_obs.get("snapshot_id")
             cb_satisfied = fresh_post_snap and _checkbox_matches_desired(post_obs)
-            if is_checkbox_op and already_in_target_state is True and cb_satisfied:
+            if is_checkbox_op and not cb_satisfied:
+                post_ok = False
+                if fresh_post_snap:
+                    verify_reason = f"checkbox_target_state_unmet ({authorized['tool']})"
+            elif is_checkbox_op and already_in_target_state is True and cb_satisfied:
                 if expected_post is None or (isinstance(expected_post, Mapping) and expected_post.get("kind") == "any_change"):
                     post_ok = True
                     verify_reason = "idempotent_checkbox_already_in_target_state"
-            need_cb_poll = bool(is_checkbox_op and action_dispatched and expected_post is None and fresh_post_snap and not cb_satisfied)
+            need_cb_poll = bool(is_checkbox_op and action_dispatched and fresh_post_snap and not cb_satisfied)
             if eff_wait_ms > 0 and ((not post_ok and _is_retryable_postcondition_reason(verify_reason)) or need_cb_poll):
                 settle_deadline = verify_started_mono + (eff_wait_ms / 1000.0)
                 if _deadline_monotonic is not None:
@@ -7832,11 +7839,15 @@ class JevMcpServer:
                     )
                     fresh_post_snap = post_obs.get("snapshot_id") != pre_obs.get("snapshot_id")
                     cb_satisfied = fresh_post_snap and _checkbox_matches_desired(post_obs)
-                    if is_checkbox_op and already_in_target_state is True and cb_satisfied:
+                    if is_checkbox_op and not cb_satisfied:
+                        post_ok = False
+                        if fresh_post_snap:
+                            verify_reason = f"checkbox_target_state_unmet ({authorized['tool']})"
+                    elif is_checkbox_op and already_in_target_state is True and cb_satisfied:
                         if expected_post is None or (isinstance(expected_post, Mapping) and expected_post.get("kind") == "any_change"):
                             post_ok = True
                             verify_reason = "idempotent_checkbox_already_in_target_state"
-                    need_cb_poll = bool(is_checkbox_op and action_dispatched and expected_post is None and fresh_post_snap and not cb_satisfied)
+                    need_cb_poll = bool(is_checkbox_op and action_dispatched and fresh_post_snap and not cb_satisfied)
         except Exception as exc:
             verify_ms = round((time.perf_counter() - verify_started) * 1000, 2)
             self._last_observations.pop((pid, window_id), None)
@@ -7925,6 +7936,11 @@ class JevMcpServer:
                 verification_outcome = "state_changed"
                 step_status = "state_changed"
                 is_err = False
+            elif is_checkbox_op:
+                post_ok = False
+                verification_outcome = "state_changed" if state_changed else ("noop" if not action_dispatched else "dispatched")
+                step_status = "postcondition_unmet"
+                is_err = True
             else:
                 verification_outcome = "state_changed" if state_changed else "dispatched"
                 step_status = verification_outcome
