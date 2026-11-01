@@ -84,7 +84,33 @@
 
 ---
 
-## 5. Follow-Up Upstream `trycua/cua` Candidates (`cua-driver`)
+## 5. Wave 2 (`v0.4.0`) + Rust `cua-driver 0.38.0` Fast-Path Benchmark (`22` Rows, `\$0.3878`)
 
-1. **Native `root_element_token` Subtree Walk & Optional `include_menubar: false` (`platform-macos/src/ax/tree.rs`):** Today `agy-cua-jev-mcp` requests `max_elements=2000` and scopes containers post-walk; adding native `root_element_token` to `cua-driver` will skip walking the 336-row sibling grid over AX IPC altogether and cut `T8` `observe_ms` from `~650ms` to `<50ms`.
-2. **Background Launch Policy for `browser_prepare(mode="isolated_new")` on macOS 26.5+:** Launching isolated Chromium via `NSWorkspaceOpenConfiguration` (`activates = false`) or `--no-startup-window` + headless/background tab creation will eliminate the `focus_violations` spike observed on `T7b_1password_browser`.
+Following Wave 1, we implemented all remaining `agent-desktop` primitives across both `cua-driver` (`saariuslystoned/cua` branch `feat/macos-ax-subtree-fastpath`, commit `7f63bd978`) and `agy-cua-jev-mcp` (`v0.4.0`), then ran an apples-to-apples 2-arm × 11-task head-to-head benchmark (`gemini-3.8-flash`, `thinking_level="high"`, `temperature=0.0`, proof at `proof/bench-20261101T061800Z-jev-v3-rust-ax-summary.json`, total spend `\$0.3878`):
+
+- **Rust `cua-driver 0.38.0` (`feat/macos-ax-subtree-fastpath`):**
+  1. **Native `root_element_token` (`<snapshot_id>:<row>` / `<snapshot_id>:r<region>`) O(1) Cached `AXUIElementRef` Subtree Walk (`walk_subtree_budgeted`):** Skips walking unrelated window subtrees (such as the 336-row sibling telemetry grid in `T8`) while retaining top-level `AXWindow` direct `AXStaticText` status banners and pre-seeded sibling `regions` (`r0..rK`).
+  2. **`include_menubar: false` on `get_window_state`:** Skips `AXMenuBar` IPC traversal completely during window state snapshots.
+  3. **First-class `surfaces` & `regions` metadata + Polled `AXWebArea` Stabilization:** Exposes overlay `surfaces` (`sheet`, `popover`, `menu`, `file_panel`, `dialog`) and pre-seeded depth-1/depth-2 `regions` even when DFS truncates early; replaces static Electron sleep with `50ms` stability slices (`<= 500ms`).
+  4. **Isolated Browser Focus-Steal Guard (`MacOsBrowserPlatform::spawn_isolated_browser`):** Wraps isolated Chromium launch in `FocusStealPreventer` + `watch_self_activation` (`LSBackgroundOnly=1` / accessory activation restore) so cold `browser_prepare(mode="isolated")` never steals foreground focus.
+- **`agy-cua-jev-mcp` (`v0.4.0`):**
+  1. **Capability Negotiation (`tools/list`) + `AGY_CUA_DRIVER_DIRECT=1`:** Automatically negotiates `root_element_token` and `include_menubar: false` when paired with `cua-driver >= 0.38.0`, while remaining 100% backward-compatible with `cua-driver 0.35.4`.
+  2. **Idempotent `check` / `uncheck` Auto-Candidates (`chk.<idx>.<slug>` / `unchk.<idx>.<slug>`):** Verifies current boolean state (`0`/`1` or `value_state`) before dispatch and skips clicking as a verified zero-IPC no-op (`already_in_target_state: true`, `action_dispatched: false`) when already in target state.
+  3. **Single-Hop `drill.<idx>.<slug>` Auto-Drill in `jev_step`:** Synthesizes region drill candidates on truncated/skeleton observations so Jev can drill into an unwalked container region and select its target control inside a single outer `jev_step` call.
+  4. **`SKILL.md` Trimmed Below `24,000`-Byte Cap (`17,561` bytes) & `plugin.json` Bumped to `0.4.0`.**
+
+### Wave 1 vs. Wave 2 Head-to-Head Summary (`gemini-3.8-flash:high`)
+
+| Contender Arm | Strict Pass (`11` Tasks) | `FocusMonitor` Violations | Suite `observe_ms + verify_ms` | `T8` `observe_ms + verify_ms` | `T8` Step Median | Outer Turns | Total Cost (`11` Tasks) |
+| :--- | :---: | :---: | ---: | ---: | ---: | :---: | ---: |
+| `agent-desktop-direct` (`v1.0.2`) | 9 / 11 (`81.8%`) | **0** | 34,279.1 ms | 3,844.8 ms | 195.8 ms *(no post-verify)* | 80 | \$0.4235 |
+| `agent-desktop-jev` (`v1.0.2`) | 8 / 11 (`72.7%`) | **0** | 51,233.5 ms | 6,877.1 ms | 190.2 ms *(no post-verify)* | 82 | \$0.3432 |
+| `agy-cua-jev-v2` (`0.35.4`) | 10 / 11 (`90.9%`) | 74 (`T7b`) | 28,192.2 ms | 15,998.2 ms | 3,248.7 ms | **34** | \$0.2062 |
+| `agy-cua-jev-v3` (`0.35.4`) | 10 / 11 (`90.9%`) | 78 (`T7b`) | 11,219.9 ms (`-60.2%`) | 4,870.0 ms (`-69.6%`) | 1,414.7 ms (`-56.5%`) | 35 | **\$0.1788** |
+| **`agy-cua-jev-v3-rust` (`0.38.0`)** | **11 / 11 (`100.0%`)** | **0 (`T1`–`T8`)** | **7,888.4 ms (`-72.0%`)** | **514.5 ms (`-96.8%`, `31.1×` faster)** | **898.1 ms (`-72.4%`)** | 36 | **\$0.2090** |
+
+### Key Wave 2 Takeaways
+
+1. **First Perfect `11 / 11` (`100%`) Strict Pass Rate with `0` Focus Violations:** On `T7b_1password_browser` (cold isolated Chrome launch), `agy-cua-jev-v3` on stock `cua-driver 0.35.4` recorded `78` focus-steal samples (`FAIL`), whereas `agy-cua-jev-v3-rust` on patched `cua-driver 0.38.0` spawned its own fresh isolated Chrome instance with **`0` focus violations (`PASS`)**.
+2. **`31.1×` Faster AX Observation + Verification on 1,500-Node `T8` (`15,998.2 ms -> 514.5 ms`):** Native `root_element_token` O(1) cached `AXUIElementRef` subtree traversal + `include_menubar: false` reduced `T8` `observe_ms_total` from `9,451.9 ms` (`v2`) / `2,889.8 ms` (`v3` on `0.35.4`) to **`345.0 ms`**, and `verify_ms_total` from `6,546.3 ms` (`v2`) / `1,980.2 ms` (`v3` on `0.35.4`) to **`169.5 ms`** — **7.5×–13.4× faster** than `agent-desktop` (`3,844.8 ms` / `6,877.1 ms`) while still executing mandatory per-step postcondition verification!
+3. **Suite-Wide AX Observation + Verification Cut `3.57×` (`28,192.2 ms -> 7,888.4 ms`):** Across all 11 tasks, `agy-cua-jev-v3-rust` spent just `2,803.7 ms` in `observe_ms` (**12.2×–18.3× less** than `agent-desktop`'s `34,279.1 ms`–`51,233.5 ms`) at `\$0.2090` total 11-task cost (**2.0× cheaper** than `agent-desktop-direct`).

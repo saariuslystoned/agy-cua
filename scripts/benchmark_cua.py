@@ -2047,6 +2047,29 @@ def run_arm_agy_cua_direct(
 # ---------------------------------------------------------------------------
 # Arm 3, 4 & 5: AGY-CUA + Jev (`v0` Baseline vs `v1` Hillclimbed vs `v2` Skeleton+240+Settle)
 # ---------------------------------------------------------------------------
+def resolve_rust_driver_env(cli_bin: str | None, out_dir: Path) -> dict[str, str]:
+    raw_bin = (cli_bin or os.environ.get("AGY_CUA_RUST_DRIVER_BIN") or "").strip()
+    if not raw_bin:
+        raise RuntimeError(
+            "agy-cua-jev-v3-rust arm requested, Rust cua-driver binary not configured; pass --rust-driver-bin <path> "
+            "or set AGY_CUA_RUST_DRIVER_BIN"
+        )
+    rust_bin = Path(raw_bin).expanduser().resolve()
+    if not rust_bin.exists():
+        raise RuntimeError(f"Rust cua-driver binary not found at {rust_bin}")
+    rust_home = (out_dir / "rust_driver_home").resolve()
+    rust_home.mkdir(parents=True, exist_ok=True)
+    host_cap_file = Path.home() / ".cua-driver" / "direct-capture-verification.json"
+    dst_cap_file = rust_home / "direct-capture-verification.json"
+    if host_cap_file.exists() and not dst_cap_file.exists():
+        shutil.copy2(host_cap_file, dst_cap_file)
+    return {
+        "AGY_CUA_DRIVER": str(rust_bin),
+        "AGY_CUA_DRIVER_DIRECT": "1",
+        "CUA_DRIVER_HOME": str(rust_home),
+    }
+
+
 def run_arm_agy_cua_jev(
     client: genai.Client,
     model_id: str,
@@ -2057,6 +2080,8 @@ def run_arm_agy_cua_jev(
     *,
     hillclimbed_v1: bool,
     hillclimbed_v2: bool = False,
+    hillclimbed_v3: bool = False,
+    env_overrides: Mapping[str, str] | None = None,
     portal_url: str | None = None,
     focus_mon: FocusMonitor | None = None,
 ) -> dict[str, Any]:
@@ -2069,6 +2094,9 @@ def run_arm_agy_cua_jev(
         env.pop("AGY_CUA_JEV_V1_COMPAT", None)
     else:
         env["AGY_CUA_JEV_V1_COMPAT"] = "1"
+    if env_overrides:
+        env.update(env_overrides)
+    spawned_direct_browser_pids: list[int] = []
 
     canary_leaked = False
 
@@ -2297,8 +2325,25 @@ def run_arm_agy_cua_jev(
             gws0_args: dict[str, Any] = {"pid": pid, "window_id": window_id, "include_screenshot": False, "tree_format": "both"}
             if task.initial_max_elements is not None:
                 gws0_args["max_elements"] = task.initial_max_elements
-            ws0 = drv0.call_tool("get_window_state", gws0_args)
-            obs0 = jev_mod.extract_window_observation(ws0, expected_pid=pid, expected_window_id=window_id)
+            if hillclimbed_v3 and hasattr(jev_server, "_call_get_window_state"):
+                ws0 = jev_server._call_get_window_state(
+                    drv0,
+                    gws0_args,
+                    pid=pid,
+                    window_id=window_id,
+                    caller_specified_max_elements=(task.initial_max_elements is not None),
+                )
+                obs0 = jev_mod.extract_window_observation(
+                    ws0,
+                    expected_pid=pid,
+                    expected_window_id=window_id,
+                    enrich_descriptions=True,
+                )
+                if hasattr(jev_server, "_update_window_token_cache"):
+                    jev_server._update_window_token_cache(pid, window_id, obs0)
+            else:
+                ws0 = drv0.call_tool("get_window_state", gws0_args)
+                obs0 = jev_mod.extract_window_observation(ws0, expected_pid=pid, expected_window_id=window_id)
         obs0_ms = round((time.perf_counter() - t_obs0) * 1000, 2)
         if audit_observation_for_canary(obs0):
             canary_leaked = True
@@ -2458,7 +2503,10 @@ def run_arm_agy_cua_jev(
                     if contains_secret_canary(json.dumps(sc, ensure_ascii=False)):
                         canary_leaked = True
                     for sr in sc.get("steps") or []:
-                        if sr.get("action_dispatched") is True or sr.get("status") in {"verified", "verification_failed", "dispatch_failed"}:
+                        if sr.get("action_dispatched") is True or (
+                            "action_dispatched" not in sr
+                            and sr.get("status") in {"verified", "verification_failed", "dispatch_failed"}
+                        ):
                             actions_dispatched += 1
                         if sr.get("uncertain_side_effect") is True:
                             uncertain_actions_dispatched += 1
@@ -2566,8 +2614,11 @@ def run_arm_agy_cua_jev(
                     })
                     b_sc = b_res.get("structuredContent") or {}
                     b_pid = b_sc.get("prepared_pid") or b_sc.get("pid")
-                    if focus_mon is not None and isinstance(b_pid, int) and not isinstance(b_pid, bool) and b_pid > 0:
-                        focus_mon.register_pid(b_pid)
+                    if isinstance(b_pid, int) and not isinstance(b_pid, bool) and b_pid > 0:
+                        if focus_mon is not None:
+                            focus_mon.register_pid(b_pid)
+                        if env.get("AGY_CUA_DRIVER_DIRECT") == "1":
+                            spawned_direct_browser_pids.append(b_pid)
                     trace_events.append({
                         "turn": turn_idx,
                         "tool": "jev_browser_prepare",
@@ -2732,6 +2783,7 @@ def run_arm_agy_cua_jev(
             prune_history_images(chat_history, keep=2)
 
         acc = jev_server.accounting
+        drv_obj = getattr(jev_server, "_driver_client", None)
         return {
             "outer_turns": outer_turns,
             "actions_dispatched": actions_dispatched,
@@ -2745,12 +2797,30 @@ def run_arm_agy_cua_jev(
             "jev_calls_used": acc.calls_used,
             "jev_input_tokens": acc.input_tokens,
             "jev_output_tokens": acc.output_tokens,
+            "driver_version": getattr(drv_obj, "driver_version", None),
+            "supports_root_element_token": bool(getattr(drv_obj, "supports_root_element_token", False)),
+            "supports_include_menubar": bool(getattr(drv_obj, "supports_include_menubar", False)),
             "canary_leaked": canary_leaked,
             "trace": trace_events,
         }
     finally:
         _attach_canary_flag(sys.exc_info()[1], canary_leaked)
         jev_server.close()
+        isolated_home = str(env.get("CUA_DRIVER_HOME") or "").strip()
+        if isolated_home and spawned_direct_browser_pids:
+            for sb_pid in spawned_direct_browser_pids:
+                try:
+                    ps_out = subprocess.run(
+                        ["ps", "-p", str(sb_pid), "-o", "command="],
+                        capture_output=True,
+                        text=True,
+                        timeout=1.5,
+                        check=False,
+                    ).stdout
+                    if isolated_home in ps_out:
+                        os.kill(sb_pid, signal.SIGTERM)
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
@@ -4662,6 +4732,11 @@ def main() -> int:
         default=None,
         help="Optional path to built vercel-labs/agent-desktop checkout (or set AGY_CUA_AGENT_DESKTOP_DIR)",
     )
+    parser.add_argument(
+        "--rust-driver-bin",
+        default=None,
+        help="Optional path to compiled Rust cua-driver binary for agy-cua-jev-v3-rust (or set AGY_CUA_RUST_DRIVER_BIN)",
+    )
     args = parser.parse_args()
     global PLANNER_THINKING_LEVEL, PRICE_PER_1M_INPUT_USD, PRICE_PER_1M_OUTPUT_USD, _ACTIVE_PORTAL_STATE
 
@@ -4845,6 +4920,21 @@ def main() -> int:
                                             portal_url=portal.url if portal else None,
                                             focus_mon=focus_mon,
                                         )
+                                    elif arm_id == "agy-cua-jev-v3":
+                                        arm_metrics = run_arm_agy_cua_jev(
+                                            client, active_model, task, pid, wid, spend,
+                                            hillclimbed_v1=True, hillclimbed_v2=True, hillclimbed_v3=True,
+                                            portal_url=portal.url if portal else None,
+                                            focus_mon=focus_mon,
+                                        )
+                                    elif arm_id == "agy-cua-jev-v3-rust":
+                                        arm_metrics = run_arm_agy_cua_jev(
+                                            client, active_model, task, pid, wid, spend,
+                                            hillclimbed_v1=True, hillclimbed_v2=True, hillclimbed_v3=True,
+                                            env_overrides=resolve_rust_driver_env(args.rust_driver_bin, out_dir),
+                                            portal_url=portal.url if portal else None,
+                                            focus_mon=focus_mon,
+                                        )
                                     elif arm_id == "agent-desktop-direct":
                                         arm_metrics = run_arm_agent_desktop_direct(
                                             client, active_model, task, pid, wid, spend, out_dir,
@@ -4911,6 +5001,9 @@ def main() -> int:
                                 "focus_violations": focus_violations,
                                 "focus_probe_errors": focus_probe_errors,
                                 "focus_samples": focus_mon.samples,
+                                "driver_version": arm_metrics.get("driver_version"),
+                                "supports_root_element_token": arm_metrics.get("supports_root_element_token"),
+                                "supports_include_menubar": arm_metrics.get("supports_include_menubar"),
                                 "trace": arm_metrics["trace"],
                                 "verify_detail": verify_detail,
                             }
