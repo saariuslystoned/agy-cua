@@ -2851,9 +2851,17 @@ def extract_window_observation(
     )
     reported_region = region.strip() if isinstance(region, str) and region.strip() else None
     reported_root_element_index = root_element_index
-    eff_region = None if native_root_token is not None else reported_region
     if native_root_token is not None:
-        root_element_index = None
+        if 0 in all_secure_ids:
+            raise ValueError("secure_root_element_refused: native root_element_token targets a secure element")
+        if reported_region is not None and (">" in reported_region or reported_root_element_index is not None):
+            eff_region = reported_region
+        else:
+            eff_region = None
+        if reported_region is None or reported_root_element_index is None:
+            root_element_index = None
+    else:
+        eff_region = reported_region
     if root_element_index is not None:
         if (
             root_element_index not in by_index
@@ -5971,11 +5979,6 @@ class JevMcpServer:
             ]
             if len(matches) == 1 and isinstance(matches[0].get("region_token"), str):
                 return str(matches[0]["region_token"])
-            top_matches = [
-                r for r in matches if r.get("depth") == 1 and isinstance(r.get("region_token"), str)
-            ]
-            if len(top_matches) == 1:
-                return str(top_matches[0]["region_token"])
             return None
         if root_element_index is not None:
             el_tokens = cache.get("element_tokens")
@@ -5988,13 +5991,18 @@ class JevMcpServer:
         current_obs: Mapping[str, Any],
         *,
         region: str | None,
+        root_element_index: int | None = None,
     ) -> str | None:
         if current_obs.get("native_root_element_token") is None:
+            return None
+        if region is not None and root_element_index is not None:
+            return None
+        if region is not None and ">" in region:
             return None
         snap_id = current_obs.get("snapshot_id")
         if not isinstance(snap_id, str) or not SNAPSHOT_ID_RE.match(snap_id):
             return None
-        if region is not None and ">" not in region:
+        if region is not None:
             norm_reg = region.strip().lower()
             matches = [
                 r
@@ -6003,11 +6011,6 @@ class JevMcpServer:
             ]
             if len(matches) == 1 and isinstance(matches[0].get("region_token"), str):
                 return str(matches[0]["region_token"])
-            top_matches = [
-                r for r in matches if r.get("depth") == 1 and isinstance(r.get("region_token"), str)
-            ]
-            if len(top_matches) == 1:
-                return str(top_matches[0]["region_token"])
         secure_ids = set(current_obs.get("secure_element_ids") or ())
         if 0 not in secure_ids:
             if 0 in (current_obs.get("indexed_element_ids") or set()):
@@ -6056,6 +6059,7 @@ class JevMcpServer:
                 root_tok is None
                 and allow_cached_root_token
                 and region is not None
+                and root_element_index is None
                 and ">" not in region
                 and (pid, window_id) not in self._window_token_cache
                 and not caller_specified_max_elements
@@ -6259,6 +6263,7 @@ class JevMcpServer:
 
     def _release_single_target(self, pid: int, window_id: int) -> None:
         key = (pid, window_id)
+        self._window_token_cache.pop(key, None)
         str_key = f"{pid}:{window_id}"
         state_path = self._target_state_path()
         with _TARGET_LOCK:
@@ -7431,6 +7436,7 @@ class JevMcpServer:
 
         already_in_target_state: bool | None = None
         pre_checkbox_label: str | None = None
+        pre_checkbox_container_path: str = ""
         if authorized["tool"] in {"check", "uncheck"}:
             pre_els_chk = pre_obs.get("all_elements") or pre_obs.get("elements") or pre_obs.get("_raw_elements") or []
             cb_el = next(
@@ -7442,6 +7448,7 @@ class JevMcpServer:
                 None,
             )
             pre_checkbox_label = str(cb_el.get("label") or "") if isinstance(cb_el, Mapping) else None
+            pre_checkbox_container_path = str(cb_el.get("container_path") or "") if isinstance(cb_el, Mapping) else ""
             cb_raw_val = (
                 (cb_el.get("value") if cb_el.get("value") is not None else cb_el.get("value_state"))
                 if isinstance(cb_el, Mapping)
@@ -7452,6 +7459,7 @@ class JevMcpServer:
             already_in_target_state = cur_cb_bool == desired_cb_bool
 
         self._visual_snapshots.pop((pid, window_id), None)
+        self._window_token_cache.pop((pid, window_id), None)
         if already_in_target_state is True:
             action_dispatched = False
             dispatch_ms = 0.0
@@ -7582,7 +7590,11 @@ class JevMcpServer:
             ) -> dict[str, Any]:
                 eff_base = None if is_hierarchy_scoped else baseline_obs
                 post_root_tok = (
-                    self._resolve_post_obs_root_token(baseline_obs, region=region_val)
+                    self._resolve_post_obs_root_token(
+                        baseline_obs,
+                        region=region_val,
+                        root_element_index=root_element_index_val,
+                    )
                     if baseline_obs is not None
                     else None
                 )
@@ -7659,7 +7671,10 @@ class JevMcpServer:
             def _checkbox_matches_desired(obs_check: Mapping[str, Any]) -> bool:
                 if not is_checkbox_op:
                     return False
+                if obs_check.get("snapshot_id") == pre_obs.get("snapshot_id"):
+                    return False
                 desired_b = authorized["tool"] == "check"
+                obs_sec_ids = set(obs_check.get("secure_element_ids") or ())
                 els_c = obs_check.get("all_elements") or obs_check.get("elements") or obs_check.get("_raw_elements") or []
                 cand_el = next(
                     (
@@ -7667,21 +7682,29 @@ class JevMcpServer:
                         for e in els_c
                         if isinstance(e, Mapping)
                         and e.get("element_index") == target_el_idx
+                        and e.get("element_index") not in obs_sec_ids
                         and e.get("role") == "AXCheckBox"
+                        and (not pre_checkbox_label or str(e.get("label") or "") == pre_checkbox_label)
                     ),
                     None,
                 )
                 if cand_el is None and pre_checkbox_label:
-                    cand_el = next(
-                        (
+                    lbl_matches = [
+                        e
+                        for e in els_c
+                        if isinstance(e, Mapping)
+                        and e.get("element_index") not in obs_sec_ids
+                        and e.get("role") == "AXCheckBox"
+                        and str(e.get("label") or "") == pre_checkbox_label
+                    ]
+                    if len(lbl_matches) > 1 and pre_checkbox_container_path:
+                        lbl_matches = [
                             e
-                            for e in els_c
-                            if isinstance(e, Mapping)
-                            and e.get("role") == "AXCheckBox"
-                            and str(e.get("label") or "") == pre_checkbox_label
-                        ),
-                        None,
-                    )
+                            for e in lbl_matches
+                            if str(e.get("container_path") or "") == pre_checkbox_container_path
+                        ]
+                    if len(lbl_matches) == 1:
+                        cand_el = lbl_matches[0]
                 if cand_el is None:
                     return False
                 cand_raw_val = cand_el.get("value") if cand_el.get("value") is not None else cand_el.get("value_state")
@@ -7698,12 +7721,13 @@ class JevMcpServer:
                 post_obs,
                 target_element_index=target_el_idx,
             )
-            cb_satisfied = _checkbox_matches_desired(post_obs)
+            fresh_post_snap = post_obs.get("snapshot_id") != pre_obs.get("snapshot_id")
+            cb_satisfied = fresh_post_snap and _checkbox_matches_desired(post_obs)
             if is_checkbox_op and already_in_target_state is True and cb_satisfied:
                 if expected_post is None or (isinstance(expected_post, Mapping) and expected_post.get("kind") == "any_change"):
                     post_ok = True
                     verify_reason = "idempotent_checkbox_already_in_target_state"
-            need_cb_poll = bool(is_checkbox_op and action_dispatched and expected_post is None and not cb_satisfied)
+            need_cb_poll = bool(is_checkbox_op and action_dispatched and expected_post is None and fresh_post_snap and not cb_satisfied)
             if eff_wait_ms > 0 and ((not post_ok and _is_retryable_postcondition_reason(verify_reason)) or need_cb_poll):
                 settle_deadline = verify_started_mono + (eff_wait_ms / 1000.0)
                 if _deadline_monotonic is not None:
@@ -7734,12 +7758,13 @@ class JevMcpServer:
                         post_obs,
                         target_element_index=target_el_idx,
                     )
-                    cb_satisfied = _checkbox_matches_desired(post_obs)
+                    fresh_post_snap = post_obs.get("snapshot_id") != pre_obs.get("snapshot_id")
+                    cb_satisfied = fresh_post_snap and _checkbox_matches_desired(post_obs)
                     if is_checkbox_op and already_in_target_state is True and cb_satisfied:
                         if expected_post is None or (isinstance(expected_post, Mapping) and expected_post.get("kind") == "any_change"):
                             post_ok = True
                             verify_reason = "idempotent_checkbox_already_in_target_state"
-                    need_cb_poll = bool(is_checkbox_op and action_dispatched and expected_post is None and not cb_satisfied)
+                    need_cb_poll = bool(is_checkbox_op and action_dispatched and expected_post is None and fresh_post_snap and not cb_satisfied)
         except Exception as exc:
             verify_ms = round((time.perf_counter() - verify_started) * 1000, 2)
             self._last_observations.pop((pid, window_id), None)

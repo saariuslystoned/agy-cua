@@ -7471,6 +7471,127 @@ class StdioEndToEndTest(unittest.TestCase):
             self.assertIn("root_element_token", fb_gws[0])
             self.assertNotIn("root_element_token", fb_gws[1])
             self.assertEqual(fb_gws[1].get("max_elements"), 2000)
+
+            # 5. Cold cache with BOTH region and invalid root_element_index must NOT bypass root_element_index check
+            srv._window_token_cache.clear()
+            bad_combo_res = srv.handle_observe(
+                {
+                    "pid": 88,
+                    "window_id": 505,
+                    "region": "Workspace Sidebar",
+                    "root_element_index": 999,
+                    "discover_windows": False,
+                }
+            )
+            self.assertTrue(bad_combo_res["isError"])
+            self.assertIn("unknown_root_element_index", bad_combo_res["structuredContent"]["reason"])
+
+            # 6. Checkbox verification fails closed on stale unchanged snapshot_id or wrong shifted control
+            class StaleOrShiftedCheckboxDriver:
+                def __init__(self, mode: str) -> None:
+                    self.mode = mode
+                    self.session_id = "jev-stale-cb"
+                    self.timeout_ms = 5000
+                    self.supports_root_element_token = False
+                    self.supports_include_menubar = True
+                    self.n = 0
+
+                def ensure_capabilities(self, **_kw: Any) -> None:
+                    return None
+
+                def close(self) -> None:
+                    return None
+
+                def call_tool(self, name: str, args: Mapping[str, Any], **_kw: Any) -> dict[str, Any]:
+                    if name == "click":
+                        return {"content": [{"type": "text", "text": "clicked"}], "isError": False}
+                    self.n += 1
+                    snap = "s00007701" if self.mode == "stale" else f"s0000770{self.n}"
+                    if self.mode == "shifted" and self.n >= 2:
+                        # Different checkbox shifted into element_index=2, and two ambiguous 'Enable Key' elsewhere
+                        els = [
+                            {"element_index": 0, "role": "AXWindow", "label": "Provisioning"},
+                            {
+                                "element_index": 2,
+                                "role": "AXCheckBox",
+                                "label": "Different Unrelated Checkbox",
+                                "value": "1",
+                                "enabled": True,
+                                "actions": ["AXPress"],
+                            },
+                            {
+                                "element_index": 5,
+                                "role": "AXCheckBox",
+                                "label": "Enable Key",
+                                "value": "1",
+                                "enabled": True,
+                                "actions": ["AXPress"],
+                            },
+                            {
+                                "element_index": 6,
+                                "role": "AXCheckBox",
+                                "label": "Enable Key",
+                                "value": "0",
+                                "enabled": True,
+                                "actions": ["AXPress"],
+                            },
+                        ]
+                    else:
+                        els = [
+                            {"element_index": 0, "role": "AXWindow", "label": "Provisioning"},
+                            {
+                                "element_index": 2,
+                                "role": "AXCheckBox",
+                                "label": "Enable Key",
+                                "value": "1" if self.mode == "stale" else "0",
+                                "enabled": True,
+                                "actions": ["AXPress"],
+                            },
+                        ]
+                    return {
+                        "content": [{"type": "text", "text": 'AXWindow "Provisioning"'}],
+                        "structuredContent": {
+                            "pid": 88,
+                            "window_id": 606,
+                            "snapshot_id": snap,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "elements": els,
+                        },
+                    }
+
+            for bad_mode in ("stale", "shifted"):
+                bad_srv = jev.JevMcpServer(
+                    env={"TYPESAFE_API_KEY": "test-key"},
+                    driver_client=StaleOrShiftedCheckboxDriver(bad_mode),
+                    http_post=lambda req, _t: (
+                        200,
+                        json.dumps(
+                            {
+                                "model": jev.PINNED_JEV_MODEL,
+                                "answers": {
+                                    "candidate": {
+                                        "type": "choice",
+                                        "choice": "chk.2.enable-key",
+                                        "probabilities": {
+                                            cid: (0.96 if cid == "chk.2.enable-key" else round(0.04 / max(1, len(list(json.loads(req.data.decode("utf-8"))["questions"]["candidate"]["criteria"].keys())) - 1), 6))
+                                            for cid in json.loads(req.data.decode("utf-8"))["questions"]["candidate"]["criteria"].keys()
+                                        },
+                                    }
+                                },
+                                "usage": {"input_tokens": 10, "output_tokens": 2},
+                            }
+                        ),
+                    ),
+                    keychain_reader=lambda _: None,
+                )
+                try:
+                    bad_step = bad_srv.handle_step(
+                        {"pid": 88, "window_id": 606, "goal": "Check Enable Key", "wait_timeout_ms": 0}
+                    )
+                    self.assertFalse(bad_step["structuredContent"]["verified"], (bad_mode, bad_step["structuredContent"]))
+                finally:
+                    bad_srv.close()
         finally:
             srv.close()
 
