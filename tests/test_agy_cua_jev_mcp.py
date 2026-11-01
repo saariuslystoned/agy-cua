@@ -5511,6 +5511,30 @@ class StdioEndToEndTest(unittest.TestCase):
             self.assertEqual(len(evs_ok), 2)
             self.assertEqual(n_act_ok, 1)
             self.assertEqual(stop_ok["stop"], "action_failed")
+
+            # ok=true with delivery_uncertain and top-level run.mjs {ok: false} crash must fail closed
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._run_ad_cli(
+                    sys.executable,
+                    [
+                        "-c",
+                        'import json; print(json.dumps({"ok": True, "data": {"disposition": {"delivery": "delivery_uncertain", "retry": "unsafe"}}}))',
+                        "click",
+                        "@s1:e1",
+                    ],
+                    env={},
+                )
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._parse_jev_run_events(
+                    '{"ok":false,"error":"the screen could not be read: TIMEOUT"}\n',
+                    "",
+                )
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._parse_jev_run_events(
+                    '{"turn":{"step":1,"operation":"CLICK","ok":true,"delivery":"delivery_uncertain"}}\n'
+                    '{"stop":"done"}\n',
+                    "",
+                )
         finally:
             proxy.close()
 
@@ -5564,6 +5588,237 @@ class StdioEndToEndTest(unittest.TestCase):
         finally:
             bench_mod.time.sleep = orig_sleep
             bench_mod._wake_macos_app_nap = orig_wake
+
+    def test_v2_round3_edge_cases_rerank_settle_and_uncertain_halt(self):
+        # 1) Zero-confidence (0.0) triggers Pass-2 rerank AND a valid 2,000-char goal never crashes Pass-2 rerank
+        class ZeroConfLongGoalDriver:
+            def __init__(self):
+                self.session_id = ""
+                self.timeout_ms = 5000
+                self.snap_seq = 0
+                self.clicked_target = False
+
+            def close(self):
+                pass
+
+            def call_tool(self, name, args, **_kwargs):
+                if name == "get_window_state":
+                    self.snap_seq += 1
+                    snap = f"s0000ab{self.snap_seq:02x}"
+                    st = "Saved=true" if self.clicked_target else "Saved=false"
+                    lines = ['- [0] AXWindow "LongGoalApp"', f'  - AXStaticText = "{st}"']
+                    elems = [{"element_index": 0, "role": "AXWindow", "label": "LongGoalApp", "actions": ["AXRaise"]}]
+                    for idx in range(1, 12):
+                        lbl = "Apply Changes" if idx == 9 else f"Option {idx}"
+                        lines.append(f"  - [{idx}] AXButton ({lbl}) [actions=[press]]")
+                        elems.append({"element_index": idx, "role": "AXButton", "label": lbl, "enabled": True, "parent_index": 0, "actions": ["AXPress"]})
+                    md = "\n".join(lines)
+                    return {
+                        "content": [{"type": "text", "text": md}],
+                        "structuredContent": {
+                            "pid": 101,
+                            "window_id": 901,
+                            "snapshot_id": snap,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": elems,
+                        },
+                    }
+                if name == "click" and str(args.get("element_token", "")).endswith(":9"):
+                    self.clicked_target = True
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+        seen_goals: list[str] = []
+
+        def fake_zero_conf_post(req, _timeout):
+            body = json.loads(req.data.decode("utf-8"))
+            seen_goals.append(body["state"]["goal"])
+            c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+            if len(seen_goals) == 1:
+                rem1 = [cid for cid in c_ids if cid not in {"ax.1.option-1", "ax.9.apply-changes"}]
+                probs = {
+                    "ax.1.option-1": 0.22,
+                    "ax.9.apply-changes": 0.20,
+                    **{cid: round(0.58 / max(1, len(rem1)), 6) for cid in rem1},
+                }
+                return 200, json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "answers": {
+                            "candidate": {
+                                "type": "choice",
+                                "choice": "ax.1.option-1",
+                                "confidence": 0.0,
+                                "probabilities": probs,
+                            }
+                        },
+                        "usage": {"input_tokens": 200, "output_tokens": 5},
+                    }
+                )
+            rem = [cid for cid in c_ids if cid != "ax.9.apply-changes"]
+            probs2 = {"ax.9.apply-changes": 0.97, **{cid: round(0.03 / max(1, len(rem)), 6) for cid in rem}}
+            return 200, json.dumps(
+                {
+                    "model": "jev-1.13.0",
+                    "answers": {
+                        "candidate": {
+                            "type": "choice",
+                            "choice": "ax.9.apply-changes",
+                            "confidence": 0.97,
+                            "probabilities": probs2,
+                        }
+                    },
+                    "usage": {"input_tokens": 80, "output_tokens": 4},
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            drv_zc = ZeroConfLongGoalDriver()
+            srv_zc = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "zc.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_zero_conf_post,
+                driver_client=drv_zc,
+            )
+            try:
+                max_len_goal = "Click Commit Save " + ("x" * (2000 - len("Click Commit Save ")))
+                self.assertEqual(len(max_len_goal), 2000)
+                res_zc = srv_zc.handle_step(
+                    {
+                        "pid": 101,
+                        "window_id": 901,
+                        "goal": max_len_goal,
+                        "expected_postcondition": {"static_text_contains": "Saved=true"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_zc["status"], "verified")
+                self.assertTrue(res_zc["reranked"])
+                self.assertEqual(len(seen_goals), 2)
+                self.assertLessEqual(len(seen_goals[1]), 2000)
+
+                over_len_res = srv_zc.handle_step(
+                    {"pid": 101, "window_id": 901, "goal": "g" * 2001}
+                )["structuredContent"]
+                self.assertEqual(over_len_res["status"], "refused")
+                self.assertEqual(over_len_res["reason"], "invalid_goal")
+            finally:
+                srv_zc.close()
+
+            # 2) Settle-poll read clamps timeout_s / timeout_ms to settle budget AND post-dispatch settle read error halts session
+            class SettleClampAndCrashDriver:
+                def __init__(self, *, fail_on_second_post: bool):
+                    self.session_id = ""
+                    self.timeout_ms = 5000
+                    self.snap_seq = 0
+                    self.dispatched = False
+                    self.post_calls: list[dict[str, object]] = []
+                    self.fail_on_second_post = fail_on_second_post
+
+                def close(self):
+                    pass
+
+                def call_tool(self, name, args, **kwargs):
+                    if name == "get_window_state":
+                        self.snap_seq += 1
+                        snap = f"s0000de{self.snap_seq:02x}"
+                        if self.dispatched:
+                            self.post_calls.append(
+                                {
+                                    "timeout_s": kwargs.get("timeout_s"),
+                                    "deadline_monotonic": kwargs.get("deadline_monotonic"),
+                                    "walk_timeout_ms": args.get("timeout_ms"),
+                                }
+                            )
+                            if len(self.post_calls) >= 2 and self.fail_on_second_post:
+                                raise RuntimeError("window_not_found during settle poll")
+                        status = "State: Done" if (self.dispatched and len(self.post_calls) >= 2) else "State: Pending"
+                        md = f'- [0] AXWindow "SettleBound"\n  - AXStaticText = "{status}"\n  - [3] AXButton (Run) [actions=[press]]'
+                        return {
+                            "content": [{"type": "text", "text": md}],
+                            "structuredContent": {
+                                "pid": 102,
+                                "window_id": 902,
+                                "snapshot_id": snap,
+                                "elements_complete": True,
+                                "truncated": False,
+                                "tree_markdown": md,
+                                "elements": [
+                                    {"element_index": 0, "role": "AXWindow", "label": "SettleBound", "actions": ["AXRaise"]},
+                                    {"element_index": 3, "role": "AXButton", "label": "Run", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                ],
+                            },
+                        }
+                    self.dispatched = True
+                    return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+            def fake_run_post(req, _timeout):
+                body = json.loads(req.data.decode("utf-8"))
+                c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+                rem = [cid for cid in c_ids if cid != "ax.3.run"]
+                probs = {"ax.3.run": 0.98, **{cid: round(0.02 / max(1, len(rem)), 6) for cid in rem}}
+                return 200, json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "answers": {"candidate": {"type": "choice", "choice": "ax.3.run", "confidence": 0.98, "probabilities": probs}},
+                        "usage": {"input_tokens": 50, "output_tokens": 4},
+                    }
+                )
+
+            drv_clamp = SettleClampAndCrashDriver(fail_on_second_post=False)
+            srv_clamp = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "clamp.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_run_post,
+                driver_client=drv_clamp,
+            )
+            try:
+                res_clamp = srv_clamp.handle_step(
+                    {
+                        "pid": 102,
+                        "window_id": 902,
+                        "goal": "Click Run",
+                        "wait_timeout_ms": 350,
+                        "expected_postcondition": {"static_text_contains": "State: Done"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_clamp["status"], "verified")
+                self.assertEqual(res_clamp["verify_polls"], 2)
+                self.assertIsNotNone(drv_clamp.post_calls[1]["deadline_monotonic"])
+                self.assertLessEqual(float(drv_clamp.post_calls[1]["timeout_s"]), 0.35)
+                self.assertLessEqual(int(drv_clamp.post_calls[1]["walk_timeout_ms"]), 350)
+            finally:
+                srv_clamp.close()
+
+            drv_crash = SettleClampAndCrashDriver(fail_on_second_post=True)
+            srv_crash = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "crash.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_run_post,
+                driver_client=drv_crash,
+            )
+            try:
+                res_crash = srv_crash.handle_step(
+                    {
+                        "pid": 102,
+                        "window_id": 902,
+                        "goal": "Click Run",
+                        "wait_timeout_ms": 350,
+                        "expected_postcondition": {"static_text_contains": "State: Done"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_crash["status"], "verification_failed")
+                self.assertEqual(res_crash["verification_outcome"], "outcome_unknown")
+                self.assertTrue(res_crash["uncertain_side_effect"])
+                self.assertTrue(srv_crash.accounting.halted)
+
+                # Subsequent mutation attempt must be refused with status='halted'
+                res_after = srv_crash.handle_step(
+                    {"pid": 102, "window_id": 902, "goal": "Click Run again"}
+                )["structuredContent"]
+                self.assertEqual(res_after["status"], "halted")
+            finally:
+                srv_crash.close()
 
 
 if __name__ == "__main__":

@@ -59,6 +59,7 @@ MAX_CANDIDATES = 32
 MAX_AUTO_CANDIDATES = 28
 MAX_ELEMENTS = 64
 MAX_HISTORY = 16
+MAX_GOAL_CHARS = 2_000
 
 V2_MAX_JSON_BYTES = 131_072
 V2_MAX_CANDIDATES = 250
@@ -453,8 +454,8 @@ def validate_select_request(
         raise ValueError(f"unsupported request fields: {sorted(extra_keys)}")
 
     goal = args.get("goal")
-    if not isinstance(goal, str) or not goal.strip() or len(goal) > 2000:
-        raise ValueError("goal must be a non-empty string of at most 2000 characters")
+    if not isinstance(goal, str) or not goal.strip() or len(goal) > MAX_GOAL_CHARS:
+        raise ValueError(f"goal must be a non-empty string of at most {MAX_GOAL_CHARS} characters")
 
     pid = args.get("pid")
     window_id = args.get("window_id")
@@ -4731,6 +4732,25 @@ def _is_retryable_postcondition_reason(reason: str) -> bool:
     )
 
 
+def _should_rerank_decision(decision: Mapping[str, Any], candidate_count: int) -> bool:
+    if decision.get("kind") != "selected" or candidate_count <= V2_RERANK_SHORTLIST_K:
+        return False
+    raw_conf = decision.get("confidence")
+    if isinstance(raw_conf, bool) or not isinstance(raw_conf, (int, float)):
+        return False
+    return 0.0 <= float(raw_conf) < V2_RERANK_CONFIDENCE_THRESHOLD
+
+
+def _build_rerank_goal(goal: str, suffix: str) -> str:
+    budget = MAX_GOAL_CHARS - len(suffix)
+    if len(goal) <= budget:
+        return f"{goal}{suffix}"
+    if budget <= 0:
+        return goal[:MAX_GOAL_CHARS]
+    trimmed = goal[:budget].rstrip()
+    return f"{trimmed}{suffix}" if trimmed else goal[:MAX_GOAL_CHARS]
+
+
 def _format_tool_result(payload: Mapping[str, Any], is_error: bool = False) -> dict[str, Any]:
     summary_lines = [
         f"schema={payload.get('schema')} status={payload.get('status', payload.get('kind', 'ok'))}"
@@ -5014,7 +5034,7 @@ class JevMcpServer:
         goal = args.get("goal")
         pid = args.get("pid")
         window_id = args.get("window_id")
-        if not isinstance(goal, str) or not goal.strip():
+        if not isinstance(goal, str) or not goal.strip() or len(goal) > MAX_GOAL_CHARS:
             return _format_tool_result(
                 {"schema": "agy_cua.jev_step_v1", "status": "refused", "reason": "invalid_goal"},
                 is_error=True,
@@ -5668,9 +5688,7 @@ class JevMcpServer:
             provider_ms = decision.get("provider_ms", 0.0)
             if (
                 not self.v1_compat
-                and decision.get("kind") == "selected"
-                and len(bound_candidates) > V2_RERANK_SHORTLIST_K
-                and 0.0 < float(decision.get("confidence") or 1.0) < V2_RERANK_CONFIDENCE_THRESHOLD
+                and _should_rerank_decision(decision, len(bound_candidates))
                 and self.accounting.calls_used < self.accounting.max_calls
             ):
                 probs_p1 = decision.get("probabilities") if isinstance(decision.get("probabilities"), Mapping) else {}
@@ -5708,24 +5726,32 @@ class JevMcpServer:
                             note=route.note,
                         )
                 if can_rerank:
-                    rerank_req = validate_select_request(
-                        {
-                            "goal": f"{goal} (disambiguate shortlisted top-{len(shortlist_cands)} candidates)",
-                            "pid": pid,
-                            "window_id": window_id,
-                            "snapshot_id": pre_obs["snapshot_id"],
-                            "elements": short_elements,
-                            "history": history_in,
-                            "candidates": [{"id": c["id"], "description": c["description"]} for c in shortlist_cands],
-                        },
-                        max_elements=self.max_elements_cap,
-                        max_candidates=self.max_candidates,
-                        max_json_bytes=self.max_json_bytes,
+                    rerank_goal = _build_rerank_goal(
+                        goal,
+                        f" (disambiguate shortlisted top-{len(shortlist_cands)} candidates)",
                     )
-                    rerank_dec = evaluate_jev_choice(rerank_req, route_p2, self.accounting, self.http_post)
-                    provider_ms = round(float(provider_ms) + float(rerank_dec.get("provider_ms", 0.0)), 2)
-                    decision = rerank_dec
-                    reranked = True
+                    try:
+                        rerank_req = validate_select_request(
+                            {
+                                "goal": rerank_goal,
+                                "pid": pid,
+                                "window_id": window_id,
+                                "snapshot_id": pre_obs["snapshot_id"],
+                                "elements": short_elements,
+                                "history": history_in,
+                                "candidates": [{"id": c["id"], "description": c["description"]} for c in shortlist_cands],
+                            },
+                            max_elements=self.max_elements_cap,
+                            max_candidates=self.max_candidates,
+                            max_json_bytes=self.max_json_bytes,
+                        )
+                    except ValueError:
+                        rerank_req = None
+                    if rerank_req is not None:
+                        rerank_dec = evaluate_jev_choice(rerank_req, route_p2, self.accounting, self.http_post)
+                        provider_ms = round(float(provider_ms) + float(rerank_dec.get("provider_ms", 0.0)), 2)
+                        decision = rerank_dec
+                        reranked = True
 
         if decision["kind"] != "selected":
             release_if_unowned()
@@ -5927,6 +5953,7 @@ class JevMcpServer:
         )
         verify_polls = 0
         verify_started = time.perf_counter()
+        verify_started_mono = time.monotonic()
         try:
             post_obs_args: dict[str, Any] = {
                 "pid": pid,
@@ -5947,13 +5974,43 @@ class JevMcpServer:
             elif not self.v1_compat and is_hierarchy_scoped and driver.timeout_ms >= 4000:
                 post_obs_args["timeout_ms"] = 5000
 
-            def _read_post_observation(baseline_obs: Mapping[str, Any] | None) -> dict[str, Any]:
+            def _bound_post_call_params(
+                base_args: Mapping[str, Any],
+                poll_deadline: float | None,
+            ) -> tuple[dict[str, Any], float, float | None]:
+                call_args = dict(base_args)
+                eff_deadline = _deadline_monotonic
+                if poll_deadline is not None:
+                    eff_deadline = poll_deadline if eff_deadline is None else min(eff_deadline, poll_deadline)
+                    rem_s = eff_deadline - time.monotonic()
+                    if rem_s <= 0:
+                        raise TimeoutError("settle_timeout_exceeded")
+                    rem_ms = max(1, int(rem_s * 1000))
+                    if rem_ms >= MIN_OBSERVE_WALK_TIMEOUT_MS:
+                        walk_cap = (
+                            max(MIN_OBSERVE_WALK_TIMEOUT_MS, rem_ms - 50)
+                            if rem_ms > MIN_OBSERVE_WALK_TIMEOUT_MS + 50
+                            else rem_ms
+                        )
+                        cur_walk = call_args.get("timeout_ms")
+                        call_args["timeout_ms"] = min(cur_walk, walk_cap) if isinstance(cur_walk, int) else walk_cap
+                    call_timeout_s = min(obs_call_timeout_s(driver, call_args.get("timeout_ms")), rem_s)
+                else:
+                    call_timeout_s = obs_call_timeout_s(driver, call_args.get("timeout_ms"))
+                return call_args, call_timeout_s, eff_deadline
+
+            def _read_post_observation(
+                baseline_obs: Mapping[str, Any] | None,
+                *,
+                poll_deadline: float | None = None,
+            ) -> dict[str, Any]:
                 eff_base = None if is_hierarchy_scoped else baseline_obs
+                call_args, call_timeout_s, eff_deadline = _bound_post_call_params(post_obs_args, poll_deadline)
                 raw_p = driver.call_tool(
                     "get_window_state",
-                    post_obs_args,
-                    timeout_s=obs_call_timeout_s(driver, post_obs_args.get("timeout_ms")),
-                    deadline_monotonic=_deadline_monotonic,
+                    call_args,
+                    timeout_s=call_timeout_s,
+                    deadline_monotonic=eff_deadline,
                 )
                 if raw_p.get("isError"):
                     err_t = "".join(c.get("text", "") for c in (raw_p.get("content") or []) if isinstance(c, Mapping))
@@ -5975,12 +6032,13 @@ class JevMcpServer:
                 except ValueError as diff_exc:
                     if "invalid_diff_baseline" not in str(diff_exc):
                         raise
-                    fallback_post_args = dict(post_obs_args, include_diff=False, tree_format="both")
+                    fb_base = dict(post_obs_args, include_diff=False, tree_format="both")
+                    fb_args, fb_timeout_s, fb_deadline = _bound_post_call_params(fb_base, poll_deadline)
                     raw_p = driver.call_tool(
                         "get_window_state",
-                        fallback_post_args,
-                        timeout_s=obs_call_timeout_s(driver, post_obs_args.get("timeout_ms")),
-                        deadline_monotonic=_deadline_monotonic,
+                        fb_args,
+                        timeout_s=fb_timeout_s,
+                        deadline_monotonic=fb_deadline,
                     )
                     if raw_p.get("isError"):
                         err_t = "".join(c.get("text", "") for c in (raw_p.get("content") or []) if isinstance(c, Mapping))
@@ -6011,21 +6069,18 @@ class JevMcpServer:
                 target_element_index=target_el_idx,
             )
             if eff_wait_ms > 0 and not post_ok and _is_retryable_postcondition_reason(verify_reason):
-                settle_deadline = time.monotonic() + (eff_wait_ms / 1000.0)
+                settle_deadline = verify_started_mono + (eff_wait_ms / 1000.0)
                 if _deadline_monotonic is not None:
                     settle_deadline = min(settle_deadline, _deadline_monotonic - 0.05)
+                min_poll_read_s = MIN_OBSERVE_WALK_TIMEOUT_MS / 1000.0
                 while not post_ok and _is_retryable_postcondition_reason(verify_reason):
                     rem_settle = settle_deadline - time.monotonic()
-                    if rem_settle <= 0:
+                    if rem_settle <= min_poll_read_s + 0.01:
                         break
-                    time.sleep(min(0.10, rem_settle))
-                    if time.monotonic() >= settle_deadline:
+                    time.sleep(min(0.10, max(0.01, rem_settle - min_poll_read_s)))
+                    if settle_deadline - time.monotonic() < min_poll_read_s:
                         break
-                    try:
-                        next_post_obs = _read_post_observation(post_obs)
-                    except Exception:
-                        break
-                    post_obs = next_post_obs
+                    post_obs = _read_post_observation(post_obs, poll_deadline=settle_deadline)
                     verify_polls += 1
                     if not post_obs.get("query_incomplete") and not is_hierarchy_scoped:
                         self._last_observations[(pid, window_id)] = post_obs
@@ -6038,6 +6093,7 @@ class JevMcpServer:
                     )
         except Exception as exc:
             verify_ms = round((time.perf_counter() - verify_started) * 1000, 2)
+            self._last_observations.pop((pid, window_id), None)
             self.accounting.uncertain_side_effects += 1
             self.accounting.halted = True
             self.accounting.halt_reason = "uncertain_verification_after_dispatch"
@@ -6539,7 +6595,7 @@ class JevMcpServer:
             )
 
         goal = args.get("goal")
-        if not isinstance(goal, str) or not goal.strip():
+        if not isinstance(goal, str) or not goal.strip() or len(goal) > MAX_GOAL_CHARS:
             return _format_tool_result(
                 {"schema": "agy_cua.jev_browser_step_v1", "status": "refused", "reason": "invalid_goal", "action_dispatched": False},
                 is_error=True,
@@ -6692,27 +6748,43 @@ class JevMcpServer:
                 }
                 for e in pre_obs["elements"]
             ]
-            select_req = validate_select_request(
-                {
-                    "goal": goal,
-                    "pid": 1,
-                    "window_id": 1,
-                    "snapshot_id": synth_snap,
-                    "elements": browser_select_els[: self.max_elements_cap],
-                    "candidates": [{"id": c["id"], "description": c["description"]} for c in bound_cands],
-                },
-                max_elements=self.max_elements_cap,
-                max_candidates=self.max_candidates,
-                max_json_bytes=self.max_json_bytes,
-            )
+            try:
+                select_req = validate_select_request(
+                    {
+                        "goal": goal,
+                        "pid": 1,
+                        "window_id": 1,
+                        "snapshot_id": synth_snap,
+                        "elements": browser_select_els[: self.max_elements_cap],
+                        "candidates": [{"id": c["id"], "description": c["description"]} for c in bound_cands],
+                    },
+                    max_elements=self.max_elements_cap,
+                    max_candidates=self.max_candidates,
+                    max_json_bytes=self.max_json_bytes,
+                )
+            except Exception as exc:
+                return _format_tool_result(
+                    {
+                        "schema": "agy_cua.jev_browser_step_v1",
+                        "status": "candidate_refused",
+                        "verification_outcome": "not_executed",
+                        "reason": str(exc),
+                        "target_id": target_id,
+                        "tab_id": tab_id,
+                        "pre_snapshot_id": pre_obs["snapshot_id"],
+                        "session_id": self.session_id,
+                        "verified": False,
+                        "action_dispatched": False,
+                        "uncertain_side_effect": False,
+                    },
+                    is_error=True,
+                )
             route = resolve_route(self.env, self.keychain_reader)
             decision = evaluate_jev_choice(select_req, route, self.accounting, self.http_post)
             provider_ms = decision.get("provider_ms", 0.0)
             if (
                 not self.v1_compat
-                and decision.get("kind") == "selected"
-                and len(bound_cands) > V2_RERANK_SHORTLIST_K
-                and 0.0 < float(decision.get("confidence") or 1.0) < V2_RERANK_CONFIDENCE_THRESHOLD
+                and _should_rerank_decision(decision, len(bound_cands))
                 and self.accounting.calls_used < self.accounting.max_calls
             ):
                 probs_p1 = decision.get("probabilities") if isinstance(decision.get("probabilities"), Mapping) else {}
@@ -6736,23 +6808,31 @@ class JevMcpServer:
                     if short_refs
                     else browser_select_els[:V2_RERANK_SHORTLIST_K]
                 )
-                rerank_req = validate_select_request(
-                    {
-                        "goal": f"{goal} (disambiguate shortlisted top-{len(shortlist_cands)} browser candidates)",
-                        "pid": 1,
-                        "window_id": 1,
-                        "snapshot_id": synth_snap,
-                        "elements": short_els,
-                        "candidates": [{"id": c["id"], "description": c["description"]} for c in shortlist_cands],
-                    },
-                    max_elements=self.max_elements_cap,
-                    max_candidates=self.max_candidates,
-                    max_json_bytes=self.max_json_bytes,
+                rerank_goal = _build_rerank_goal(
+                    goal,
+                    f" (disambiguate shortlisted top-{len(shortlist_cands)} browser candidates)",
                 )
-                rerank_dec = evaluate_jev_choice(rerank_req, route, self.accounting, self.http_post)
-                provider_ms = round(float(provider_ms) + float(rerank_dec.get("provider_ms", 0.0)), 2)
-                decision = rerank_dec
-                reranked = True
+                try:
+                    rerank_req = validate_select_request(
+                        {
+                            "goal": rerank_goal,
+                            "pid": 1,
+                            "window_id": 1,
+                            "snapshot_id": synth_snap,
+                            "elements": short_els,
+                            "candidates": [{"id": c["id"], "description": c["description"]} for c in shortlist_cands],
+                        },
+                        max_elements=self.max_elements_cap,
+                        max_candidates=self.max_candidates,
+                        max_json_bytes=self.max_json_bytes,
+                    )
+                except ValueError:
+                    rerank_req = None
+                if rerank_req is not None:
+                    rerank_dec = evaluate_jev_choice(rerank_req, route, self.accounting, self.http_post)
+                    provider_ms = round(float(provider_ms) + float(rerank_dec.get("provider_ms", 0.0)), 2)
+                    decision = rerank_dec
+                    reranked = True
 
         if decision["kind"] != "selected":
             return _format_tool_result(
@@ -6847,8 +6927,16 @@ class JevMcpServer:
         )
         verify_polls = 0
         verify_started = time.perf_counter()
+        verify_started_mono = time.monotonic()
+        drv_base_s = getattr(driver, "timeout_ms", DEFAULT_DRIVER_TIMEOUT_MS) / 1000.0
         try:
-            def _read_post_browser_obs() -> dict[str, Any]:
+            def _read_post_browser_obs(*, poll_deadline: float | None = None) -> dict[str, Any]:
+                call_timeout_s = drv_base_s
+                if poll_deadline is not None:
+                    rem_s = poll_deadline - time.monotonic()
+                    if rem_s <= 0:
+                        raise TimeoutError("settle_timeout_exceeded")
+                    call_timeout_s = min(drv_base_s, rem_s)
                 raw_p = driver.call_tool(
                     "get_browser_state",
                     {
@@ -6857,6 +6945,8 @@ class JevMcpServer:
                         "include_screenshot": False,
                         "snapshot_format": "semantic_v2",
                     },
+                    timeout_s=call_timeout_s,
+                    deadline_monotonic=poll_deadline,
                 )
                 if raw_p.get("isError"):
                     err_t = "".join(c.get("text", "") for c in (raw_p.get("content") or []) if isinstance(c, Mapping))
@@ -6878,19 +6968,16 @@ class JevMcpServer:
                 target_ref=authorized["arguments"].get("ref"),
             )
             if eff_wait_ms > 0 and not post_ok and _is_retryable_postcondition_reason(verify_reason):
-                settle_deadline = time.monotonic() + (eff_wait_ms / 1000.0)
+                settle_deadline = verify_started_mono + (eff_wait_ms / 1000.0)
+                min_browser_read_s = 0.05
                 while not post_ok and _is_retryable_postcondition_reason(verify_reason):
                     rem_settle = settle_deadline - time.monotonic()
-                    if rem_settle <= 0:
+                    if rem_settle <= min_browser_read_s + 0.01:
                         break
-                    time.sleep(min(0.10, rem_settle))
-                    if time.monotonic() >= settle_deadline:
+                    time.sleep(min(0.10, max(0.01, rem_settle - min_browser_read_s)))
+                    if settle_deadline - time.monotonic() < min_browser_read_s:
                         break
-                    try:
-                        next_post_obs = _read_post_browser_obs()
-                    except Exception:
-                        break
-                    post_obs = next_post_obs
+                    post_obs = _read_post_browser_obs(poll_deadline=settle_deadline)
                     verify_polls += 1
                     state_changed, post_ok, verify_reason = check_browser_postcondition(
                         expected_post,
@@ -7094,7 +7181,7 @@ class JevMcpServer:
                     is_error=True,
                 )
             s_goal = step_spec.get("goal")
-            if not isinstance(s_goal, str) or not s_goal.strip():
+            if not isinstance(s_goal, str) or not s_goal.strip() or len(s_goal) > MAX_GOAL_CHARS:
                 return _format_tool_result(
                     {
                         "schema": "agy_cua.jev_batch_v1",

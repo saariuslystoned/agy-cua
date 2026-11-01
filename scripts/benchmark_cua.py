@@ -2955,14 +2955,18 @@ def _extract_ad_subcommand(argv: list[str]) -> str:
 
 
 def _is_ad_retry_safe(payload: Mapping[str, Any] | None) -> bool:
-    """Return True only when an `agent-desktop` error envelope explicitly marks retry as `'safe'`."""
+    """Return True only when an `agent-desktop` error envelope explicitly marks retry as `'safe'` with no prior delivery."""
     if not isinstance(payload, Mapping):
         return False
     err_obj = payload.get("error")
     if not isinstance(err_obj, Mapping):
         return False
     disp = err_obj.get("disposition")
-    return isinstance(disp, Mapping) and disp.get("retry") == "safe"
+    return (
+        isinstance(disp, Mapping)
+        and disp.get("retry") == "safe"
+        and disp.get("delivery") in {None, "not_delivered"}
+    )
 
 
 def _terminate_process_group(proc: subprocess.Popen[str], pgid: int, *, sigterm_grace_s: float = 0.25) -> None:
@@ -3102,6 +3106,12 @@ def _run_ad_cli(
             raise ArmActionError(
                 f"agent-desktop mutating command {subcmd!r} exited {proc.returncode} despite ok=true; action outcome unknown{suffix}"
             )
+        data_obj = parsed.get("data") if isinstance(parsed.get("data"), Mapping) else {}
+        data_disp = data_obj.get("disposition") if isinstance(data_obj.get("disposition"), Mapping) else {}
+        if data_disp.get("delivery") == "delivery_uncertain":
+            raise ArmActionError(
+                f"agent-desktop mutating command {subcmd!r} reported delivery_uncertain; action outcome unknown{suffix}"
+            )
         if not bool(parsed.get("ok")) and not _is_ad_retry_safe(parsed):
             err_obj = parsed.get("error") if isinstance(parsed.get("error"), Mapping) else {}
             code = err_obj.get("code")
@@ -3162,6 +3172,10 @@ def _parse_jev_run_events(stdout_text: str, stderr_text: str) -> tuple[list[dict
             op = t_obj.get("operation")
             if op not in {None, "WAIT", "DRILL", "WIDEN"}:
                 run_actions += 1
+                if t_obj.get("delivery") == "delivery_uncertain":
+                    raise ArmActionError(
+                        f"jev_desktop_run {op!r} reported delivery_uncertain; action outcome unknown"
+                    )
                 if t_obj.get("ok") is False and not _is_ad_retry_safe(t_obj):
                     err_obj = t_obj.get("error") if isinstance(t_obj.get("error"), Mapping) else {}
                     raise ArmActionError(
@@ -3171,12 +3185,10 @@ def _parse_jev_run_events(stdout_text: str, stderr_text: str) -> tuple[list[dict
     stop_ev = events[-1]
     if stop_ev.get("stop") == "action_failed" and not _is_ad_retry_safe(stop_ev):
         raise ArmActionError("jev_desktop_run stopped on action_failed without safe retry disposition; action outcome unknown")
-    if stop_ev.get("ok") is False:
-        if run_actions > 0:
-            raise ArmActionError(
-                f"jev_desktop_run aborted with error after {run_actions} action(s); action outcome unknown"
-            )
-        return events, run_actions, {"stop": "read_failed", "error": stop_ev.get("error")}
+    if stop_ev.get("ok") is False and not _is_ad_retry_safe(stop_ev):
+        raise ArmActionError(
+            f"jev_desktop_run aborted with unverified error ({str(stop_ev.get('error') or '')[:160]}); action outcome unknown"
+        )
     if "stop" not in stop_ev:
         raise ArmActionError("jev_desktop_run terminated without a terminal stop event; action outcome unknown")
     return events, run_actions, stop_ev
