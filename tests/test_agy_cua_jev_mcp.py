@@ -4787,6 +4787,2301 @@ class StdioEndToEndTest(unittest.TestCase):
             bench_mod.sample_frontmost_info = orig_sample
         self.assertEqual(mon.violations, 2)
 
+    def test_benchmark_t8_dense_hierarchy_and_agent_desktop_helpers(self):
+        bench_path = os.path.join(ROOT, "scripts", "benchmark_cua.py")
+        b_loader = importlib.machinery.SourceFileLoader("benchmark_cua_t8_test", bench_path)
+        b_spec = importlib.util.spec_from_loader("benchmark_cua_t8_test", b_loader)
+        bench_mod = importlib.util.module_from_spec(b_spec)
+        sys.modules["benchmark_cua_t8_test"] = bench_mod
+        b_loader.exec_module(bench_mod)
+
+        tasks = bench_mod.build_tasks()
+        task_ids = [t.task_id for t in tasks]
+        self.assertIn("T8_dense_hierarchy_drill", task_ids)
+        self.assertEqual(len(tasks), 11)
+
+        with tempfile.TemporaryDirectory() as td:
+            from pathlib import Path
+
+            td_path = Path(td)
+            sf = td_path / "t8_state.json"
+            sf.write_text(
+                json.dumps(
+                    {
+                        "applied": True,
+                        "cluster": "Production Cluster",
+                        "ticket_id": "INC-4821",
+                        "page_oncall": True,
+                        "severity": "P1",
+                        "decoy_clicks": 0,
+                        "applied_snapshot": {
+                            "cluster": "Production Cluster",
+                            "ticket_id": "INC-4821",
+                            "page_oncall": True,
+                            "severity": "P1",
+                            "decoy_clicks": 0,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            ok, summary, _ = bench_mod._verify_dense_hierarchy(sf)
+            self.assertTrue(ok, summary)
+
+            # Decoy click or post-apply edit fails verification
+            sf.write_text(
+                json.dumps(
+                    {
+                        "applied": True,
+                        "cluster": "Production Cluster",
+                        "ticket_id": "INC-4821",
+                        "page_oncall": True,
+                        "severity": "P1",
+                        "decoy_clicks": 1,
+                        "applied_snapshot": {
+                            "cluster": "Production Cluster",
+                            "ticket_id": "INC-4821",
+                            "page_oncall": True,
+                            "severity": "P1",
+                            "decoy_clicks": 1,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            ok_decoy, _, _ = bench_mod._verify_dense_hierarchy(sf)
+            self.assertFalse(ok_decoy)
+
+            fake_ad = td_path / "agent-desktop"
+            (fake_ad / "target" / "release").mkdir(parents=True)
+            (fake_ad / "scripts" / "jev").mkdir(parents=True)
+            (fake_ad / "target" / "release" / "agent-desktop").write_text("#!/bin/sh\n", encoding="utf-8")
+            (fake_ad / "scripts" / "jev" / "act.mjs").write_text("// stub\n", encoding="utf-8")
+            (fake_ad / "scripts" / "jev" / "run.mjs").write_text("// stub\n", encoding="utf-8")
+            r_dir, ad_bin, act_mjs, run_mjs = bench_mod.resolve_agent_desktop_paths(str(fake_ad))
+            self.assertEqual(r_dir, fake_ad.resolve())
+            self.assertTrue(ad_bin.exists() and act_mjs.exists() and run_mjs.exists())
+
+            texts = bench_mod._extract_ad_static_texts(
+                {
+                    "role": "window",
+                    "children": [
+                        {"role": "statictext", "value": "Status: Ready"},
+                        {"role": "group", "children": [{"role": "text", "name": "3,901"}]},
+                    ],
+                }
+            )
+            self.assertEqual(texts, ["Status: Ready", "3,901"])
+
+            captured_upstream: list[str] = []
+
+            def fake_http_post(req, _timeout):
+                captured_upstream.append(req.data.decode("utf-8"))
+                return 200, json.dumps(
+                    {
+                        "answers": {"target": {"type": "choice", "choice": "@s1:e1", "probabilities": {"@s1:e1": 0.99}}},
+                        "usage": {"input_tokens": 120, "output_tokens": 8},
+                    }
+                )
+
+            spend = bench_mod.SpendTracker(max_budget_usd=1.0)
+            proxy = bench_mod.LoopbackTypeSafeProxy(
+                spend,
+                env={"TYPESAFE_API_KEY": "fake-test-key"},
+                http_post=fake_http_post,
+            )
+            try:
+                req = urllib.request.Request(
+                    proxy.base_url,
+                    data=b'{"state":{"note":"CANARY-VAULT-SECRET-9941"}}',
+                    headers={"Content-Type": "application/json", "Authorization": proxy.auth_header},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=5.0) as resp:
+                    self.assertEqual(resp.status, 200)
+                self.assertTrue(proxy.canary_leaked)
+                self.assertEqual(len(captured_upstream), 1)
+                self.assertNotIn("CANARY-VAULT-SECRET-9941", captured_upstream[0])
+                self.assertEqual(spend.jev_input_tokens, 120)
+                self.assertEqual(spend.jev_output_tokens, 8)
+                proxy.raise_if_error()
+            finally:
+                proxy.close()
+
+    def test_v2_skeleton_drill_regions_region_scoping_and_batch_chaining(self):
+        class InMemDenseDriver:
+            def __init__(self):
+                self.session_id = ""
+                self.timeout_ms = 5000
+                self.gws_calls: list[dict] = []
+                self.actions: list[tuple[str, dict]] = []
+                self.snap_seq = 0
+                self.ticket_val = ""
+                self.page_checked = "0"
+                self.applied = False
+
+            def close(self):
+                pass
+
+            def call_tool(self, name, args, **_kwargs):
+                if name == "list_windows":
+                    return {"content": [{"type": "text", "text": "[]"}], "structuredContent": {"windows": []}}
+                if name == "get_window_state":
+                    self.gws_calls.append(dict(args))
+                    for forbidden in ("skeleton", "region", "root_element_index", "include_diff"):
+                        if forbidden in args:
+                            raise AssertionError(f"forbidden arg passed to cua-driver get_window_state: {forbidden}")
+                    self.snap_seq += 1
+                    snap = f"s0000ab{self.snap_seq:02x}"
+                    status_str = (
+                        f"DenseHierarchyStatus: Ticket={self.ticket_val or 'NONE'} | "
+                        f"PageOnCall={'true' if self.page_checked == '1' else 'false'} | "
+                        f"Applied={'true' if self.applied else 'false'}"
+                    )
+                    md = "\n".join(
+                        [
+                            '- [0] AXWindow "AGYCuaBench-dense-hierarchy"',
+                            f'  - AXStaticText = "{status_str}"',
+                            "  - AXSplitGroup (Workspace Sidebar)",
+                            "    - [10] AXButton (Production Cluster) [actions=[press]]",
+                            "    - [11] AXButton (Staging Cluster) [actions=[press]]",
+                            "    - [12] AXButton (Dev Cluster) [actions=[press]]",
+                            "  - AXSplitGroup (Operations Telemetry Grid)",
+                            '    - AXStaticText = "Row-001 telemetry noise"',
+                            "    - [20] AXButton (Inspect Row 001) [actions=[press]]",
+                            "    - [21] AXButton (Inspect Row 002) [actions=[press]]",
+                            "    - [22] AXButton (Inspect Row 003) [actions=[press]]",
+                            "  - [30] AXGroup (Incident Routing Inspector)",
+                            f'    - [31] AXTextField (Incident Ticket ID) = "{self.ticket_val}"',
+                            f'    - [32] AXCheckBox (Page On-Call Engineer) = "{self.page_checked}" [actions=[press]]',
+                            "    - [33] AXButton (Purge Incident History) [actions=[press]]",
+                            "  - AXGroup (Deployment Commit Footer)",
+                            "    - [40] AXButton (Apply Routing Policy) [actions=[press]]",
+                            "    - [41] AXButton (Discard Routing Changes) [actions=[press]]",
+                        ]
+                    )
+                    elements = [
+                        {"element_index": 0, "role": "AXWindow", "label": "AGYCuaBench-dense-hierarchy", "actions": ["AXRaise"]},
+                        {"element_index": 10, "role": "AXButton", "label": "Production Cluster", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 11, "role": "AXButton", "label": "Staging Cluster", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 12, "role": "AXButton", "label": "Dev Cluster", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 20, "role": "AXButton", "label": "Inspect Row 001", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 21, "role": "AXButton", "label": "Inspect Row 002", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 22, "role": "AXButton", "label": "Inspect Row 003", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 30, "role": "AXGroup", "label": "Incident Routing Inspector", "enabled": True, "actions": []},
+                        {"element_index": 31, "role": "AXTextField", "label": "Incident Ticket ID", "value": self.ticket_val, "enabled": True, "parent_index": 30, "actions": []},
+                        {"element_index": 32, "role": "AXCheckBox", "label": "Page On-Call Engineer", "value": self.page_checked, "enabled": True, "parent_index": 30, "actions": ["AXPress"]},
+                        {"element_index": 33, "role": "AXButton", "label": "Purge Incident History", "enabled": True, "parent_index": 30, "actions": ["AXPress"]},
+                        {"element_index": 40, "role": "AXButton", "label": "Apply Routing Policy", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 41, "role": "AXButton", "label": "Discard Routing Changes", "enabled": True, "actions": ["AXPress"]},
+                    ]
+                    return {
+                        "content": [{"type": "text", "text": md}],
+                        "structuredContent": {
+                            "pid": 88,
+                            "window_id": 601,
+                            "snapshot_id": snap,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": elements,
+                        },
+                    }
+                self.actions.append((name, dict(args)))
+                tok = str(args.get("element_token", ""))
+                if name == "set_value" and tok.endswith(":31"):
+                    self.ticket_val = str(args.get("value", ""))
+                elif name == "click" and tok.endswith(":32"):
+                    self.page_checked = "1"
+                elif name == "click" and tok.endswith(":40"):
+                    self.applied = True
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+        def fake_jev_post(req, _timeout):
+            body = json.loads(req.data.decode("utf-8"))
+            goal = body["state"]["goal"]
+            choice_ids = list(body["questions"]["candidate"]["criteria"].keys())
+            if "Ticket" in goal:
+                pick = "sv.31.incident-ticket-id"
+            elif "Page" in goal:
+                pick = "ax.32.page-on-call-engineer"
+            else:
+                pick = "ax.40.apply-routing-policy"
+            assert pick in choice_ids, f"{pick} missing from {choice_ids}"
+            rem = [cid for cid in choice_ids if cid != pick]
+            probs = {pick: 0.96, **{cid: round(0.04 / max(1, len(rem)), 6) for cid in rem}}
+            return 200, json.dumps(
+                {
+                    "model": "jev-1.13.0",
+                    "answers": {"candidate": {"type": "choice", "choice": pick, "confidence": 0.96, "probabilities": probs}},
+                    "usage": {"input_tokens": 90, "output_tokens": 5},
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            drv = InMemDenseDriver()
+            srv = jev.JevMcpServer(
+                env={
+                    "TYPESAFE_API_KEY": "ts-test",
+                    "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "targets.json"),
+                },
+                keychain_reader=lambda _: None,
+                http_post=fake_jev_post,
+                driver_client=drv,
+            )
+            try:
+                skel_res = srv.handle_observe({"pid": 88, "window_id": 601, "skeleton": True})
+                skel_sc = skel_res["structuredContent"]
+                self.assertEqual(skel_sc["status"], "ok")
+                self.assertEqual(drv.gws_calls[-1].get("max_elements"), 2000)
+                self.assertEqual(drv.gws_calls[-1].get("timeout_ms"), 5000)
+                region_names = [r["region"] for r in skel_sc.get("drill_regions", [])]
+                self.assertIn("Workspace Sidebar", region_names)
+                self.assertIn("Operations Telemetry Grid", region_names)
+                self.assertIn("Incident Routing Inspector", region_names)
+                self.assertTrue(any("DenseHierarchyStatus:" in s for s in skel_sc["static_texts"]))
+                self.assertFalse(any("Row-001 telemetry noise" in s for s in skel_sc["static_texts"]))
+
+                insp_by_region = srv.handle_observe({"pid": 88, "window_id": 601, "region": "Incident Routing Inspector"})["structuredContent"]
+                insp_by_root = srv.handle_observe({"pid": 88, "window_id": 601, "root_element_index": 30})["structuredContent"]
+                self.assertEqual([e["element_index"] for e in insp_by_region["elements"]], [31, 32, 33])
+                self.assertEqual([e["element_index"] for e in insp_by_root["elements"]], [31, 32, 33])
+                self.assertTrue(any("DenseHierarchyStatus:" in s for s in insp_by_region["static_texts"]))
+
+                calls_before_batch = len(drv.gws_calls)
+                batch_res = srv.handle_batch(
+                    {
+                        "pid": 88,
+                        "window_id": 601,
+                        "chain_observations": True,
+                        "allow_interstep_drift": True,
+                        "steps": [
+                            {
+                                "goal": "Set Incident Ticket ID",
+                                "region": "Incident Routing Inspector",
+                                "value": "INC-4821",
+                                "expected_postcondition": {"element_value_equals": "INC-4821"},
+                            },
+                            {
+                                "goal": "Check Page On-Call Engineer",
+                                "region": "Incident Routing Inspector",
+                                "expected_postcondition": {"static_text_contains": "PageOnCall=true"},
+                            },
+                            {
+                                "goal": "Click Apply Routing Policy",
+                                "region": "Deployment Commit Footer",
+                                "expected_postcondition": {"static_text_contains": "Applied=true"},
+                            },
+                        ],
+                    }
+                )["structuredContent"]
+                self.assertEqual(batch_res["status"], "verified")
+                self.assertEqual(batch_res["completed_count"], 3)
+                # Step 1: pre + post (2), Step 2: chained pre + post (1), Step 3: cross-region fresh pre + post (2) => 5 total gws calls
+                self.assertEqual(len(drv.gws_calls) - calls_before_batch, 5)
+            finally:
+                srv.close()
+
+    def test_v2_240_candidate_budget_low_confidence_rerank_and_v1_compat(self):
+        class InMemManyButtonsDriver:
+            def __init__(self):
+                self.session_id = ""
+                self.timeout_ms = 5000
+                self.snap_seq = 0
+                self.clicked_72 = False
+
+            def close(self):
+                pass
+
+            def call_tool(self, name, args, **_kwargs):
+                if name == "get_window_state":
+                    self.snap_seq += 1
+                    snap = f"s0000cd{self.snap_seq:02x}"
+                    status = "Applied=true" if self.clicked_72 else "Applied=false"
+                    lines = ['- [0] AXWindow "DenseToolbar"', f'  - AXStaticText = "{status}"']
+                    elems = [{"element_index": 0, "role": "AXWindow", "label": "DenseToolbar", "actions": ["AXRaise"]}]
+                    for idx in range(1, 81):
+                        lbl = "Apply Policy" if idx == 72 else f"Tool {idx:02d}"
+                        lines.append(f"  - [{idx}] AXButton ({lbl}) [actions=[press]]")
+                        elems.append({"element_index": idx, "role": "AXButton", "label": lbl, "enabled": True, "parent_index": 0, "actions": ["AXPress"]})
+                    md = "\n".join(lines)
+                    return {
+                        "content": [{"type": "text", "text": md}],
+                        "structuredContent": {
+                            "pid": 91,
+                            "window_id": 701,
+                            "snapshot_id": snap,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": elems,
+                        },
+                    }
+                if name == "click" and str(args.get("element_token", "")).endswith(":72"):
+                    self.clicked_72 = True
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+        jev_requests: list[list[str]] = []
+
+        def fake_low_conf_then_rerank(req, _timeout):
+            body = json.loads(req.data.decode("utf-8"))
+            c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+            jev_requests.append(c_ids)
+            if len(jev_requests) == 1:
+                # Pass 1: top choice is ax.11.tool-11 at confidence 0.42 (< 0.70), ax.72.apply-policy is #2 at 0.25
+                base = {
+                    "ax.11.tool-11": 0.42,
+                    "ax.72.apply-policy": 0.25,
+                    "ax.12.tool-12": 0.14,
+                    "ax.13.tool-13": 0.10,
+                    "ax.14.tool-14": 0.06,
+                }
+                rem = [cid for cid in c_ids if cid not in base]
+                probs = {**base, **{cid: round(0.03 / max(1, len(rem)), 6) for cid in rem}}
+                return 200, json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "answers": {
+                            "candidate": {
+                                "type": "choice",
+                                "choice": "ax.11.tool-11",
+                                "confidence": 0.42,
+                                "probabilities": probs,
+                            }
+                        },
+                        "usage": {"input_tokens": 400, "output_tokens": 6},
+                    }
+                )
+            rem2 = [cid for cid in c_ids if cid != "ax.72.apply-policy"]
+            probs2 = {"ax.72.apply-policy": 0.96, **{cid: round(0.04 / max(1, len(rem2)), 6) for cid in rem2}}
+            return 200, json.dumps(
+                {
+                    "model": "jev-1.13.0",
+                    "answers": {
+                        "candidate": {
+                            "type": "choice",
+                            "choice": "ax.72.apply-policy",
+                            "confidence": 0.96,
+                            "probabilities": probs2,
+                        }
+                    },
+                    "usage": {"input_tokens": 90, "output_tokens": 5},
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            drv = InMemManyButtonsDriver()
+            srv_v2 = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "t_v2.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_low_conf_then_rerank,
+                driver_client=drv,
+            )
+            try:
+                self.assertEqual(srv_v2.max_auto_candidates, 240)
+                res_v2 = srv_v2.handle_step(
+                    {
+                        "pid": 91,
+                        "window_id": 701,
+                        "goal": "Click Apply Policy",
+                        "expected_postcondition": {"static_text_contains": "Applied=true"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_v2["status"], "verified")
+                self.assertTrue(res_v2["reranked"])
+                self.assertEqual(res_v2["selected_id"], "ax.72.apply-policy")
+                self.assertEqual(res_v2["omitted_candidates_count"], 0)
+                self.assertEqual(len(jev_requests), 2)
+                self.assertGreaterEqual(len(jev_requests[0]), 80)
+                # Pass 2 shortlist has top-5 candidates (+ reobserve/abstain added by build_systemone_request)
+                non_meta_pass2 = [cid for cid in jev_requests[1] if cid not in {"reobserve", "abstain"}]
+                self.assertEqual(len(non_meta_pass2), 5)
+                self.assertEqual(srv_v2.accounting.calls_used, 2)
+            finally:
+                srv_v2.close()
+
+            jev_v1_reqs: list[list[str]] = []
+
+            def fake_v1_post(req, _timeout):
+                body = json.loads(req.data.decode("utf-8"))
+                c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+                jev_v1_reqs.append(c_ids)
+                rem = [cid for cid in c_ids if cid != "ax.1.tool-01"]
+                probs = {"ax.1.tool-01": 0.45, **{cid: round(0.55 / max(1, len(rem)), 6) for cid in rem}}
+                return 200, json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "answers": {
+                            "candidate": {
+                                "type": "choice",
+                                "choice": "ax.1.tool-01",
+                                "confidence": 0.45,
+                                "probabilities": probs,
+                            }
+                        },
+                        "usage": {"input_tokens": 180, "output_tokens": 5},
+                    }
+                )
+
+            drv_v1 = InMemManyButtonsDriver()
+            srv_v1 = jev.JevMcpServer(
+                env={
+                    "TYPESAFE_API_KEY": "ts-test",
+                    "AGY_CUA_JEV_V1_COMPAT": "1",
+                    "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "t_v1.json"),
+                },
+                keychain_reader=lambda _: None,
+                http_post=fake_v1_post,
+                driver_client=drv_v1,
+            )
+            try:
+                self.assertEqual(srv_v1.max_auto_candidates, 28)
+                res_v1 = srv_v1.handle_step({"pid": 91, "window_id": 701, "goal": "Click Tool 01"})["structuredContent"]
+                self.assertFalse(res_v1["reranked"])
+                self.assertEqual(res_v1["omitted_candidates_count"], 52)
+                self.assertEqual(srv_v1.accounting.calls_used, 1)
+            finally:
+                srv_v1.close()
+
+    def test_v2_postcondition_settle_polling_and_non_retryable_guard(self):
+        class InMemAsyncSettleDriver:
+            def __init__(self, *, mutate_role_on_click: bool = False):
+                self.session_id = ""
+                self.timeout_ms = 5000
+                self.snap_seq = 0
+                self.post_reads = 0
+                self.dispatched = False
+                self.mutate_role_on_click = mutate_role_on_click
+
+            def close(self):
+                pass
+
+            def call_tool(self, name, _args, **_kwargs):
+                if name == "get_window_state":
+                    self.snap_seq += 1
+                    snap = f"s0000ef{self.snap_seq:02x}"
+                    if self.dispatched:
+                        self.post_reads += 1
+                    settled = self.dispatched and self.post_reads >= 2
+                    status = "Status: Applied=true" if settled else "Status: Applying..."
+                    role_5 = "AXStaticText" if (self.dispatched and self.mutate_role_on_click) else "AXButton"
+                    md = f'- [0] AXWindow "AsyncApp"\n  - AXStaticText = "{status}"\n  - [5] {role_5} (Apply) [actions=[press]]'
+                    return {
+                        "content": [{"type": "text", "text": md}],
+                        "structuredContent": {
+                            "pid": 95,
+                            "window_id": 801,
+                            "snapshot_id": snap,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": [
+                                {"element_index": 0, "role": "AXWindow", "label": "AsyncApp", "actions": ["AXRaise"]},
+                                {"element_index": 5, "role": role_5, "label": "Apply", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                            ],
+                        },
+                    }
+                self.dispatched = True
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+        def fake_apply_post(req, _timeout):
+            body = json.loads(req.data.decode("utf-8"))
+            c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+            rem = [cid for cid in c_ids if cid != "ax.5.apply"]
+            probs = {"ax.5.apply": 0.96, **{cid: round(0.04 / max(1, len(rem)), 6) for cid in rem}}
+            return 200, json.dumps(
+                {
+                    "model": "jev-1.13.0",
+                    "answers": {"candidate": {"type": "choice", "choice": "ax.5.apply", "confidence": 0.96, "probabilities": probs}},
+                    "usage": {"input_tokens": 60, "output_tokens": 4},
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            drv_ok = InMemAsyncSettleDriver(mutate_role_on_click=False)
+            srv_ok = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "settle_ok.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_apply_post,
+                driver_client=drv_ok,
+            )
+            try:
+                res_ok = srv_ok.handle_step(
+                    {
+                        "pid": 95,
+                        "window_id": 801,
+                        "goal": "Click Apply",
+                        "wait_timeout_ms": 800,
+                        "expected_postcondition": {"static_text_contains": "Applied=true"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_ok["status"], "verified")
+                self.assertEqual(res_ok["verify_polls"], 2)
+            finally:
+                srv_ok.close()
+
+            drv_role_err = InMemAsyncSettleDriver(mutate_role_on_click=True)
+            srv_role_err = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "settle_role.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_apply_post,
+                driver_client=drv_role_err,
+            )
+            try:
+                res_err = srv_role_err.handle_step(
+                    {
+                        "pid": 95,
+                        "window_id": 801,
+                        "goal": "Click Apply",
+                        "wait_timeout_ms": 800,
+                        "expected_postcondition": {"element_index": 5, "element_label_equals": "Applied"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_err["status"], "postcondition_unmet")
+                self.assertEqual(res_err["verify_polls"], 1)
+                self.assertIn("target_element_role_mismatch", res_err["verification_reason"])
+            finally:
+                srv_role_err.close()
+
+    def test_benchmark_copilot_review_regressions(self):
+        import urllib.request
+
+        bench_path = os.path.join(ROOT, "scripts", "benchmark_cua.py")
+        b_loader = importlib.machinery.SourceFileLoader("benchmark_cua_copilot_test", bench_path)
+        b_spec = importlib.util.spec_from_loader("benchmark_cua_copilot_test", b_loader)
+        bench_mod = importlib.util.module_from_spec(b_spec)
+        sys.modules["benchmark_cua_copilot_test"] = bench_mod
+        b_loader.exec_module(bench_mod)
+
+        # 1) LoopbackTypeSafeProxy scrubs JSON-escaped \uf79a and \u0043ANARY-VAULT-SECRET, and rejects malformed JSON
+        captured_upstream: list[str] = []
+
+        def fake_http_post(req, _timeout):
+            captured_upstream.append(req.data.decode("utf-8"))
+            return 200, json.dumps(
+                {
+                    "answers": {"target": {"type": "choice", "choice": "@s1:e1", "probabilities": {"@s1:e1": 0.99}}},
+                    "usage": {"input_tokens": 50, "output_tokens": 4},
+                }
+            )
+
+        spend = bench_mod.SpendTracker(max_budget_usd=1.0)
+        proxy = bench_mod.LoopbackTypeSafeProxy(
+            spend,
+            env={"TYPESAFE_API_KEY": "fake-test-key"},
+            http_post=fake_http_post,
+        )
+        try:
+            escaped_body = b'{"state":{"pw":"\\uf79a\\uf79a","note":"\\u0043ANARY-VAULT-SECRET-9941"}}'
+            req = urllib.request.Request(
+                proxy.base_url,
+                data=escaped_body,
+                headers={"Content-Type": "application/json", "Authorization": proxy.auth_header},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                self.assertEqual(resp.status, 200)
+            self.assertTrue(proxy.canary_leaked)
+            self.assertEqual(len(captured_upstream), 1)
+            self.assertNotIn("\uf79a", captured_upstream[0])
+            self.assertNotIn("\\uf79a", captured_upstream[0].lower())
+            self.assertNotIn("CANARY-VAULT-SECRET", captured_upstream[0])
+            self.assertEqual(json.loads(captured_upstream[0])["state"]["pw"], "")
+            self.assertEqual(json.loads(captured_upstream[0])["state"]["note"], "[REDACTED]")
+
+            # Malformed JSON must fail closed with HTTP 400 and 0 upstream calls while still flagging canary leaks
+            proxy.canary_leaked = False
+            bad_req = urllib.request.Request(
+                proxy.base_url,
+                data=b'{"state":{"note":"\\u0043ANARY-VAULT-SECRET-9941"',
+                headers={"Content-Type": "application/json", "Authorization": proxy.auth_header},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as http_ctx:
+                urllib.request.urlopen(bad_req, timeout=5.0)
+            self.assertEqual(http_ctx.exception.code, 400)
+            http_ctx.exception.close()
+            self.assertTrue(proxy.canary_leaked)
+            self.assertEqual(len(captured_upstream), 1)
+
+            # 2) _run_jev_node_helper & _run_ad_cli timeout fail-closed while preserving pending budget/provider errors
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._run_jev_node_helper(
+                    [sys.executable, "-c", "import time; time.sleep(2)"],
+                    env={},
+                    proxy=proxy,
+                    timeout_s=0.05,
+                    tool_name="jev_desktop_run",
+                )
+
+            proxy.budget_exc.append(RuntimeError("Budget ceiling exceeded in proxy"))
+            with self.assertRaisesRegex(RuntimeError, "Budget ceiling exceeded in proxy"):
+                bench_mod._run_jev_node_helper(
+                    [sys.executable, "-c", "import time; time.sleep(2)"],
+                    env={},
+                    proxy=proxy,
+                    timeout_s=0.05,
+                    tool_name="jev_desktop_run",
+                )
+            proxy.budget_exc.clear()
+
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._run_ad_cli(
+                    sys.executable,
+                    ["-c", "import time; time.sleep(2)", "click", "@s1:e1"],
+                    env={},
+                    timeout_s=0.05,
+                )
+
+            # 2b) Descendant processes spawned inside _run_jev_node_helper are killed & reaped on timeout
+            with tempfile.TemporaryDirectory() as td_pg:
+                child_pid_file = os.path.join(td_pg, "descendant.pid")
+                spawner_code = (
+                    "import subprocess, sys, time; "
+                    f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                    f"open({child_pid_file!r}, 'w').write(str(p.pid)); "
+                    "time.sleep(30)"
+                )
+                with self.assertRaises(bench_mod.ArmActionError):
+                    bench_mod._run_jev_node_helper(
+                        [sys.executable, "-c", spawner_code],
+                        env={},
+                        proxy=proxy,
+                        timeout_s=0.25,
+                        tool_name="jev_desktop_run",
+                    )
+                self.assertTrue(os.path.exists(child_pid_file))
+                with open(child_pid_file, encoding="utf-8") as fh:
+                    descendant_pid = int(fh.read().strip())
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(descendant_pid, 0)
+
+            # 2c) _run_ad_cli & _parse_jev_run_events fail closed on uncertain mutations, allow retry=='safe' & read-only errors
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._run_ad_cli(
+                    sys.executable,
+                    ["-c", "import sys; sys.stdout.write('')", "click", "@s1:e1"],
+                    env={},
+                )
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._run_ad_cli(
+                    sys.executable,
+                    [
+                        "-c",
+                        'import json; print(json.dumps({"ok": False, "error": {"code": "ACTION_FAILED", "disposition": {"delivery": "delivery_uncertain", "retry": "unknown"}}}))',
+                        "click",
+                        "@s1:e1",
+                    ],
+                    env={},
+                )
+            safe_mut, _ = bench_mod._run_ad_cli(
+                sys.executable,
+                [
+                    "-c",
+                    'import json; print(json.dumps({"ok": False, "error": {"code": "STALE_REF", "disposition": {"delivery": "not_delivered", "retry": "safe"}}}))',
+                    "click",
+                    "@s1:e1",
+                ],
+                env={},
+            )
+            self.assertFalse(safe_mut["ok"])
+            ro_err, _ = bench_mod._run_ad_cli(
+                sys.executable,
+                ["-c", "import sys; sys.stdout.write('not-json')", "snapshot"],
+                env={},
+            )
+            self.assertFalse(ro_err["ok"])
+            self.assertEqual(ro_err["error"]["code"], "INVALID_JSON")
+
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._parse_jev_run_events("", "boom")
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._parse_jev_run_events("{bad-json}\n", "")
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._parse_jev_run_events(
+                    '{"turn":{"step":1,"operation":"CLICK","ok":false,"error":{"code":"ACTION_FAILED","disposition":{"retry":"unsafe"}}}}\n'
+                    '{"stop":"action_failed","error":{"code":"ACTION_FAILED","disposition":{"retry":"unsafe"}}}\n',
+                    "",
+                )
+            evs_ok, n_act_ok, stop_ok = bench_mod._parse_jev_run_events(
+                '{"turn":{"step":1,"operation":"CLICK","ok":false,"error":{"code":"STALE_REF","disposition":{"retry":"safe"}}}}\n'
+                '{"stop":"action_failed","error":{"code":"STALE_REF","disposition":{"retry":"safe"}}}\n',
+                "",
+            )
+            self.assertEqual(len(evs_ok), 2)
+            self.assertEqual(n_act_ok, 1)
+            self.assertEqual(stop_ok["stop"], "action_failed")
+
+            # ok=true with delivery_uncertain and top-level run.mjs {ok: false} crash must fail closed
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._run_ad_cli(
+                    sys.executable,
+                    [
+                        "-c",
+                        'import json; print(json.dumps({"ok": True, "data": {"disposition": {"delivery": "delivery_uncertain", "retry": "unsafe"}}}))',
+                        "click",
+                        "@s1:e1",
+                    ],
+                    env={},
+                )
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._parse_jev_run_events(
+                    '{"ok":false,"error":"the screen could not be read: TIMEOUT"}\n',
+                    "",
+                )
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._parse_jev_run_events(
+                    '{"turn":{"step":1,"operation":"CLICK","ok":true,"delivery":"delivery_uncertain"}}\n'
+                    '{"stop":"done"}\n',
+                    "",
+                )
+        finally:
+            proxy.close()
+
+        # 3) reset_calculator maps '*' -> 'Multiply' (ignoring AXStaticText) and fails closed on missing buttons
+        class FakeCalcDriver:
+            def __init__(self):
+                self.snap_seq = 0
+                self.clicked_tokens: list[str] = []
+
+            def call_tool(self, name, args, **_kwargs):
+                if name == "get_window_state":
+                    self.snap_seq += 1
+                    snap = f"s0000ca{self.snap_seq:02x}"
+                    md = '- [0] AXWindow "Calculator"\n  - [1] AXStaticText = "9"\n  - [2] AXButton (Clear)\n  - [4] AXButton (9)\n  - [8] AXButton (Multiply)\n  - [9] AXButton (4)'
+                    return {
+                        "content": [{"type": "text", "text": md}],
+                        "structuredContent": {
+                            "pid": 77,
+                            "window_id": 301,
+                            "snapshot_id": snap,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": [
+                                {"element_index": 0, "role": "AXWindow", "label": "Calculator", "actions": ["AXRaise"]},
+                                {"element_index": 1, "role": "AXStaticText", "label": "9", "value": "9", "parent_index": 0},
+                                {"element_index": 2, "role": "AXButton", "label": "Clear", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                {"element_index": 4, "role": "AXButton", "label": "9", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                {"element_index": 8, "role": "AXButton", "label": "Multiply", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                {"element_index": 9, "role": "AXButton", "label": "4", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                            ],
+                        },
+                    }
+                if name == "click":
+                    self.clicked_tokens.append(str(args["element_token"]))
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+        orig_sleep = bench_mod.time.sleep
+        orig_wake = bench_mod._wake_macos_app_nap
+        bench_mod.time.sleep = lambda _s: None
+        bench_mod._wake_macos_app_nap = lambda _pid: None
+        try:
+            calc_drv = FakeCalcDriver()
+            bench_mod.reset_calculator(calc_drv, 77, 301, seed_dirty="99*4")
+            clicked_indices = [tok.split(":")[1] for tok in calc_drv.clicked_tokens]
+            # [2]=Clear, [4]=9, [4]=9, [8]=Multiply, [9]=4
+            self.assertEqual(clicked_indices, ["2", "4", "4", "8", "9"])
+
+            with self.assertRaisesRegex(RuntimeError, "missing Calculator button"):
+                bench_mod.reset_calculator(calc_drv, 77, 301, seed_dirty="99/4")
+        finally:
+            bench_mod.time.sleep = orig_sleep
+            bench_mod._wake_macos_app_nap = orig_wake
+
+    def test_v2_round3_edge_cases_rerank_settle_and_uncertain_halt(self):
+        # 1) Zero-confidence (0.0) triggers Pass-2 rerank AND a valid 2,000-char goal never crashes Pass-2 rerank
+        class ZeroConfLongGoalDriver:
+            def __init__(self):
+                self.session_id = ""
+                self.timeout_ms = 5000
+                self.snap_seq = 0
+                self.clicked_target = False
+
+            def close(self):
+                pass
+
+            def call_tool(self, name, args, **_kwargs):
+                if name == "get_window_state":
+                    self.snap_seq += 1
+                    snap = f"s0000ab{self.snap_seq:02x}"
+                    st = "Saved=true" if self.clicked_target else "Saved=false"
+                    lines = ['- [0] AXWindow "LongGoalApp"', f'  - AXStaticText = "{st}"']
+                    elems = [{"element_index": 0, "role": "AXWindow", "label": "LongGoalApp", "actions": ["AXRaise"]}]
+                    for idx in range(1, 12):
+                        lbl = "Apply Changes" if idx == 9 else f"Option {idx}"
+                        lines.append(f"  - [{idx}] AXButton ({lbl}) [actions=[press]]")
+                        elems.append({"element_index": idx, "role": "AXButton", "label": lbl, "enabled": True, "parent_index": 0, "actions": ["AXPress"]})
+                    md = "\n".join(lines)
+                    return {
+                        "content": [{"type": "text", "text": md}],
+                        "structuredContent": {
+                            "pid": 101,
+                            "window_id": 901,
+                            "snapshot_id": snap,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": elems,
+                        },
+                    }
+                if name == "click" and str(args.get("element_token", "")).endswith(":9"):
+                    self.clicked_target = True
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+        seen_goals: list[str] = []
+
+        def fake_zero_conf_post(req, _timeout):
+            body = json.loads(req.data.decode("utf-8"))
+            seen_goals.append(body["state"]["goal"])
+            c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+            if len(seen_goals) == 1:
+                rem1 = [cid for cid in c_ids if cid not in {"ax.1.option-1", "ax.9.apply-changes"}]
+                probs = {
+                    "ax.1.option-1": 0.22,
+                    "ax.9.apply-changes": 0.20,
+                    **{cid: round(0.58 / max(1, len(rem1)), 6) for cid in rem1},
+                }
+                return 200, json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "answers": {
+                            "candidate": {
+                                "type": "choice",
+                                "choice": "ax.1.option-1",
+                                "confidence": 0.0,
+                                "probabilities": probs,
+                            }
+                        },
+                        "usage": {"input_tokens": 200, "output_tokens": 5},
+                    }
+                )
+            rem = [cid for cid in c_ids if cid != "ax.9.apply-changes"]
+            probs2 = {"ax.9.apply-changes": 0.97, **{cid: round(0.03 / max(1, len(rem)), 6) for cid in rem}}
+            return 200, json.dumps(
+                {
+                    "model": "jev-1.13.0",
+                    "answers": {
+                        "candidate": {
+                            "type": "choice",
+                            "choice": "ax.9.apply-changes",
+                            "confidence": 0.97,
+                            "probabilities": probs2,
+                        }
+                    },
+                    "usage": {"input_tokens": 80, "output_tokens": 4},
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            drv_zc = ZeroConfLongGoalDriver()
+            srv_zc = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "zc.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_zero_conf_post,
+                driver_client=drv_zc,
+            )
+            try:
+                max_len_goal = "Click Commit Save " + ("x" * (2000 - len("Click Commit Save ")))
+                self.assertEqual(len(max_len_goal), 2000)
+                res_zc = srv_zc.handle_step(
+                    {
+                        "pid": 101,
+                        "window_id": 901,
+                        "goal": max_len_goal,
+                        "expected_postcondition": {"static_text_contains": "Saved=true"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_zc["status"], "verified")
+                self.assertTrue(res_zc["reranked"])
+                self.assertEqual(len(seen_goals), 2)
+                self.assertLessEqual(len(seen_goals[1]), 2000)
+
+                over_len_res = srv_zc.handle_step(
+                    {"pid": 101, "window_id": 901, "goal": "g" * 2001}
+                )["structuredContent"]
+                self.assertEqual(over_len_res["status"], "refused")
+                self.assertEqual(over_len_res["reason"], "invalid_goal")
+            finally:
+                srv_zc.close()
+
+            # 2) Settle-poll read clamps timeout_s / timeout_ms to settle budget AND post-dispatch settle read error halts session
+            class SettleClampAndCrashDriver:
+                def __init__(self, *, fail_on_second_post: bool):
+                    self.session_id = ""
+                    self.timeout_ms = 5000
+                    self.snap_seq = 0
+                    self.dispatched = False
+                    self.post_calls: list[dict[str, object]] = []
+                    self.fail_on_second_post = fail_on_second_post
+
+                def close(self):
+                    pass
+
+                def call_tool(self, name, args, **kwargs):
+                    if name == "get_window_state":
+                        self.snap_seq += 1
+                        snap = f"s0000de{self.snap_seq:02x}"
+                        if self.dispatched:
+                            self.post_calls.append(
+                                {
+                                    "timeout_s": kwargs.get("timeout_s"),
+                                    "deadline_monotonic": kwargs.get("deadline_monotonic"),
+                                    "walk_timeout_ms": args.get("timeout_ms"),
+                                }
+                            )
+                            if len(self.post_calls) >= 2 and self.fail_on_second_post:
+                                raise RuntimeError("window_not_found during settle poll")
+                        status = "State: Done" if (self.dispatched and len(self.post_calls) >= 2) else "State: Pending"
+                        md = f'- [0] AXWindow "SettleBound"\n  - AXStaticText = "{status}"\n  - [3] AXButton (Run) [actions=[press]]'
+                        return {
+                            "content": [{"type": "text", "text": md}],
+                            "structuredContent": {
+                                "pid": 102,
+                                "window_id": 902,
+                                "snapshot_id": snap,
+                                "elements_complete": True,
+                                "truncated": False,
+                                "tree_markdown": md,
+                                "elements": [
+                                    {"element_index": 0, "role": "AXWindow", "label": "SettleBound", "actions": ["AXRaise"]},
+                                    {"element_index": 3, "role": "AXButton", "label": "Run", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                ],
+                            },
+                        }
+                    self.dispatched = True
+                    return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+            def fake_run_post(req, _timeout):
+                body = json.loads(req.data.decode("utf-8"))
+                c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+                rem = [cid for cid in c_ids if cid != "ax.3.run"]
+                probs = {"ax.3.run": 0.98, **{cid: round(0.02 / max(1, len(rem)), 6) for cid in rem}}
+                return 200, json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "answers": {"candidate": {"type": "choice", "choice": "ax.3.run", "confidence": 0.98, "probabilities": probs}},
+                        "usage": {"input_tokens": 50, "output_tokens": 4},
+                    }
+                )
+
+            drv_clamp = SettleClampAndCrashDriver(fail_on_second_post=False)
+            srv_clamp = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "clamp.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_run_post,
+                driver_client=drv_clamp,
+            )
+            try:
+                res_clamp = srv_clamp.handle_step(
+                    {
+                        "pid": 102,
+                        "window_id": 902,
+                        "goal": "Click Run",
+                        "wait_timeout_ms": 350,
+                        "expected_postcondition": {"static_text_contains": "State: Done"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_clamp["status"], "verified")
+                self.assertEqual(res_clamp["verify_polls"], 2)
+                self.assertIsNotNone(drv_clamp.post_calls[1]["deadline_monotonic"])
+                self.assertLessEqual(float(drv_clamp.post_calls[1]["timeout_s"]), 0.35)
+                self.assertLessEqual(int(drv_clamp.post_calls[1]["walk_timeout_ms"]), 350)
+            finally:
+                srv_clamp.close()
+
+            drv_crash = SettleClampAndCrashDriver(fail_on_second_post=True)
+            srv_crash = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "crash.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_run_post,
+                driver_client=drv_crash,
+            )
+            try:
+                res_crash = srv_crash.handle_step(
+                    {
+                        "pid": 102,
+                        "window_id": 902,
+                        "goal": "Click Run",
+                        "wait_timeout_ms": 350,
+                        "expected_postcondition": {"static_text_contains": "State: Done"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_crash["status"], "verification_failed")
+                self.assertEqual(res_crash["verification_outcome"], "outcome_unknown")
+                self.assertTrue(res_crash["uncertain_side_effect"])
+                self.assertTrue(srv_crash.accounting.halted)
+
+                # Subsequent mutation attempt must be refused with status='halted'
+                res_after = srv_crash.handle_step(
+                    {"pid": 102, "window_id": 902, "goal": "Click Run again"}
+                )["structuredContent"]
+                self.assertEqual(res_after["status"], "halted")
+            finally:
+                srv_crash.close()
+
+    def test_v2_round4_container_secret_scrub_ambiguous_region_and_nested_text(self):
+        # 1) Secret scrubbing across container_path, drill_regions, candidate descriptions, query, and scoped screenshots
+        class SecretContainerDriver:
+            def __init__(self):
+                self.session_id = ""
+                self.timeout_ms = 5000
+                self.snap_seq = 0
+
+            def close(self):
+                pass
+
+            def call_tool(self, name, args, **_kwargs):
+                if name == "get_window_state":
+                    self.snap_seq += 1
+                    snap = f"s0000fa{self.snap_seq:02x}"
+                    md = "\n".join(
+                        [
+                            '- [0] AXWindow "1Password — Vault"',
+                            "  - [10] AXGroup (Vault Details)",
+                            '    - [11] AXRow "Master Vault Password, CANARY-VAULT-SECRET-9941"',
+                            '      - [12] AXSecureTextField (Master Vault Password) = "CANARY-VAULT-SECRET-9941"',
+                            "      - [13] AXButton (Copy Username) [actions=[press]]",
+                            '    - [14] AXGroup "PIN ••••••••"',
+                            "      - [15] AXButton (Reset Form) [actions=[press]]",
+                            '    - AXGroup "Backup UNINDEXED-SEC-8821"',
+                            '      - AXSecureTextField = "UNINDEXED-SEC-8821"',
+                            "      - [16] AXButton (Verify Backup) [actions=[press]]",
+                        ]
+                    )
+                    content = [{"type": "text", "text": md}]
+                    if args.get("include_screenshot"):
+                        content.append({"type": "image", "mimeType": "image/png", "data": "QUJDRA=="})
+                    return {
+                        "content": content,
+                        "structuredContent": {
+                            "pid": 110,
+                            "window_id": 910,
+                            "snapshot_id": snap,
+                            "app_name": "1Password",
+                            "window_title": "1Password — Vault",
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": [
+                                {"element_index": 0, "role": "AXWindow", "label": "1Password — Vault", "actions": ["AXRaise"]},
+                                {"element_index": 10, "role": "AXGroup", "label": "Vault Details", "parent_index": 0, "actions": []},
+                                {
+                                    "element_index": 11,
+                                    "role": "AXRow",
+                                    "label": "Master Vault Password, CANARY-VAULT-SECRET-9941",
+                                    "parent_index": 10,
+                                    "actions": [],
+                                },
+                                {
+                                    "element_index": 12,
+                                    "role": "AXSecureTextField",
+                                    "label": "Master Vault Password",
+                                    "value": "CANARY-VAULT-SECRET-9941",
+                                    "enabled": True,
+                                    "parent_index": 11,
+                                    "actions": ["AXPress"],
+                                },
+                                {
+                                    "element_index": 13,
+                                    "role": "AXButton",
+                                    "label": "Copy Username",
+                                    "title": "Row CANARY-VAULT-SECRET-9941",
+                                    "enabled": True,
+                                    "parent_index": 11,
+                                    "actions": ["AXPress"],
+                                },
+                                {"element_index": 14, "role": "AXGroup", "label": "PIN ••••••••", "parent_index": 10, "actions": []},
+                                {"element_index": 15, "role": "AXButton", "label": "Reset Form", "enabled": True, "parent_index": 14, "actions": ["AXPress"]},
+                                {"element_index": 16, "role": "AXButton", "label": "Verify Backup", "enabled": True, "parent_index": 10, "actions": ["AXPress"]},
+                            ],
+                        },
+                    }
+                if name == "list_windows":
+                    return {"content": [{"type": "text", "text": "[]"}], "structuredContent": {"windows": []}}
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+        outbound_jev_payloads: list[str] = []
+
+        def fake_sec_post(req, _timeout):
+            raw_body = req.data.decode("utf-8")
+            outbound_jev_payloads.append(raw_body)
+            body = json.loads(raw_body)
+            c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+            rem = [cid for cid in c_ids if cid != "ax.15.reset-form"]
+            probs = {"ax.15.reset-form": 0.98, **{cid: round(0.02 / max(1, len(rem)), 6) for cid in rem}}
+            return 200, json.dumps(
+                {
+                    "model": "jev-1.13.0",
+                    "answers": {"candidate": {"type": "choice", "choice": "ax.15.reset-form", "confidence": 0.98, "probabilities": probs}},
+                    "usage": {"input_tokens": 60, "output_tokens": 4},
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            srv_sec = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "sec.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_sec_post,
+                driver_client=SecretContainerDriver(),
+            )
+            try:
+                for obs_args in (
+                    {"pid": 110, "window_id": 910, "skeleton": True},
+                    {"pid": 110, "window_id": 910},
+                    {"pid": 110, "window_id": 910, "region": "Vault Details"},
+                ):
+                    obs_sc = srv_sec.handle_observe(obs_args)["structuredContent"]
+                    dumped = json.dumps(obs_sc, ensure_ascii=False)
+                    self.assertNotIn("CANARY-VAULT-SECRET", dumped)
+                    self.assertNotIn("UNINDEXED-SEC-8821", dumped)
+                    self.assertNotIn("••••", dumped)
+
+                # Secure elements excluded from drill_regions actionable_count & sample_labels
+                skel_sc = srv_sec.handle_observe({"pid": 110, "window_id": 910, "skeleton": True})["structuredContent"]
+                self.assertEqual(len(skel_sc["drill_regions"]), 1)
+                self.assertEqual(skel_sc["drill_regions"][0]["region"], "Vault Details")
+                self.assertEqual(skel_sc["drill_regions"][0]["actionable_count"], 3)
+                self.assertNotIn("Master Vault Password", skel_sc["drill_regions"][0]["sample_labels"])
+
+                # Querying for secret substring must match 0 elements; probing secret region name must fail as unknown_region
+                q_sc = srv_sec.handle_observe({"pid": 110, "window_id": 910, "query": "CANARY-VAULT-SECRET"})["structuredContent"]
+                self.assertEqual(q_sc["matched_elements_count"], 0)
+                probe_sc = srv_sec.handle_observe(
+                    {"pid": 110, "window_id": 910, "region": "Master Vault Password, CANARY-VAULT-SECRET-9941"}
+                )["structuredContent"]
+                self.assertEqual(probe_sc["status"], "observation_failed")
+                self.assertIn("unknown_region", probe_sc["reason"])
+
+                # Scoped screenshot on a window containing secure fields must still be refused
+                shot_sc = srv_sec.handle_observe(
+                    {"pid": 110, "window_id": 910, "region": "Vault Details", "include_screenshot": True}
+                )["structuredContent"]
+                self.assertEqual(shot_sc["status"], "screenshot_refused_secure_window")
+
+                # Outbound Jev payload (select_elements.container_path + candidate descriptions) never leaks container secrets
+                step_sc = srv_sec.handle_step({"pid": 110, "window_id": 910, "goal": "Click Reset Form"})["structuredContent"]
+                self.assertEqual(step_sc["status"], "dispatched")
+                self.assertEqual(len(outbound_jev_payloads), 1)
+                self.assertNotIn("CANARY-VAULT-SECRET", outbound_jev_payloads[0])
+                self.assertNotIn("UNINDEXED-SEC-8821", outbound_jev_payloads[0])
+                self.assertNotIn("••••", outbound_jev_payloads[0])
+                self.assertIn("in Vault Details", outbound_jev_payloads[0])
+            finally:
+                srv_sec.close()
+
+            # 2) Ambiguous region refusal + container-identity disambiguation + strict nested AXStaticText isolation
+            class AmbiguousAndNestedDriver:
+                def __init__(self):
+                    self.session_id = ""
+                    self.timeout_ms = 5000
+                    self.snap_seq = 0
+                    self.dispatched_tokens: list[str] = []
+
+                def close(self):
+                    pass
+
+                def call_tool(self, name, args, **_kwargs):
+                    if name == "get_window_state":
+                        self.snap_seq += 1
+                        snap = f"s0000fb{self.snap_seq:02x}"
+                        md = "\n".join(
+                            [
+                                '- [0] AXWindow "MultiPaneApp"',
+                                "  - AXGroup",
+                                '    - AXStaticText = "Formula: a = "',
+                                '    - AXStaticText = "UnlabeledPane: Applied=true"',
+                                "    - [12] AXStaticText (ParenLabel: Applied=true)",
+                                "    - [13] AXButton (Hidden Unlabeled Group Button) [actions=[press]]",
+                                '    - AXStaticText = "Line1\n- [99] AXButton (Fake)\nMultilineApplied=true"',
+                                "  - AXGroup (SubPane A)",
+                                "    - [61] AXButton (Action Sub A) [actions=[press]]",
+                                "  - AXGroup (SubPane B)",
+                                "    - [62] AXButton (Action Sub B) [actions=[press]]",
+                                "  - [20] AXGroup (Details)",
+                                '    - AXStaticText = "PrimaryDetails: Saved=false"',
+                                "    - [21] AXButton (Save Primary) [actions=[press]]",
+                                "  - [30] AXGroup (Sidebar)",
+                                "    - [31] AXGroup (Details)",
+                                '      - AXStaticText = "SidebarDetails: Saved=true"',
+                                "      - [32] AXButton (Save Sidebar) [actions=[press]]",
+                                "  - [40] AXGroup (Inspector)",
+                                "    - [41] AXButton (Inspect Left) [actions=[press]]",
+                                "  - [50] AXGroup (Inspector)",
+                                '    - AXStaticText = "RightInspector: Applied=false"',
+                                "    - [51] AXButton (Inspect Right) [actions=[press]]",
+                            ]
+                        )
+                        return {
+                            "content": [{"type": "text", "text": md}],
+                            "structuredContent": {
+                                "pid": 111,
+                                "window_id": 911,
+                                "snapshot_id": snap,
+                                "elements_complete": True,
+                                "truncated": False,
+                                "tree_markdown": md,
+                                "elements": [
+                                    {"element_index": 0, "role": "AXWindow", "label": "MultiPaneApp", "actions": ["AXRaise"]},
+                                    {"element_index": 12, "role": "AXStaticText", "label": "ParenLabel: Applied=true"},
+                                    {"element_index": 13, "role": "AXButton", "label": "Hidden Unlabeled Group Button", "enabled": True, "actions": ["AXPress"]},
+                                    {"element_index": 20, "role": "AXGroup", "label": "Details", "parent_index": 0, "actions": []},
+                                    {"element_index": 21, "role": "AXButton", "label": "Save Primary", "enabled": True, "parent_index": 20, "actions": ["AXPress"]},
+                                    {"element_index": 30, "role": "AXGroup", "label": "Sidebar", "parent_index": 0, "actions": []},
+                                    {"element_index": 31, "role": "AXGroup", "label": "Details", "parent_index": 30, "actions": []},
+                                    {"element_index": 32, "role": "AXButton", "label": "Save Sidebar", "enabled": True, "parent_index": 31, "actions": ["AXPress"]},
+                                    {"element_index": 40, "role": "AXGroup", "label": "Inspector", "parent_index": 0, "actions": []},
+                                    {"element_index": 41, "role": "AXButton", "label": "Inspect Left", "enabled": True, "parent_index": 40, "actions": ["AXPress"]},
+                                    {"element_index": 50, "role": "AXGroup", "label": "Inspector", "parent_index": 0, "actions": []},
+                                    {"element_index": 51, "role": "AXButton", "label": "Inspect Right", "enabled": True, "parent_index": 50, "actions": ["AXPress"]},
+                                    {"element_index": 60, "role": "AXGroup", "label": "", "parent_index": 0, "actions": []},
+                                    {"element_index": 61, "role": "AXButton", "label": "Action Sub A", "enabled": True, "parent_index": 60, "actions": ["AXPress"]},
+                                    {"element_index": 62, "role": "AXButton", "label": "Action Sub B", "enabled": True, "parent_index": 60, "actions": ["AXPress"]},
+                                ],
+                            },
+                        }
+                    if name == "list_windows":
+                        return {"content": [{"type": "text", "text": "[]"}], "structuredContent": {"windows": []}}
+                    self.dispatched_tokens.append(str(args.get("element_token", "")))
+                    return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+            def fake_pane_post(req, _timeout):
+                body = json.loads(req.data.decode("utf-8"))
+                c_ids = [cid for cid in body["questions"]["candidate"]["criteria"].keys() if cid not in {"reobserve", "abstain"}]
+                self.assertEqual(len(c_ids), 1)
+                pick = c_ids[0]
+                return 200, json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "answers": {
+                            "candidate": {
+                                "type": "choice",
+                                "choice": pick,
+                                "confidence": 0.99,
+                                "probabilities": {pick: 0.99, "reobserve": 0.005, "abstain": 0.005},
+                            }
+                        },
+                        "usage": {"input_tokens": 50, "output_tokens": 4},
+                    }
+                )
+
+            drv_amb = AmbiguousAndNestedDriver()
+            srv_amb = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "amb.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_pane_post,
+                driver_client=drv_amb,
+            )
+            try:
+                # Skeleton excludes nested controls & nested static texts inside unlabeled AXGroup (no [:8] leak)
+                skel_amb = srv_amb.handle_observe({"pid": 111, "window_id": 911, "skeleton": True})["structuredContent"]
+                self.assertEqual(skel_amb["elements"], [])
+                self.assertEqual(skel_amb["static_texts"], [])
+                insp_buckets = [b for b in skel_amb["drill_regions"] if b["region"] == "Inspector"]
+                self.assertEqual([b["element_index"] for b in insp_buckets], [40, 50])
+                self.assertTrue(all(b.get("ambiguous_region") is True for b in insp_buckets))
+
+                # Ambiguous 'Details' (top-level [20] vs 'Sidebar > Details' [31]) and 'Inspector' ([40] vs [50]) fail closed
+                for amb_reg in ("Details", "Inspector"):
+                    obs_amb = srv_amb.handle_observe({"pid": 111, "window_id": 911, "region": amb_reg})["structuredContent"]
+                    self.assertEqual(obs_amb["status"], "observation_failed")
+                    self.assertIn("ambiguous_region", obs_amb["reason"])
+
+                    step_amb = srv_amb.handle_step({"pid": 111, "window_id": 911, "region": amb_reg, "goal": "Click button"})["structuredContent"]
+                    self.assertEqual(step_amb["status"], "observation_failed")
+                    self.assertIn("ambiguous_region", step_amb["reason"])
+                self.assertEqual(drv_amb.dispatched_tokens, [])
+
+                # Disambiguated 'Sidebar > Details' selects only [32], while root_element_index=20 selects only [21]
+                sub_obs = srv_amb.handle_observe({"pid": 111, "window_id": 911, "region": "Sidebar > Details"})["structuredContent"]
+                self.assertEqual([e["element_index"] for e in sub_obs["elements"]], [32])
+                self.assertEqual(sub_obs["static_texts"], ["SidebarDetails: Saved=true"])
+
+                prim_obs = srv_amb.handle_observe({"pid": 111, "window_id": 911, "root_element_index": 20})["structuredContent"]
+                self.assertEqual([e["element_index"] for e in prim_obs["elements"]], [21])
+                self.assertEqual(prim_obs["static_texts"], ["PrimaryDetails: Saved=false"])
+
+                sub_a = srv_amb.handle_observe({"pid": 111, "window_id": 911, "region": "SubPane A"})["structuredContent"]
+                sub_b = srv_amb.handle_observe({"pid": 111, "window_id": 911, "region": "SubPane B"})["structuredContent"]
+                self.assertEqual([e["element_index"] for e in sub_a["elements"]], [61])
+                self.assertEqual([e["element_index"] for e in sub_b["elements"]], [62])
+
+                # Disambiguated root_element_index=50 + region='Inspector' clicks [51] ONLY, and nested 'Applied=true'
+                # texts in the unlabeled sibling pane do NOT falsely satisfy expected_postcondition!
+                step_right = srv_amb.handle_step(
+                    {
+                        "pid": 111,
+                        "window_id": 911,
+                        "region": "Inspector",
+                        "root_element_index": 50,
+                        "goal": "Click Inspect Right",
+                        "wait_timeout_ms": 100,
+                        "expected_postcondition": {"static_text_contains": "Applied=true"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(step_right["status"], "postcondition_unmet")
+                self.assertFalse(step_right["verified"])
+                self.assertEqual(len(drv_amb.dispatched_tokens), 1)
+                self.assertTrue(drv_amb.dispatched_tokens[0].endswith(":51"))
+            finally:
+                srv_amb.close()
+
+    def test_v2_round5_host_reap_canary_abort_focus_join_and_query_prefix(self):
+        """Regression coverage for Copilot Round-5 findings:
+        1) Detached `process_group(0)` (`start_new_session=True`) `command_host` stopped & verified on timeout,
+           and benchmark halts (`RuntimeError`) if host cleanup cannot be confirmed.
+        2) `_run_ad_cli` & `_run_jev_node_helper` reject canary-bearing output before returning (`proxy.raise_if_error()` first).
+        3) `FocusMonitor.__exit__` waits for slow in-flight worker probes before taking final sample and freezes counters.
+        4) `_expand_direct_observation_elements` restricts `max_elements` expansion strictly to the matched `query` prefix.
+        5) `bench_fixture.swift` updates `lastTextValues` when recording commit snapshots so pre-commit AX writes do not clear `applied_snapshot`.
+        """
+        import re
+        import shutil
+        import threading
+        import time
+        from pathlib import Path
+
+        bench_path = os.path.join(ROOT, "scripts", "benchmark_cua.py")
+        b_loader = importlib.machinery.SourceFileLoader("benchmark_cua_round5_test", bench_path)
+        b_spec = importlib.util.spec_from_loader("benchmark_cua_round5_test", b_loader)
+        bench_mod = importlib.util.module_from_spec(b_spec)
+        sys.modules["benchmark_cua_round5_test"] = bench_mod
+        b_loader.exec_module(bench_mod)
+
+        # (1) Detached `start_new_session=True` command_host holding owner.lock + .sock inside _AD_BENCH_TMPDIR
+        ad_tmp = bench_mod._create_ad_isolated_tmpdir()
+        try:
+            pid_record = ad_tmp / "detached_host.pid"
+            host_sub = ad_tmp / f"agent-desktop-host-{os.getuid()}"
+            host_sub.mkdir(mode=0o700, parents=True, exist_ok=True)
+            lock_file = host_sub / "deadbeef01234567.owner.lock"
+            sock_file = host_sub / "deadbeef01234567.sock"
+            detached_host_code = (
+                "import fcntl, os, socket, time; "
+                f"lf = open({str(lock_file)!r}, 'w'); "
+                "fcntl.flock(lf, fcntl.LOCK_EX); "
+                f"s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.bind({str(sock_file)!r}); s.listen(1); "
+                f"open({str(pid_record)!r}, 'w').write(str(os.getpid())); "
+                "time.sleep(30)"
+            )
+            cli_spawner = (
+                "import subprocess, sys, time; "
+                f"subprocess.Popen([sys.executable, '-c', {detached_host_code!r}], start_new_session=True); "
+                "time.sleep(30)"
+            )
+            env_isolated = {"TMPDIR": str(ad_tmp), "_AD_BENCH_TMPDIR": str(ad_tmp)}
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod._run_ad_cli(
+                    sys.executable,
+                    ["-c", cli_spawner, "click", "@s1:e1"],
+                    env=env_isolated,
+                    timeout_s=0.35,
+                )
+            self.assertTrue(pid_record.exists())
+            detached_pid = int(pid_record.read_text(encoding="utf-8").strip())
+            self.assertFalse(bench_mod._pid_is_alive(detached_pid))
+            self.assertFalse(bench_mod._is_flock_held(lock_file))
+            self.assertFalse(bench_mod._is_unix_socket_live(sock_file))
+
+            # If _stop_ad_command_host cannot confirm cleanup, timeout promotes to RuntimeError to halt benchmark
+            orig_stop = bench_mod._stop_ad_command_host
+            try:
+                bench_mod._stop_ad_command_host = lambda *_a, **_kw: False
+                with self.assertRaisesRegex(RuntimeError, "halting benchmark"):
+                    bench_mod._run_ad_cli(
+                        sys.executable,
+                        ["-c", "import time; time.sleep(5)", "click", "@s1:e1"],
+                        env=env_isolated,
+                        timeout_s=0.05,
+                    )
+            finally:
+                bench_mod._stop_ad_command_host = orig_stop
+        finally:
+            shutil.rmtree(ad_tmp, ignore_errors=True)
+
+        # (2) Canary-bearing output rejected before _run_ad_cli or _run_jev_node_helper returns
+        with self.assertRaises(bench_mod.ArmActionError) as ad_leak_ctx:
+            bench_mod._run_ad_cli(
+                sys.executable,
+                [
+                    "-c",
+                    'import json; print(json.dumps({"ok": True, "data": {"val": "CANARY-VAULT-SECRET-9941"}}))',
+                    "snapshot",
+                ],
+                env={},
+            )
+        self.assertTrue(ad_leak_ctx.exception.canary_leaked)
+
+        spend = bench_mod.SpendTracker(max_budget_usd=1.0)
+        proxy = bench_mod.LoopbackTypeSafeProxy(
+            spend,
+            env={"TYPESAFE_API_KEY": "fake-test-key"},
+        )
+        try:
+            with self.assertRaises(bench_mod.ArmActionError) as jev_leak_ctx:
+                bench_mod._run_jev_node_helper(
+                    [sys.executable, "-c", 'print("{\\"stop\\":\\"done\\",\\"leak\\":\\"CANARY-VAULT-SECRET-9941\\"}")'],
+                    env={},
+                    proxy=proxy,
+                    timeout_s=5.0,
+                    tool_name="jev_desktop_run",
+                )
+            self.assertTrue(jev_leak_ctx.exception.canary_leaked)
+            self.assertTrue(proxy.canary_leaked)
+
+            # proxy.raise_if_error() still takes precedence over ArmActionError when both occur
+            proxy.budget_exc.append(RuntimeError("Proxy budget limit hit"))
+            with self.assertRaisesRegex(RuntimeError, "Proxy budget limit hit"):
+                bench_mod._run_jev_node_helper(
+                    [sys.executable, "-c", 'print("CANARY-VAULT-SECRET-9941")'],
+                    env={},
+                    proxy=proxy,
+                    timeout_s=5.0,
+                    tool_name="jev_desktop_act",
+                )
+            proxy.budget_exc.clear()
+        finally:
+            proxy.close()
+
+        # (3) FocusMonitor.__exit__ waits for slow in-flight worker sample before taking final sample
+        orig_sample = bench_mod.sample_frontmost_info
+        call_lock = threading.Lock()
+        call_num = 0
+        worker_entered = threading.Event()
+
+        def slow_worker_sample():
+            nonlocal call_num
+            with call_lock:
+                call_num += 1
+                idx = call_num
+            if idx == 1:
+                return (900, "com.apple.Terminal")
+            if idx == 2:
+                worker_entered.set()
+                time.sleep(0.25)
+                return (100, "com.agycua.benchfixture")
+            return (900, "com.apple.Terminal")
+
+        try:
+            bench_mod.sample_frontmost_info = slow_worker_sample
+            with bench_mod.FocusMonitor(target_pid=100, target_bundle="com.agycua.benchfixture", interval_s=0.5) as fmon:
+                self.assertTrue(worker_entered.wait(timeout=2.0))
+            # Worker violation (call 2) + final synchronous sample (call 3) must both be complete before __exit__ returns
+            self.assertFalse(fmon._thread.is_alive())
+            self.assertEqual(fmon.violations, 1)
+            self.assertEqual(fmon.samples, 3)
+            self.assertEqual(fmon.probe_errors, 0)
+        finally:
+            bench_mod.sample_frontmost_info = orig_sample
+
+        # (4) _expand_direct_observation_elements preserves query filtering under large req_max_elements
+        q_raw_els = [
+            {"element_index": 1, "role": "AXTextField", "label": "Incident Ticket ID", "value": "", "enabled": True, "actions": ["AXConfirm"]},
+            *[
+                {"element_index": 10 + i, "role": "AXButton", "label": f"Inspect Row {i:02d}", "enabled": True, "actions": ["AXPress"]}
+                for i in range(1, 21)
+            ],
+        ]
+        q_ws = {
+            "structuredContent": {
+                "pid": 222,
+                "window_id": 822,
+                "snapshot_id": "s0000ab90",
+                "app_name": "BenchFixture",
+                "window_title": "AGYCuaBench-dense-hierarchy",
+                "elements_complete": True,
+                "truncated": False,
+                "elements": q_raw_els,
+                "tree_markdown": '- AXWindow "AGYCuaBench-dense-hierarchy"\n',
+            }
+        }
+        obs_one = bench_mod.jev_mod.extract_window_observation(q_ws, expected_pid=222, expected_window_id=822, query="Incident Ticket ID")
+        expanded_one = bench_mod._expand_direct_observation_elements(obs_one, 500)
+        self.assertEqual([e["element_index"] for e in expanded_one], [1])
+
+        obs_zero = bench_mod.jev_mod.extract_window_observation(q_ws, expected_pid=222, expected_window_id=822, query="NonExistentWidget")
+        expanded_zero = bench_mod._expand_direct_observation_elements(obs_zero, 500)
+        self.assertEqual(expanded_zero, [])
+
+        wide_raw_els = [
+            {"element_index": i, "role": "AXButton", "label": f"Btn {i}", "enabled": True, "actions": ["AXPress"]}
+            for i in range(1, 75)
+        ]
+        wide_ws = {
+            "structuredContent": {
+                "pid": 222,
+                "window_id": 822,
+                "snapshot_id": "s0000ab91",
+                "app_name": "BenchFixture",
+                "window_title": "WideWindow",
+                "elements_complete": True,
+                "truncated": False,
+                "elements": wide_raw_els,
+                "tree_markdown": '- AXWindow "WideWindow"\n',
+            }
+        }
+        obs_wide = bench_mod.jev_mod.extract_window_observation(wide_ws, expected_pid=222, expected_window_id=822)
+        self.assertEqual(len(obs_wide["elements"]), 64)
+        expanded_wide = bench_mod._expand_direct_observation_elements(obs_wide, 70)
+        self.assertEqual(len(expanded_wide), 70)
+
+        # (5) bench_fixture.swift updates lastTextValues inside denseApplyClicked before recording applied_snapshot
+        fixture_src = (Path(ROOT) / "scripts" / "bench_fixture.swift").read_text(encoding="utf-8")
+        m_apply = re.search(r"func denseApplyClicked\([^)]*\)\s*\{(.*?)\n    \}", fixture_src, flags=re.DOTALL)
+        self.assertIsNotNone(m_apply)
+        self.assertIn("lastTextValues = currentTextValues()", m_apply.group(1))
+
+    def test_v2_round6_ancestry_parsing_settle_budget_and_fixture(self):
+        from pathlib import Path
+
+        bench_path = os.path.join(ROOT, "scripts", "benchmark_cua.py")
+        b_loader = importlib.machinery.SourceFileLoader("benchmark_cua_r6_test", bench_path)
+        b_spec = importlib.util.spec_from_loader("benchmark_cua_r6_test", b_loader)
+        bench_mod = importlib.util.module_from_spec(b_spec)
+        sys.modules["benchmark_cua_r6_test"] = bench_mod
+        b_loader.exec_module(bench_mod)
+
+        # (1) Ancestry flaw: nested sibling AXStaticText ('Applied=true') indexed in raw_elements without parent_index
+        # OR parented to a markdown-nested button MUST NOT leak into another region's static_texts or falsely verify
+        # expected_postcondition={'static_text_contains': 'Applied=true'}, while genuine top-level AXWindow status stays visible.
+        class SiblingLeakDriver:
+            def __init__(self, *, commit_top_level: bool):
+                self.session_id = ""
+                self.timeout_ms = 5000
+                self.snap_seq = 0
+                self.clicked = False
+                self.commit_top_level = commit_top_level
+
+            def close(self):
+                pass
+
+            def call_tool(self, name, args, **_kwargs):
+                if name == "list_windows":
+                    return {"content": [{"type": "text", "text": "[]"}], "structuredContent": {"windows": []}}
+                if name == "get_window_state":
+                    self.snap_seq += 1
+                    snap = f"s0000ab{self.snap_seq:02x}"
+                    top_applied = "true" if (self.clicked and self.commit_top_level) else "false"
+                    md = "\n".join(
+                        [
+                            '- [0] AXWindow "EnterpriseOps"',
+                            f'  - AXStaticText = "DenseHierarchyStatus: Applied={top_applied}"',
+                            "  - AXSplitGroup (Sibling Telemetry Pane)",
+                            '    - AXStaticText = "MockPreview: Applied=true"',
+                            "    - [10] AXButton (Sibling Btn) [actions=[press]]",
+                            "  - AXSplitGroup (Deployment Commit Footer)",
+                            "    - [20] AXButton (Apply Routing Policy) [actions=[press]]",
+                        ]
+                    )
+                    return {
+                        "content": [{"type": "text", "text": md}],
+                        "structuredContent": {
+                            "pid": 401,
+                            "window_id": 801,
+                            "snapshot_id": snap,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": [
+                                {"element_index": 0, "role": "AXWindow", "label": "EnterpriseOps", "actions": ["AXRaise"]},
+                                # Unparented raw_elements duplicate of unindexed markdown static text inside Sibling Telemetry Pane
+                                {"element_index": 11, "role": "AXStaticText", "label": "MockPreview: Applied=true", "value": "MockPreview: Applied=true"},
+                                # Static text parented to markdown-nested AXButton [10] (whose parent_index is None in raw_elements)
+                                {"element_index": 12, "role": "AXStaticText", "label": "BtnBadge: Applied=true", "value": "BtnBadge: Applied=true", "parent_index": 10},
+                                # Truncated-markdown orphan raw_elements AXStaticText with unknown ancestry
+                                {"element_index": 13, "role": "AXStaticText", "label": "OrphanPane: Applied=true", "value": "OrphanPane: Applied=true"},
+                                {"element_index": 10, "role": "AXButton", "label": "Sibling Btn", "enabled": True, "actions": ["AXPress"]},
+                                {"element_index": 20, "role": "AXButton", "label": "Apply Routing Policy", "enabled": True, "actions": ["AXPress"]},
+                            ],
+                        },
+                    }
+                if name == "click":
+                    self.clicked = True
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+        def fake_apply_post(req, _timeout):
+            body = json.loads(req.data.decode("utf-8"))
+            c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+            target_cid = next(cid for cid in c_ids if "apply-routing-policy" in cid)
+            rem = [cid for cid in c_ids if cid != target_cid]
+            probs = {target_cid: 0.98, **{cid: round(0.02 / max(1, len(rem)), 6) for cid in rem}}
+            return 200, json.dumps(
+                {
+                    "model": "jev-1.13.0",
+                    "answers": {"candidate": {"type": "choice", "choice": target_cid, "confidence": 0.98, "probabilities": probs}},
+                    "usage": {"input_tokens": 60, "output_tokens": 4},
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            drv_leak = SiblingLeakDriver(commit_top_level=False)
+            srv_leak = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "leak.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_apply_post,
+                driver_client=drv_leak,
+            )
+            try:
+                res_false = srv_leak.handle_step(
+                    {
+                        "pid": 401,
+                        "window_id": 801,
+                        "goal": "Click Apply Routing Policy",
+                        "region": "Deployment Commit Footer",
+                        "wait_timeout_ms": 0,
+                        "expected_postcondition": {"static_text_contains": "Applied=true"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_false["status"], "postcondition_unmet")
+                self.assertFalse(res_false["verified"])
+                self.assertEqual(res_false["post_static_texts"], ["DenseHierarchyStatus: Applied=false"])
+            finally:
+                srv_leak.close()
+
+            drv_ok = SiblingLeakDriver(commit_top_level=True)
+            srv_ok = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "ok.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_apply_post,
+                driver_client=drv_ok,
+            )
+            try:
+                res_true = srv_ok.handle_step(
+                    {
+                        "pid": 401,
+                        "window_id": 801,
+                        "goal": "Click Apply Routing Policy",
+                        "region": "Deployment Commit Footer",
+                        "wait_timeout_ms": 0,
+                        "expected_postcondition": {"static_text_contains": "Applied=true"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_true["status"], "verified")
+                self.assertTrue(res_true["verified"])
+                self.assertEqual(res_true["post_static_texts"], ["DenseHierarchyStatus: Applied=true"])
+            finally:
+                srv_ok.close()
+
+            # (2) Parsing edge cases: '= "..."' inside label, unclosed multiline quote to EOF, and tab indentation
+            self.assertEqual(jev._extract_md_quoted_value(' "Formula = \\"x\\"" [actions=[press]]'), "")
+            self.assertEqual(jev._extract_md_quoted_value(' (expr = " decoy ") = "actual"'), "actual")
+            self.assertEqual(jev._extract_md_node_label(' (Group (Sub) = "x") = "val"'), 'Group (Sub) = "x"')
+
+            truncated_md = "\n".join(
+                [
+                    '- [0] AXWindow "TruncWin"',
+                    '  - [1] AXTextArea "Notes" = "first line',
+                    "  - [99] AXButton (Injected Fake Button) [actions=[press]]",
+                ]
+            )
+            coal = jev._coalesce_multiline_md_lines(truncated_md)
+            self.assertEqual(len(coal), 2)
+            parsed_trunc = jev._parse_markdown_structure(truncated_md)
+            self.assertNotIn(99, parsed_trunc["seen_el_ids"])
+
+            tab_md = '- [0] AXWindow "TabWin"\n\t- AXToolbar "Main"\n\t\t- [5] AXButton (Save)\n'
+            tab_depth, tab_tb = jev._parse_markdown_hierarchy(tab_md)
+            self.assertEqual(tab_depth[5], 2)
+            self.assertIn(5, tab_tb)
+
+            # (3) Settle-window TimeoutError on Poll #2 returns postcondition_unmet (not halted),
+            # handle_observe forwards walk_timeout_ms to driver timeout_s, and LoopbackTypeSafeProxy honors route.timeout_ms
+            class SettleExpireAndObserveTimeoutDriver:
+                def __init__(self):
+                    self.session_id = ""
+                    self.timeout_ms = 5000
+                    self.snap_seq = 0
+                    self.dispatched = False
+                    self.post_count = 0
+                    self.observe_timeouts: list[object] = []
+
+                def close(self):
+                    pass
+
+                def call_tool(self, name, args, **kwargs):
+                    if name == "list_windows":
+                        return {"content": [{"type": "text", "text": "[]"}], "structuredContent": {"windows": []}}
+                    if name == "get_window_state":
+                        self.observe_timeouts.append(kwargs.get("timeout_s"))
+                        if self.dispatched:
+                            self.post_count += 1
+                            if self.post_count >= 2:
+                                raise TimeoutError("cua-driver read timed out at settle deadline")
+                        self.snap_seq += 1
+                        snap = f"s0000ef{self.snap_seq:02x}"
+                        md = '- [0] AXWindow "SettleSoft"\n  - AXStaticText = "State: Pending"\n  - [3] AXButton (Run) [actions=[press]]'
+                        return {
+                            "content": [{"type": "text", "text": md}],
+                            "structuredContent": {
+                                "pid": 402,
+                                "window_id": 802,
+                                "snapshot_id": snap,
+                                "elements_complete": True,
+                                "truncated": False,
+                                "tree_markdown": md,
+                                "elements": [
+                                    {"element_index": 0, "role": "AXWindow", "label": "SettleSoft", "actions": ["AXRaise"]},
+                                    {"element_index": 3, "role": "AXButton", "label": "Run", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                ],
+                            },
+                        }
+                    self.dispatched = True
+                    return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+            def fake_run3_post(req, _timeout):
+                body = json.loads(req.data.decode("utf-8"))
+                c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+                rem = [cid for cid in c_ids if cid != "ax.3.run"]
+                probs = {"ax.3.run": 0.98, **{cid: round(0.02 / max(1, len(rem)), 6) for cid in rem}}
+                return 200, json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "answers": {"candidate": {"type": "choice", "choice": "ax.3.run", "confidence": 0.98, "probabilities": probs}},
+                        "usage": {"input_tokens": 40, "output_tokens": 4},
+                    }
+                )
+
+            drv_soft = SettleExpireAndObserveTimeoutDriver()
+            srv_soft = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "soft.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_run3_post,
+                driver_client=drv_soft,
+            )
+            try:
+                obs_long = srv_soft.handle_observe(
+                    {"pid": 402, "window_id": 802, "walk_timeout_ms": 9000, "discover_windows": False}
+                )["structuredContent"]
+                self.assertEqual(obs_long["status"], "ok")
+                self.assertGreaterEqual(float(drv_soft.observe_timeouts[-1]), 10.0)
+
+                res_soft = srv_soft.handle_step(
+                    {
+                        "pid": 402,
+                        "window_id": 802,
+                        "goal": "Click Run",
+                        "wait_timeout_ms": 350,
+                        "expected_postcondition": {"static_text_contains": "State: Done"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_soft["status"], "postcondition_unmet")
+                self.assertFalse(res_soft["uncertain_side_effect"])
+                self.assertFalse(srv_soft.accounting.halted)
+            finally:
+                srv_soft.close()
+
+            seen_proxy_timeouts: list[float] = []
+
+            def fake_proxy_post(_req, timeout_s):
+                seen_proxy_timeouts.append(float(timeout_s))
+                return 200, json.dumps(
+                    {
+                        "answers": {"target": {"type": "choice", "choice": "@s1:e1", "probabilities": {"@s1:e1": 0.99}}},
+                        "usage": {"input_tokens": 20, "output_tokens": 4},
+                    }
+                )
+
+            spend_to = bench_mod.SpendTracker(max_budget_usd=1.0)
+            proxy_to = bench_mod.LoopbackTypeSafeProxy(
+                spend_to,
+                env={"TYPESAFE_API_KEY": "fake-key", "AGY_CUA_JEV_TIMEOUT_MS": "4200"},
+                http_post=fake_proxy_post,
+            )
+            try:
+                p_req = urllib.request.Request(
+                    proxy_to.base_url,
+                    data=b'{"state":{"goal":"ok"}}',
+                    headers={"Content-Type": "application/json", "Authorization": proxy_to.auth_header},
+                    method="POST",
+                )
+                with urllib.request.urlopen(p_req, timeout=5.0) as resp:
+                    self.assertEqual(resp.status, 200)
+                self.assertEqual(seen_proxy_timeouts, [4.2])
+            finally:
+                proxy_to.close()
+
+            # (4) Prompt-size budget: 240 verbose multibyte elements + 240 verbose container-enriched candidates (>160 KB raw)
+            # compacts deterministically within V2_MAX_JSON_BYTES (131,072 bytes) without candidate_refused
+            class HeavyPromptDriver:
+                def __init__(self):
+                    self.session_id = ""
+                    self.timeout_ms = 5000
+                    self.snap_seq = 0
+
+                def close(self):
+                    pass
+
+                def call_tool(self, name, _args, **_kwargs):
+                    if name == "list_windows":
+                        return {"content": [{"type": "text", "text": "[]"}], "structuredContent": {"windows": []}}
+                    if name == "get_window_state":
+                        self.snap_seq += 1
+                        snap = f"s0000fb{self.snap_seq:02x}"
+                        c_path_lbl = "Enterprise Workspace — Região Primária > Subsistema Operacional Avançado > Painel de Controle Detalhado"
+                        md_lines = [
+                            '- [0] AXWindow "HeavyWin"',
+                            f'  - AXGroup "{c_path_lbl}"',
+                        ]
+                        elems = [{"element_index": 0, "role": "AXWindow", "label": "HeavyWin", "actions": ["AXRaise"]}]
+                        for idx in range(1, 241):
+                            lbl = f"Configuração Operacional Detalhada Número {idx:03d} — Aplicar Política de Roteamento Regional"
+                            md_lines.append(f'    - [{idx}] AXButton "{lbl}" [actions=[press]]')
+                            elems.append(
+                                {
+                                    "element_index": idx,
+                                    "role": "AXButton",
+                                    "label": lbl,
+                                    "value": "EstadoAtualExtenso=" + ("Ω" * 90),
+                                    "enabled": True,
+                                    "actions": ["AXPress"],
+                                }
+                            )
+                        md = "\n".join(md_lines)
+                        return {
+                            "content": [{"type": "text", "text": md}],
+                            "structuredContent": {
+                                "pid": 403,
+                                "window_id": 803,
+                                "snapshot_id": snap,
+                                "elements_complete": True,
+                                "truncated": False,
+                                "tree_markdown": md,
+                                "elements": elems,
+                            },
+                        }
+                    return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+            captured_wire_sizes: list[int] = []
+
+            def fake_heavy_post(req, _timeout):
+                captured_wire_sizes.append(len(req.data))
+                body = json.loads(req.data.decode("utf-8"))
+                c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+                # All 240 executable candidates + reobserve + abstain = 242 must be preserved
+                self.assertEqual(len(c_ids), 242)
+                chosen = c_ids[0]
+                rem = [cid for cid in c_ids if cid != chosen]
+                probs = {chosen: 0.99, **{cid: round(0.01 / max(1, len(rem)), 6) for cid in rem}}
+                return 200, json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "answers": {"candidate": {"type": "choice", "choice": chosen, "confidence": 0.99, "probabilities": probs}},
+                        "usage": {"input_tokens": 900, "output_tokens": 5},
+                    }
+                )
+
+            drv_heavy = HeavyPromptDriver()
+            srv_heavy = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "heavy.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_heavy_post,
+                driver_client=drv_heavy,
+            )
+            try:
+                res_heavy = srv_heavy.handle_step(
+                    {"pid": 403, "window_id": 803, "goal": "Click candidate 001"}
+                )["structuredContent"]
+                self.assertIn(res_heavy["status"], {"dispatched", "state_changed"})
+                self.assertEqual(len(captured_wire_sizes), 1)
+            finally:
+                srv_heavy.close()
+
+    def test_v2_round7_proxy_auth_slot_identity_calc_seed_and_canary_flag(self):
+        import threading
+
+        bench_path = os.path.join(ROOT, "scripts", "benchmark_cua.py")
+        b_loader = importlib.machinery.SourceFileLoader("benchmark_cua_r7_test", bench_path)
+        b_spec = importlib.util.spec_from_loader("benchmark_cua_r7_test", b_loader)
+        bench_mod = importlib.util.module_from_spec(b_spec)
+        sys.modules["benchmark_cua_r7_test"] = bench_mod
+        b_loader.exec_module(bench_mod)
+
+        # (1) LoopbackTypeSafeProxy rejects unauthenticated or wrong-token requests with HTTP 401 before forwarding
+        upstream_calls = 0
+
+        def fake_up_post(_req, _timeout):
+            nonlocal upstream_calls
+            upstream_calls += 1
+            return 200, json.dumps(
+                {
+                    "answers": {"target": {"type": "choice", "choice": "@s1:e1", "probabilities": {"@s1:e1": 0.99}}},
+                    "usage": {"input_tokens": 10, "output_tokens": 2},
+                }
+            )
+
+        spend_auth = bench_mod.SpendTracker(max_budget_usd=1.0)
+        proxy_auth = bench_mod.LoopbackTypeSafeProxy(
+            spend_auth,
+            env={"TYPESAFE_API_KEY": "real-key"},
+            http_post=fake_up_post,
+        )
+        try:
+            self.assertNotEqual(proxy_auth.auth_token, "loopback-proxy")
+            self.assertGreaterEqual(len(proxy_auth.auth_token), 32)
+            for bad_headers in (
+                {"Content-Type": "application/json"},
+                {"Content-Type": "application/json", "Authorization": "Bearer loopback-proxy"},
+                {"Content-Type": "application/json", "Authorization": "Bearer wrong-token"},
+            ):
+                unauth_req = urllib.request.Request(
+                    proxy_auth.base_url,
+                    data=b'{"state":{"goal":"spend"}}',
+                    headers=bad_headers,
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as unauth_ctx:
+                    urllib.request.urlopen(unauth_req, timeout=5.0)
+                self.assertEqual(unauth_ctx.exception.code, 401)
+                unauth_ctx.exception.close()
+            self.assertEqual(upstream_calls, 0)
+            self.assertEqual(spend_auth.total_usd, 0.0)
+            self.assertEqual(spend_auth.reserved_usd, 0.0)
+        finally:
+            proxy_auth.close()
+
+        # (2) Concurrent requests remove their own slot by identity (out-of-order completion never abandons the wrong slot)
+        req1_entered = threading.Event()
+        release_req1 = threading.Event()
+        req2_done = threading.Event()
+
+        def concurrent_up_post(req, _timeout):
+            payload = json.loads(req.data.decode("utf-8"))
+            tag = payload["state"]["tag"]
+            if tag == "slow-first":
+                req1_entered.set()
+                release_req1.wait(timeout=5.0)
+            return 200, json.dumps(
+                {
+                    "answers": {"target": {"type": "choice", "choice": "@s1:e1", "probabilities": {"@s1:e1": 0.99}}},
+                    "usage": {"input_tokens": 50, "output_tokens": 5},
+                }
+            )
+
+        spend_conc = bench_mod.SpendTracker(max_budget_usd=1.0)
+        proxy_conc = bench_mod.LoopbackTypeSafeProxy(
+            spend_conc,
+            env={"TYPESAFE_API_KEY": "real-key"},
+            http_post=concurrent_up_post,
+        )
+        try:
+            r1_status: list[int] = []
+
+            def send_slow_first():
+                rq = urllib.request.Request(
+                    proxy_conc.base_url,
+                    data=b'{"state":{"tag":"slow-first"}}',
+                    headers={"Content-Type": "application/json", "Authorization": proxy_conc.auth_header},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(rq, timeout=5.0) as rp:
+                        r1_status.append(rp.status)
+                except urllib.error.HTTPError as he:
+                    r1_status.append(he.code)
+                    he.close()
+
+            t1 = threading.Thread(target=send_slow_first)
+            t1.start()
+            self.assertTrue(req1_entered.wait(timeout=2.0))
+
+            # Second request arrives later and finishes FIRST (out of order); must remove ONLY its own slot!
+            rq2 = urllib.request.Request(
+                proxy_conc.base_url,
+                data=b'{"state":{"tag":"fast-second"}}',
+                headers={"Content-Type": "application/json", "Authorization": proxy_conc.auth_header},
+                method="POST",
+            )
+            with urllib.request.urlopen(rq2, timeout=5.0) as rp2:
+                self.assertEqual(rp2.status, 200)
+            req2_done.set()
+
+            # Subprocess timeout now abandons the still-in-flight slow-first slot and retains its reservation
+            with self.assertRaisesRegex(RuntimeError, "reservation retained"):
+                proxy_conc.on_subprocess_timeout("jev_desktop_run")
+            release_req1.set()
+            t1.join(timeout=3.0)
+            # Slow-first saw slot["abandoned"] == True -> HTTP 400 and did NOT release its retained reservation!
+            self.assertEqual(r1_status, [400])
+            self.assertGreater(spend_conc.reserved_usd, 0.0)
+        finally:
+            release_req1.set()
+            proxy_conc.close()
+
+        # (3) reset_calculator uses checked_call and aborts immediately when a seed click returns isError=True
+        class RejectMultiplyCalcDriver:
+            def __init__(self):
+                self.snap_seq = 0
+                self.clicked_tokens: list[str] = []
+
+            def call_tool(self, name, args, **_kwargs):
+                if name == "get_window_state":
+                    self.snap_seq += 1
+                    snap = f"s0000cb{self.snap_seq:02x}"
+                    md = '- [0] AXWindow "Calculator"\n  - [1] AXStaticText = "9"\n  - [2] AXButton (Clear)\n  - [4] AXButton (9)\n  - [8] AXButton (Multiply)\n  - [9] AXButton (4)'
+                    return {
+                        "content": [{"type": "text", "text": md}],
+                        "structuredContent": {
+                            "pid": 77,
+                            "window_id": 301,
+                            "snapshot_id": snap,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": [
+                                {"element_index": 0, "role": "AXWindow", "label": "Calculator", "actions": ["AXRaise"]},
+                                {"element_index": 1, "role": "AXStaticText", "label": "9", "value": "9", "parent_index": 0},
+                                {"element_index": 2, "role": "AXButton", "label": "Clear", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                {"element_index": 4, "role": "AXButton", "label": "9", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                {"element_index": 8, "role": "AXButton", "label": "Multiply", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                                {"element_index": 9, "role": "AXButton", "label": "4", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                            ],
+                        },
+                    }
+                if name == "click":
+                    tok = str(args["element_token"])
+                    self.clicked_tokens.append(tok)
+                    if tok.endswith(":8"):
+                        return {"isError": True, "content": [{"type": "text", "text": "element action rejected"}]}
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+        orig_sleep = bench_mod.time.sleep
+        orig_wake = bench_mod._wake_macos_app_nap
+        bench_mod.time.sleep = lambda _s: None
+        bench_mod._wake_macos_app_nap = lambda _pid: None
+        try:
+            bad_calc = RejectMultiplyCalcDriver()
+            with self.assertRaises(bench_mod.ArmActionError):
+                bench_mod.reset_calculator(bad_calc, 77, 301, seed_dirty="99*4")
+            # Aborted right at Multiply (':8') before clicking final digit '4' (':9')
+            self.assertEqual([t.split(":")[1] for t in bad_calc.clicked_tokens], ["2", "4", "4", "8"])
+        finally:
+            bench_mod.time.sleep = orig_sleep
+            bench_mod._wake_macos_app_nap = orig_wake
+
+        # (4) Fatal provider/budget RuntimeError preserves accumulated canary_leaked=True attribute
+        spend_cf = bench_mod.SpendTracker(max_budget_usd=1.0)
+        proxy_cf = bench_mod.LoopbackTypeSafeProxy(
+            spend_cf,
+            env={"TYPESAFE_API_KEY": "real-key"},
+            http_post=fake_up_post,
+        )
+        try:
+            proxy_cf.budget_exc.append(RuntimeError("Budget ceiling hit during Jev call"))
+            with self.assertRaisesRegex(RuntimeError, "Budget ceiling hit during Jev call") as cf_ctx:
+                bench_mod._run_jev_node_helper(
+                    [sys.executable, "-c", 'print("CANARY-VAULT-SECRET-9941")'],
+                    env={},
+                    proxy=proxy_cf,
+                    timeout_s=5.0,
+                    tool_name="jev_desktop_act",
+                )
+            self.assertNotIsInstance(cf_ctx.exception, bench_mod.ArmActionError)
+            self.assertTrue(getattr(cf_ctx.exception, "canary_leaked", False))
+        finally:
+            proxy_cf.close()
+
+    def test_v2_round8_proxy_post_shutdown_freeze_pending_error_abandon_and_cleanup_canary(self):
+        import importlib.util
+        from pathlib import Path
+        import socket
+        import threading
+        import time
+        from unittest import mock
+        import urllib.error
+        import urllib.request
+
+        spec = importlib.util.spec_from_file_location(
+            "benchmark_cua_mod_r8",
+            Path(__file__).resolve().parent.parent / "scripts" / "benchmark_cua.py",
+        )
+        assert spec is not None and spec.loader is not None
+        bench_mod = importlib.util.module_from_spec(spec)
+        sys.modules["benchmark_cua_mod_r8"] = bench_mod
+        spec.loader.exec_module(bench_mod)
+
+        # (1) Handler stalled mid-body-read during timeout + close() must NOT reserve budget or call upstream later
+        up_calls_1: list[bytes] = []
+
+        def never_expected_up(req, _timeout_s):
+            up_calls_1.append(req.data or b"")
+            return 200, '{"answers":{},"usage":{"input_tokens":10,"output_tokens":2}}'
+
+        spend1 = bench_mod.SpendTracker(max_budget_usd=1.0)
+        proxy1 = bench_mod.LoopbackTypeSafeProxy(
+            spend1,
+            env={"TYPESAFE_API_KEY": "real-key"},
+            http_post=never_expected_up,
+        )
+        raw_sock = socket.create_connection(("127.0.0.1", proxy1.port), timeout=5.0)
+        try:
+            body_bytes = b'{"state":{"tag":"stalled-body-read"}}'
+            req_head = (
+                f"POST /v1/systemone HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{proxy1.port}\r\n"
+                f"Authorization: {proxy1.auth_header}\r\n"
+                f"Content-Type: application/json\r\n"
+                f"Content-Length: {len(body_bytes)}\r\n"
+                f"Connection: close\r\n\r\n"
+            ).encode("ascii")
+            # Send headers + partial body so ProxyHandler passes auth and blocks in self.rfile.read(length)
+            raw_sock.sendall(req_head + body_bytes[:8])
+            time.sleep(0.05)
+
+            proxy1.on_subprocess_timeout("jev_desktop_act")
+            proxy1.close()
+            snap_after_close = (
+                spend1.reserved_usd,
+                spend1.total_usd,
+                spend1.jev_calls,
+                spend1.jev_uncertain_failures,
+            )
+            self.assertEqual(snap_after_close, (0.0, 0.0, 0, 0))
+
+            # Finish transmitting body AFTER timeout + close(); handler must reject with 400 proxy_closed
+            raw_sock.sendall(body_bytes[8:])
+            chunks: list[bytes] = []
+            while True:
+                chunk = raw_sock.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            resp_raw = b"".join(chunks).decode("utf-8", "replace")
+            self.assertIn("400", resp_raw.splitlines()[0])
+            self.assertIn("proxy_closed", resp_raw)
+            self.assertEqual(up_calls_1, [])
+            self.assertEqual(
+                (spend1.reserved_usd, spend1.total_usd, spend1.jev_calls, spend1.jev_uncertain_failures),
+                snap_after_close,
+            )
+        finally:
+            raw_sock.close()
+            proxy1.close()
+
+        # (2) Pending error on one request + concurrent active slot: on_subprocess_timeout abandons remaining slot first
+        slow_entered = threading.Event()
+        release_slow = threading.Event()
+
+        def mixed_up_post(req, _timeout_s):
+            payload = json.loads((req.data or b"{}").decode("utf-8"))
+            tag = (payload.get("state") or {}).get("tag")
+            if tag == "slow-inflight":
+                slow_entered.set()
+                release_slow.wait(timeout=5.0)
+                return 200, json.dumps(
+                    {
+                        "answers": {"target": {"type": "choice", "choice": "@s1:e1", "probabilities": {"@s1:e1": 0.99}}},
+                        "usage": {"input_tokens": 40, "output_tokens": 4},
+                    }
+                )
+            # Fast request returns 500 without usage -> records budget_exc ("Jev usage unaccounted")
+            return 500, '{"error":"upstream_boom"}'
+
+        spend2 = bench_mod.SpendTracker(max_budget_usd=1.0)
+        proxy2 = bench_mod.LoopbackTypeSafeProxy(
+            spend2,
+            env={"TYPESAFE_API_KEY": "real-key"},
+            http_post=mixed_up_post,
+        )
+        try:
+            slow_codes: list[int] = []
+
+            def run_slow():
+                rq = urllib.request.Request(
+                    proxy2.base_url,
+                    data=b'{"state":{"tag":"slow-inflight"}}',
+                    headers={"Content-Type": "application/json", "Authorization": proxy2.auth_header},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(rq, timeout=5.0) as rp:
+                        slow_codes.append(rp.status)
+                except urllib.error.HTTPError as he:
+                    slow_codes.append(he.code)
+                    he.close()
+
+            ts = threading.Thread(target=run_slow)
+            ts.start()
+            self.assertTrue(slow_entered.wait(timeout=2.0))
+
+            rq_fail = urllib.request.Request(
+                proxy2.base_url,
+                data=b'{"state":{"tag":"fail-unaccounted"}}',
+                headers={"Content-Type": "application/json", "Authorization": proxy2.auth_header},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as fail_http:
+                urllib.request.urlopen(rq_fail, timeout=5.0)
+            self.assertEqual(fail_http.exception.code, 400)
+            fail_http.exception.close()
+
+            # Both reservations are currently held; slow-inflight is still in _active_slots while budget_exc is populated
+            self.assertEqual(len(proxy2.budget_exc), 1)
+            self.assertEqual(len(proxy2._active_slots), 1)
+
+            with self.assertRaisesRegex(RuntimeError, "Jev usage unaccounted"):
+                proxy2.on_subprocess_timeout("jev_desktop_run")
+
+            # Active slot was abandoned & accounted BEFORE re-raising the pending error
+            self.assertEqual(proxy2._active_slots, {})
+            frozen_spend2 = (
+                spend2.reserved_usd,
+                spend2.total_usd,
+                spend2.jev_calls,
+                spend2.jev_uncertain_failures,
+            )
+            self.assertAlmostEqual(spend2.reserved_usd, 2 * bench_mod.JEV_RESERVE_ALLOWANCE_USD, places=6)
+            self.assertEqual(spend2.jev_calls, 2)
+            self.assertEqual(spend2.jev_uncertain_failures, 2)
+
+            # Releasing slow-inflight now must NOT settle usage or release its retained reservation
+            release_slow.set()
+            ts.join(timeout=3.0)
+            self.assertEqual(slow_codes, [400])
+            self.assertEqual(
+                (spend2.reserved_usd, spend2.total_usd, spend2.jev_calls, spend2.jev_uncertain_failures),
+                frozen_spend2,
+            )
+        finally:
+            release_slow.set()
+            proxy2.close()
+
+        # (3) Cleanup RuntimeError replacing ArmActionError(canary_leaked=True) preserves canary_leaked=True in both AD arms
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            fake_paths = (out_dir, out_dir / "ad", out_dir / "act.mjs", out_dir / "run.mjs")
+            dummy_task = bench_mod.build_tasks()[0]
+            spend3 = bench_mod.SpendTracker(max_budget_usd=1.0)
+            with (
+                mock.patch.object(bench_mod, "resolve_agent_desktop_paths", return_value=fake_paths),
+                mock.patch.object(
+                    bench_mod,
+                    "_run_ad_cli",
+                    side_effect=bench_mod.ArmActionError("canary in CLI output", canary_leaked=True),
+                ),
+                mock.patch.object(bench_mod, "_stop_ad_command_host", return_value=False),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "command_host could not be confirmed stopped") as dir_ctx:
+                    bench_mod.run_arm_agent_desktop_direct(
+                        None, "gemini-3.8-flash", dummy_task, 111, 222, spend3, out_dir
+                    )
+                self.assertNotIsInstance(dir_ctx.exception, bench_mod.ArmActionError)
+                self.assertTrue(getattr(dir_ctx.exception, "canary_leaked", False))
+
+                orig_proxy_cls = bench_mod.LoopbackTypeSafeProxy
+                with mock.patch.object(
+                    bench_mod,
+                    "LoopbackTypeSafeProxy",
+                    side_effect=lambda spend, **kw: orig_proxy_cls(
+                        spend, env={"TYPESAFE_API_KEY": "real-key"}, http_post=never_expected_up, **kw
+                    ),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "command_host could not be confirmed stopped") as jev_ctx:
+                        bench_mod.run_arm_agent_desktop_jev(
+                            None, "gemini-3.8-flash", dummy_task, 111, 222, spend3, out_dir
+                        )
+                    self.assertNotIsInstance(jev_ctx.exception, bench_mod.ArmActionError)
+                    self.assertTrue(getattr(jev_ctx.exception, "canary_leaked", False))
+
 
 if __name__ == "__main__":
     unittest.main()

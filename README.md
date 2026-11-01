@@ -15,7 +15,7 @@ stays in the background and your cursor doesn't move.
 
 ## Status
 
-v0.2.0, macOS only. Qualified across both the **Antigravity App (IDE)** and the **`agy` CLI** (`bin/agy-cua qualify --installed`) with **Gemini 4 Argon (`gemini-4-argon-high`)** and **Jev (`jev-1.13.0`)**:
+v0.3.0, macOS only. Qualified across both the **Antigravity App (IDE)** and the **`agy` CLI** (`bin/agy-cua qualify --installed`) with **Gemini 4 Argon (`gemini-4-argon-high`)**, **Gemini 3.8 Flash (`gemini-3.8-flash-high`)**, and **Jev (`jev-1.13.0`)**:
 
 | Surface / Run (2026-10-14, `cua-driver 0.35.4` / `0.30.4`) | Model / Selector | Action / Target | Result | Timing | Focus stolen |
 | --- | --- | --- | --- | --- | --- |
@@ -29,6 +29,7 @@ v0.2.0, macOS only. Qualified across both the **Antigravity App (IDE)** and the 
 | 10-Task Observation, Recovery & Cross-Window/Browser Benchmark ([`docs/benchmark-2026-10-14.md`](docs/benchmark-2026-10-14.md#7-issue-19--10-task-observation-recovery--cross-windowbrowser-benchmark-gemini-4-argonlow--gemini-38-flashhigh-2026-10-18)) | `gemini-4-argon:low` & `gemini-3.8-flash:high` × 4 arms × 2 reps (160 runs, [`proof/bench-20261018T131504Z-summary.json`](proof/bench-20261018T131504Z-summary.json)) | `T1`–`T5b` + Truncated AX (`T6a`), Zero-AX Canvas (`T6b`), Cross-Window Sheet (`T7a`), 1Password + Isolated Browser (`T7b`) | **120 / 120 PASS** (`100%` across all 3 AGY arms) vs 35 / 40 (`87.5%`) on `google-cua-bg` | Argon `low` `v1`: **458.12 ± 38.62 s/rep** (`\$0.3272`, 1.95× faster & 4.1× cheaper than `google-cua-bg`); Flash `high` `direct`: **248.96 ± 4.19 s/rep** (`\$0.2933`, 2.03× faster) | 0 samples |
 | `bin/agy-cua qualify --model gemini-4-argon-low --batch` (`agy 1.4.2`) | `gemini-4-argon-low` + `jev-1.13.0` ([`proof/qualify-20261018-argon-low.json`](proof/qualify-20261018-argon-low.json)) | Calculator `90 × 12` (1 `jev_batch` call, 7 verified steps) | **PASS** (`1,080`, `errors=0`, `all_steps_verified=true`) | 67 s (`provider_median_ms=214.17`, `dispatch_median_ms=464.49`) | 0 samples |
 | `bin/agy-cua qualify --model gemini-3.8-flash-high --batch` (`agy 1.4.2`) | `gemini-3.8-flash-high` + `jev-1.13.0` ([`proof/qualify-20261018-flash-high.json`](proof/qualify-20261018-flash-high.json)) | Calculator `24 × 66` (1 `jev_batch` call, 7 verified steps) | **PASS** (`1,584`, `errors=0`, `all_steps_verified=true`) | 96 s (`provider_median_ms=227.84`, `dispatch_median_ms=467.65`) | 0 samples |
+| 11-Task `agy-cua` vs. `vercel-labs/agent-desktop` Benchmark & `v2` Hillclimb ([`docs/benchmark-2026-10-31-agent-desktop-jev-v2.md`](docs/benchmark-2026-10-31-agent-desktop-jev-v2.md)) | `gemini-3.8-flash:high` × 5 arms (`agy-cua-direct`, `agy-cua-jev-v1`, `agent-desktop-direct`, `agent-desktop-jev`, `agy-cua-jev-v2`; [`proof/bench-20261101T014146Z-agent-desktop-jev-v2-summary.json`](proof/bench-20261101T014146Z-agent-desktop-jev-v2-summary.json)) | `T1`–`T7b` + 1,500-Node 4-Region Enterprise Workspace (`T8_dense_hierarchy_drill`) | **`agy-cua-jev-v2` 10 / 10 Desktop PASS** (`10 / 11` strict, `11 / 11` functional) vs `9 / 10` on `v1` & `agent-desktop-direct` and `8 / 10` on `agent-desktop-jev` | **`\$0.2062` total** (`145,382` in_tok, `34` turns — **2.3× cheaper** than `v1`, **1.7×–2.1× cheaper** than `agent-desktop`) | 0 desktop samples (`T7b` Chromium spawn noted) |
 
 Qualified in background (`delivery_mode="background"`): `launch_app`, `list_windows`, `get_window_state`, `click` / `double_click` / `right_click`, `set_value`, `type_text`, `press_key`, `hotkey`, `invoke_menu`, `scroll`, and isolated loopback browser actions (`get_browser_state`, `browser_prepare`, `browser_navigate`, `browser_click`, `browser_type`).
 Refused in background-only mode: `drag` (`background_drag_unavailable_on_macos`), `delivery_mode="foreground"`, `bring_to_front`, `get_desktop_state`, `clipboard_*`, `kill_app`, `set_config`, `browser_download`, `browser_set_input_files`, `existing_profile` / non-loopback browser URLs, `stale_snapshot_id`, `out_of_scope_target`, `secure_element_refused`, and `commit_action_forbidden_by_safety_policy` / `mail_send_forbidden_by_safety_policy`.
@@ -51,12 +52,12 @@ Antigravity (app or agy) --stdio MCP--> bin/agy-cua-mcp -----> cua-driver mcp --
   pixels ([trycua/cua#4346](https://github.com/trycua/cua/issues/4346)). The
   shim copies `snapshot_id` into the text, which enables exact element clicks.
   Everything else passes through unchanged. It goes away once #4346 ships.
-- **`bin/agy-cua-jev-mcp`** is a zero-dependency Python 3 stdlib MCP server (`agy-cua-jev`)
+- **`bin/agy-cua-jev-mcp`** is a zero-dependency Python 3 stdlib MCP server (`agy-cua-jev` `v0.3.0`)
   for bounded candidate selection with pinned **Jev (`jev-1.13.0`)** (`jev_status`,
-  `jev_select_action`, `jev_observe`, `jev_step`, `jev_batch`, `jev_browser_prepare`, `jev_browser_step`). It keeps Jev text-only, enforces zero automatic
+  `jev_select_action`, `jev_observe`, `jev_step`, `jev_batch`, `jev_browser_prepare`, `jev_browser_step`). It keeps Jev text-only, supports progressive container disclosure (`skeleton: true` -> `drill_regions` -> `region` / `root_element_index` subtree drilling), scales auto-candidate selection up to `240` candidates with container-path/state descriptions and automatic `<0.70`-confidence top-5 Jev shortlist reranking (`AGY_CUA_JEV_V1_COMPAT=1` restores `v1` caps), enforces zero automatic
   provider retries (`max_attempts=1`), validates `(pid, window_id, snapshot_id)` (or `(target_id, tab_id, ref)` on isolated loopback browsers) and
-  `delivery_mode="background"` before dispatching to `cua-driver`, redacts and refuses secure fields (`secure_element_refused`), blocks consequential commit actions (`Send`, `Delete`, `Empty Trash`), and verifies the
-  post-action window state with separate `observe_ms`, `provider_ms`, `dispatch_ms`,
+  `delivery_mode="background"` before dispatching to `cua-driver`, wakes occluded macOS App Nap targets, redacts and refuses secure fields (`secure_element_refused`), blocks consequential commit actions (`Send`, `Delete`, `Empty Trash`), and verifies the
+  post-action window state with bounded postcondition settle polling (`wait_timeout_ms`, default `1200` ms) and separate `observe_ms`, `provider_ms`, `dispatch_ms`,
   and `verify_ms` timings.
 - **`skills/cua-computer-use`** teaches Gemini 4 Argon and Gemini 3.8 Flash the loop: launch in the
   background, inspect with `jev_observe` when needed, step with `jev_step`, `jev_batch`, or `jev_browser_step` (or snapshot + act by element), and verify from
