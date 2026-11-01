@@ -6880,6 +6880,208 @@ class StdioEndToEndTest(unittest.TestCase):
         finally:
             proxy_cf.close()
 
+    def test_v2_round8_proxy_post_shutdown_freeze_pending_error_abandon_and_cleanup_canary(self):
+        import importlib.util
+        from pathlib import Path
+        import socket
+        import threading
+        import time
+        from unittest import mock
+        import urllib.error
+        import urllib.request
+
+        spec = importlib.util.spec_from_file_location(
+            "benchmark_cua_mod_r8",
+            Path(__file__).resolve().parent.parent / "scripts" / "benchmark_cua.py",
+        )
+        assert spec is not None and spec.loader is not None
+        bench_mod = importlib.util.module_from_spec(spec)
+        sys.modules["benchmark_cua_mod_r8"] = bench_mod
+        spec.loader.exec_module(bench_mod)
+
+        # (1) Handler stalled mid-body-read during timeout + close() must NOT reserve budget or call upstream later
+        up_calls_1: list[bytes] = []
+
+        def never_expected_up(req, _timeout_s):
+            up_calls_1.append(req.data or b"")
+            return 200, '{"answers":{},"usage":{"input_tokens":10,"output_tokens":2}}'
+
+        spend1 = bench_mod.SpendTracker(max_budget_usd=1.0)
+        proxy1 = bench_mod.LoopbackTypeSafeProxy(
+            spend1,
+            env={"TYPESAFE_API_KEY": "real-key"},
+            http_post=never_expected_up,
+        )
+        raw_sock = socket.create_connection(("127.0.0.1", proxy1.port), timeout=5.0)
+        try:
+            body_bytes = b'{"state":{"tag":"stalled-body-read"}}'
+            req_head = (
+                f"POST /v1/systemone HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{proxy1.port}\r\n"
+                f"Authorization: {proxy1.auth_header}\r\n"
+                f"Content-Type: application/json\r\n"
+                f"Content-Length: {len(body_bytes)}\r\n"
+                f"Connection: close\r\n\r\n"
+            ).encode("ascii")
+            # Send headers + partial body so ProxyHandler passes auth and blocks in self.rfile.read(length)
+            raw_sock.sendall(req_head + body_bytes[:8])
+            time.sleep(0.05)
+
+            proxy1.on_subprocess_timeout("jev_desktop_act")
+            proxy1.close()
+            snap_after_close = (
+                spend1.reserved_usd,
+                spend1.total_usd,
+                spend1.jev_calls,
+                spend1.jev_uncertain_failures,
+            )
+            self.assertEqual(snap_after_close, (0.0, 0.0, 0, 0))
+
+            # Finish transmitting body AFTER timeout + close(); handler must reject with 400 proxy_closed
+            raw_sock.sendall(body_bytes[8:])
+            chunks: list[bytes] = []
+            while True:
+                chunk = raw_sock.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            resp_raw = b"".join(chunks).decode("utf-8", "replace")
+            self.assertIn("400", resp_raw.splitlines()[0])
+            self.assertIn("proxy_closed", resp_raw)
+            self.assertEqual(up_calls_1, [])
+            self.assertEqual(
+                (spend1.reserved_usd, spend1.total_usd, spend1.jev_calls, spend1.jev_uncertain_failures),
+                snap_after_close,
+            )
+        finally:
+            raw_sock.close()
+            proxy1.close()
+
+        # (2) Pending error on one request + concurrent active slot: on_subprocess_timeout abandons remaining slot first
+        slow_entered = threading.Event()
+        release_slow = threading.Event()
+
+        def mixed_up_post(req, _timeout_s):
+            payload = json.loads((req.data or b"{}").decode("utf-8"))
+            tag = (payload.get("state") or {}).get("tag")
+            if tag == "slow-inflight":
+                slow_entered.set()
+                release_slow.wait(timeout=5.0)
+                return 200, json.dumps(
+                    {
+                        "answers": {"target": {"type": "choice", "choice": "@s1:e1", "probabilities": {"@s1:e1": 0.99}}},
+                        "usage": {"input_tokens": 40, "output_tokens": 4},
+                    }
+                )
+            # Fast request returns 500 without usage -> records budget_exc ("Jev usage unaccounted")
+            return 500, '{"error":"upstream_boom"}'
+
+        spend2 = bench_mod.SpendTracker(max_budget_usd=1.0)
+        proxy2 = bench_mod.LoopbackTypeSafeProxy(
+            spend2,
+            env={"TYPESAFE_API_KEY": "real-key"},
+            http_post=mixed_up_post,
+        )
+        try:
+            slow_codes: list[int] = []
+
+            def run_slow():
+                rq = urllib.request.Request(
+                    proxy2.base_url,
+                    data=b'{"state":{"tag":"slow-inflight"}}',
+                    headers={"Content-Type": "application/json", "Authorization": proxy2.auth_header},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(rq, timeout=5.0) as rp:
+                        slow_codes.append(rp.status)
+                except urllib.error.HTTPError as he:
+                    slow_codes.append(he.code)
+                    he.close()
+
+            ts = threading.Thread(target=run_slow)
+            ts.start()
+            self.assertTrue(slow_entered.wait(timeout=2.0))
+
+            rq_fail = urllib.request.Request(
+                proxy2.base_url,
+                data=b'{"state":{"tag":"fail-unaccounted"}}',
+                headers={"Content-Type": "application/json", "Authorization": proxy2.auth_header},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as fail_http:
+                urllib.request.urlopen(rq_fail, timeout=5.0)
+            self.assertEqual(fail_http.exception.code, 400)
+            fail_http.exception.close()
+
+            # Both reservations are currently held; slow-inflight is still in _active_slots while budget_exc is populated
+            self.assertEqual(len(proxy2.budget_exc), 1)
+            self.assertEqual(len(proxy2._active_slots), 1)
+
+            with self.assertRaisesRegex(RuntimeError, "Jev usage unaccounted"):
+                proxy2.on_subprocess_timeout("jev_desktop_run")
+
+            # Active slot was abandoned & accounted BEFORE re-raising the pending error
+            self.assertEqual(proxy2._active_slots, {})
+            frozen_spend2 = (
+                spend2.reserved_usd,
+                spend2.total_usd,
+                spend2.jev_calls,
+                spend2.jev_uncertain_failures,
+            )
+            self.assertAlmostEqual(spend2.reserved_usd, 2 * bench_mod.JEV_RESERVE_ALLOWANCE_USD, places=6)
+            self.assertEqual(spend2.jev_calls, 2)
+            self.assertEqual(spend2.jev_uncertain_failures, 2)
+
+            # Releasing slow-inflight now must NOT settle usage or release its retained reservation
+            release_slow.set()
+            ts.join(timeout=3.0)
+            self.assertEqual(slow_codes, [400])
+            self.assertEqual(
+                (spend2.reserved_usd, spend2.total_usd, spend2.jev_calls, spend2.jev_uncertain_failures),
+                frozen_spend2,
+            )
+        finally:
+            release_slow.set()
+            proxy2.close()
+
+        # (3) Cleanup RuntimeError replacing ArmActionError(canary_leaked=True) preserves canary_leaked=True in both AD arms
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            fake_paths = (out_dir, out_dir / "ad", out_dir / "act.mjs", out_dir / "run.mjs")
+            dummy_task = bench_mod.build_tasks()[0]
+            spend3 = bench_mod.SpendTracker(max_budget_usd=1.0)
+            with (
+                mock.patch.object(bench_mod, "resolve_agent_desktop_paths", return_value=fake_paths),
+                mock.patch.object(
+                    bench_mod,
+                    "_run_ad_cli",
+                    side_effect=bench_mod.ArmActionError("canary in CLI output", canary_leaked=True),
+                ),
+                mock.patch.object(bench_mod, "_stop_ad_command_host", return_value=False),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "command_host could not be confirmed stopped") as dir_ctx:
+                    bench_mod.run_arm_agent_desktop_direct(
+                        None, "gemini-3.8-flash", dummy_task, 111, 222, spend3, out_dir
+                    )
+                self.assertNotIsInstance(dir_ctx.exception, bench_mod.ArmActionError)
+                self.assertTrue(getattr(dir_ctx.exception, "canary_leaked", False))
+
+                orig_proxy_cls = bench_mod.LoopbackTypeSafeProxy
+                with mock.patch.object(
+                    bench_mod,
+                    "LoopbackTypeSafeProxy",
+                    side_effect=lambda spend, **kw: orig_proxy_cls(
+                        spend, env={"TYPESAFE_API_KEY": "real-key"}, http_post=never_expected_up, **kw
+                    ),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "command_host could not be confirmed stopped") as jev_ctx:
+                        bench_mod.run_arm_agent_desktop_jev(
+                            None, "gemini-3.8-flash", dummy_task, 111, 222, spend3, out_dir
+                        )
+                    self.assertNotIsInstance(jev_ctx.exception, bench_mod.ArmActionError)
+                    self.assertTrue(getattr(jev_ctx.exception, "canary_leaked", False))
+
 
 if __name__ == "__main__":
     unittest.main()

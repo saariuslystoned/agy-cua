@@ -2820,6 +2820,7 @@ class LoopbackTypeSafeProxy:
         self.auth_header = f"Bearer {self.auth_token}"
         self._lock = threading.Lock()
         self._active_slots: dict[int, dict[str, bool]] = {}
+        self._closed_or_cancelled = False
 
         eff_env = dict(os.environ) if env is None else dict(env)
         self.route = jev_mod.resolve_route(eff_env, jev_mod.read_keychain_secret)
@@ -2830,15 +2831,30 @@ class LoopbackTypeSafeProxy:
         proxy_ref = self
 
         class ProxyHandler(http.server.BaseHTTPRequestHandler):
+            def _send_json(self, code: int, body: bytes, *, close_conn: bool = False) -> None:
+                try:
+                    self.send_response(code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    if close_conn:
+                        self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(body)
+                    if close_conn:
+                        self.close_connection = True
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    self.close_connection = True
+
             def do_POST(self) -> None:
                 got_auth = (self.headers.get("Authorization") or "").strip()
                 if not hmac.compare_digest(got_auth, proxy_ref.auth_header):
-                    self.send_response(401)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Connection", "close")
-                    self.end_headers()
-                    self.wfile.write(b'{"error":"unauthorized"}')
-                    self.close_connection = True
+                    self._send_json(401, b'{"error":"unauthorized"}', close_conn=True)
+                    return
+
+                with proxy_ref._lock:
+                    pre_cancelled = proxy_ref._closed_or_cancelled
+                if pre_cancelled:
+                    self._send_json(400, b'{"error":"proxy_closed"}', close_conn=True)
                     return
 
                 try:
@@ -2846,12 +2862,11 @@ class LoopbackTypeSafeProxy:
                 except ValueError:
                     length = -1
                 if length < 0 or length > 4 * 1024 * 1024:
-                    self.send_response(413 if length > 0 else 400)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Connection", "close")
-                    self.end_headers()
-                    self.wfile.write(b'{"error":"invalid_content_length"}')
-                    self.close_connection = True
+                    self._send_json(
+                        413 if length > 0 else 400,
+                        b'{"error":"invalid_content_length"}',
+                        close_conn=True,
+                    )
                     return
                 raw = self.rfile.read(length) if length > 0 else b"{}"
                 try:
@@ -2860,10 +2875,7 @@ class LoopbackTypeSafeProxy:
                     if str(exc).endswith(":True"):
                         with proxy_ref._lock:
                             proxy_ref.canary_leaked = True
-                    self.send_response(400)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(b'{"error":"invalid_json"}')
+                    self._send_json(400, b'{"error":"invalid_json"}')
                     return
                 if leaked:
                     with proxy_ref._lock:
@@ -2871,18 +2883,24 @@ class LoopbackTypeSafeProxy:
 
                 slot = {"abandoned": False}
                 slot_id = id(slot)
+                reject_body: bytes | None = None
+                reject_close = False
                 with proxy_ref._lock:
-                    try:
-                        proxy_ref.spend.reserve_before_call(JEV_RESERVE_ALLOWANCE_USD)
-                    except RuntimeError as exc:
-                        proxy_ref.budget_exc.append(exc)
-                        self.send_response(400)
-                        self.send_header("Content-Type", "application/json")
-                        self.end_headers()
-                        self.wfile.write(b'{"error":"budget_exceeded"}')
-                        return
-                    proxy_ref._active_slots[slot_id] = slot
-                    proxy_ref.calls_used += 1
+                    if proxy_ref._closed_or_cancelled:
+                        reject_body = b'{"error":"proxy_closed"}'
+                        reject_close = True
+                    else:
+                        try:
+                            proxy_ref.spend.reserve_before_call(JEV_RESERVE_ALLOWANCE_USD)
+                        except RuntimeError as exc:
+                            proxy_ref.budget_exc.append(exc)
+                            reject_body = b'{"error":"budget_exceeded"}'
+                        else:
+                            proxy_ref._active_slots[slot_id] = slot
+                            proxy_ref.calls_used += 1
+                if reject_body is not None:
+                    self._send_json(400, reject_body, close_conn=reject_close)
+                    return
 
                 headers = {
                     "Accept": "application/json",
@@ -2904,54 +2922,44 @@ class LoopbackTypeSafeProxy:
                 except Exception as exc:
                     code = getattr(exc, "code", 0)
                     with proxy_ref._lock:
-                        if not slot["abandoned"]:
+                        if not slot["abandoned"] and not proxy_ref._closed_or_cancelled:
                             proxy_ref._active_slots.pop(slot_id, None)
                             proxy_ref.spend.jev_calls += 1
                             proxy_ref.spend.jev_uncertain_failures += 1
                             proxy_ref.budget_exc.append(
                                 RuntimeError(f"Jev upstream transport/HTTP error ({code or type(exc).__name__})")
                             )
-                    self.send_response(400)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(b'{"error":"upstream_failed"}')
+                    self._send_json(400, b'{"error":"upstream_failed"}')
                     return
                 elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+                err_resp: bytes | None = None
+                err_close = False
                 with proxy_ref._lock:
-                    if slot["abandoned"]:
-                        self.send_response(400)
-                        self.send_header("Content-Type", "application/json")
-                        self.end_headers()
-                        self.wfile.write(b'{"error":"abandoned_on_timeout"}')
-                        return
-                    proxy_ref._active_slots.pop(slot_id, None)
-                    proxy_ref.jev_latencies_ms.append(elapsed_ms)
-                    try:
-                        accounted = proxy_ref.spend.settle_jev_request(
-                            status, resp_text, reserved_allowance_usd=JEV_RESERVE_ALLOWANCE_USD
-                        )
-                    except RuntimeError as exc:
-                        proxy_ref.budget_exc.append(exc)
-                        self.send_response(400)
-                        self.send_header("Content-Type", "application/json")
-                        self.end_headers()
-                        self.wfile.write(b'{"error":"budget_exceeded"}')
-                        return
-                    if not accounted:
-                        proxy_ref.budget_exc.append(RuntimeError(f"Jev usage unaccounted (HTTP {status}); reservation retained"))
-                        self.send_response(400)
-                        self.send_header("Content-Type", "application/json")
-                        self.end_headers()
-                        self.wfile.write(b'{"error":"usage_unaccounted"}')
-                        return
+                    if slot["abandoned"] or proxy_ref._closed_or_cancelled:
+                        err_resp = b'{"error":"abandoned_on_timeout"}'
+                        err_close = True
+                    else:
+                        proxy_ref._active_slots.pop(slot_id, None)
+                        proxy_ref.jev_latencies_ms.append(elapsed_ms)
+                        try:
+                            accounted = proxy_ref.spend.settle_jev_request(
+                                status, resp_text, reserved_allowance_usd=JEV_RESERVE_ALLOWANCE_USD
+                            )
+                        except RuntimeError as exc:
+                            proxy_ref.budget_exc.append(exc)
+                            err_resp = b'{"error":"budget_exceeded"}'
+                        else:
+                            if not accounted:
+                                proxy_ref.budget_exc.append(
+                                    RuntimeError(f"Jev usage unaccounted (HTTP {status}); reservation retained")
+                                )
+                                err_resp = b'{"error":"usage_unaccounted"}'
+                if err_resp is not None:
+                    self._send_json(400, err_resp, close_conn=err_close)
+                    return
 
                 out_status = 200 if (200 <= status < 300) else 400
-                resp_bytes = resp_text.encode("utf-8")
-                self.send_response(out_status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(resp_bytes)))
-                self.end_headers()
-                self.wfile.write(resp_bytes)
+                self._send_json(out_status, resp_text.encode("utf-8"))
 
             def log_message(self, *args: Any) -> None:
                 pass
@@ -2966,32 +2974,54 @@ class LoopbackTypeSafeProxy:
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
 
+    def _cancel_and_abandon_locked(self) -> int:
+        """Mark proxy terminal and abandon all active slots under `self._lock`, retaining their reservations."""
+        self._closed_or_cancelled = True
+        abandoned = 0
+        for slot in self._active_slots.values():
+            if not slot["abandoned"]:
+                slot["abandoned"] = True
+                self.spend.jev_calls += 1
+                self.spend.jev_uncertain_failures += 1
+                abandoned += 1
+        self._active_slots.clear()
+        return abandoned
+
     def raise_if_error(self) -> None:
         with self._lock:
             if self.budget_exc:
+                self._cancel_and_abandon_locked()
                 err = self.budget_exc[0]
                 _attach_canary_flag(err, self.canary_leaked)
                 raise err
+            if self._active_slots:
+                self._cancel_and_abandon_locked()
+                err = RuntimeError("Jev request still in flight after helper exit; reservation retained")
+                _attach_canary_flag(err, self.canary_leaked)
+                self.budget_exc.append(err)
+                raise err
 
     def on_subprocess_timeout(self, tool_name: str) -> None:
-        """Preserve pending provider/budget errors or retain in-flight reservations on child timeout."""
+        """Cancel future admissions, abandon all active slots, and raise pending or in-flight errors."""
         with self._lock:
+            abandoned = self._cancel_and_abandon_locked()
             if self.budget_exc:
                 err0 = self.budget_exc[0]
                 _attach_canary_flag(err0, self.canary_leaked)
                 raise err0
-            if self._active_slots:
-                for slot in self._active_slots.values():
-                    slot["abandoned"] = True
-                    self.spend.jev_calls += 1
-                    self.spend.jev_uncertain_failures += 1
-                self._active_slots.clear()
+            if abandoned > 0:
                 err = RuntimeError(f"Jev request in flight during {tool_name} timeout; reservation retained")
                 _attach_canary_flag(err, self.canary_leaked)
                 self.budget_exc.append(err)
                 raise err
 
     def close(self) -> None:
+        with self._lock:
+            abandoned = self._cancel_and_abandon_locked()
+            if abandoned > 0 and not self.budget_exc:
+                err = RuntimeError("Jev request still in flight during proxy shutdown; reservation retained")
+                _attach_canary_flag(err, self.canary_leaked)
+                self.budget_exc.append(err)
         try:
             self._server.shutdown()
             self._server.server_close()
@@ -3490,10 +3520,14 @@ def _run_ad_cli(
         return parsed, False
     finally:
         if owned_tmp is not None:
+            active_exc = sys.exc_info()[1]
+            exc_leaked = bool(getattr(active_exc, "canary_leaked", False))
             host_ok = _stop_ad_command_host(call_env, after_timeout=False)
             shutil.rmtree(owned_tmp, ignore_errors=True)
-            if not host_ok and sys.exc_info()[0] is None:
-                raise RuntimeError("agent-desktop command_host could not be confirmed stopped after CLI invocation")
+            if not host_ok and (active_exc is None or isinstance(active_exc, ArmActionError)):
+                rt_cli = RuntimeError("agent-desktop command_host could not be confirmed stopped after CLI invocation")
+                _attach_canary_flag(rt_cli, exc_leaked)
+                raise rt_cli
 
 
 def _run_jev_node_helper(
@@ -3551,12 +3585,16 @@ def _run_jev_node_helper(
         return proc, False
     finally:
         active_exc = sys.exc_info()[1]
-        accumulated_leaked = bool(local_leaked or proxy.canary_leaked)
+        accumulated_leaked = bool(
+            local_leaked
+            or proxy.canary_leaked
+            or getattr(active_exc, "canary_leaked", False)
+        )
         _attach_canary_flag(active_exc, accumulated_leaked)
         if owned_tmp is not None:
             host_ok = _stop_ad_command_host(call_env, after_timeout=False)
             shutil.rmtree(owned_tmp, ignore_errors=True)
-            if not host_ok and active_exc is None:
+            if not host_ok and (active_exc is None or isinstance(active_exc, ArmActionError)):
                 rt_cleanup = RuntimeError("agent-desktop command_host could not be confirmed stopped after Jev helper invocation")
                 _attach_canary_flag(rt_cleanup, accumulated_leaked)
                 raise rt_cleanup
@@ -3992,13 +4030,14 @@ def run_arm_agent_desktop_direct(
         }
     finally:
         active_exc = sys.exc_info()[1]
-        _attach_canary_flag(active_exc, canary_leaked)
+        arm_leaked = bool(canary_leaked or getattr(active_exc, "canary_leaked", False))
+        _attach_canary_flag(active_exc, arm_leaked)
         host_stopped = _stop_ad_command_host(ad_env, after_timeout=False)
         shutil.rmtree(ad_tmp_dir, ignore_errors=True)
         shutil.rmtree(ad_home, ignore_errors=True)
         if not host_stopped and (active_exc is None or isinstance(active_exc, ArmActionError)):
             rt_direct = RuntimeError("agent-desktop command_host could not be confirmed stopped during direct arm cleanup")
-            _attach_canary_flag(rt_direct, canary_leaked)
+            _attach_canary_flag(rt_direct, arm_leaked)
             raise rt_direct
 
 
@@ -4360,12 +4399,20 @@ def run_arm_agent_desktop_jev(
         }
     finally:
         active_exc = sys.exc_info()[1]
-        arm_leaked = bool(canary_leaked or proxy.canary_leaked)
-        _attach_canary_flag(active_exc, arm_leaked)
         proxy.close()
+        arm_leaked = bool(
+            canary_leaked
+            or proxy.canary_leaked
+            or getattr(active_exc, "canary_leaked", False)
+        )
+        _attach_canary_flag(active_exc, arm_leaked)
         host_stopped = _stop_ad_command_host(node_env, after_timeout=False)
         shutil.rmtree(ad_tmp_dir, ignore_errors=True)
         shutil.rmtree(ad_home, ignore_errors=True)
+        if proxy.budget_exc and (active_exc is None or isinstance(active_exc, ArmActionError)):
+            err_px = proxy.budget_exc[0]
+            _attach_canary_flag(err_px, arm_leaked)
+            raise err_px
         if not host_stopped and (active_exc is None or isinstance(active_exc, ArmActionError)):
             rt_jev = RuntimeError("agent-desktop command_host could not be confirmed stopped during jev arm cleanup")
             _attach_canary_flag(rt_jev, arm_leaked)
