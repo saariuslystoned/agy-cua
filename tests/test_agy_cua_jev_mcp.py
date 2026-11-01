@@ -4787,6 +4787,562 @@ class StdioEndToEndTest(unittest.TestCase):
             bench_mod.sample_frontmost_info = orig_sample
         self.assertEqual(mon.violations, 2)
 
+    def test_benchmark_t8_dense_hierarchy_and_agent_desktop_helpers(self):
+        bench_path = os.path.join(ROOT, "scripts", "benchmark_cua.py")
+        b_loader = importlib.machinery.SourceFileLoader("benchmark_cua_t8_test", bench_path)
+        b_spec = importlib.util.spec_from_loader("benchmark_cua_t8_test", b_loader)
+        bench_mod = importlib.util.module_from_spec(b_spec)
+        sys.modules["benchmark_cua_t8_test"] = bench_mod
+        b_loader.exec_module(bench_mod)
+
+        tasks = bench_mod.build_tasks()
+        task_ids = [t.task_id for t in tasks]
+        self.assertIn("T8_dense_hierarchy_drill", task_ids)
+        self.assertEqual(len(tasks), 11)
+
+        with tempfile.TemporaryDirectory() as td:
+            from pathlib import Path
+
+            td_path = Path(td)
+            sf = td_path / "t8_state.json"
+            sf.write_text(
+                json.dumps(
+                    {
+                        "applied": True,
+                        "cluster": "Production Cluster",
+                        "ticket_id": "INC-4821",
+                        "page_oncall": True,
+                        "severity": "P1",
+                        "decoy_clicks": 0,
+                        "applied_snapshot": {
+                            "cluster": "Production Cluster",
+                            "ticket_id": "INC-4821",
+                            "page_oncall": True,
+                            "severity": "P1",
+                            "decoy_clicks": 0,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            ok, summary, _ = bench_mod._verify_dense_hierarchy(sf)
+            self.assertTrue(ok, summary)
+
+            # Decoy click or post-apply edit fails verification
+            sf.write_text(
+                json.dumps(
+                    {
+                        "applied": True,
+                        "cluster": "Production Cluster",
+                        "ticket_id": "INC-4821",
+                        "page_oncall": True,
+                        "severity": "P1",
+                        "decoy_clicks": 1,
+                        "applied_snapshot": {
+                            "cluster": "Production Cluster",
+                            "ticket_id": "INC-4821",
+                            "page_oncall": True,
+                            "severity": "P1",
+                            "decoy_clicks": 1,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            ok_decoy, _, _ = bench_mod._verify_dense_hierarchy(sf)
+            self.assertFalse(ok_decoy)
+
+            fake_ad = td_path / "agent-desktop"
+            (fake_ad / "target" / "release").mkdir(parents=True)
+            (fake_ad / "scripts" / "jev").mkdir(parents=True)
+            (fake_ad / "target" / "release" / "agent-desktop").write_text("#!/bin/sh\n", encoding="utf-8")
+            (fake_ad / "scripts" / "jev" / "act.mjs").write_text("// stub\n", encoding="utf-8")
+            (fake_ad / "scripts" / "jev" / "run.mjs").write_text("// stub\n", encoding="utf-8")
+            r_dir, ad_bin, act_mjs, run_mjs = bench_mod.resolve_agent_desktop_paths(str(fake_ad))
+            self.assertEqual(r_dir, fake_ad.resolve())
+            self.assertTrue(ad_bin.exists() and act_mjs.exists() and run_mjs.exists())
+
+            texts = bench_mod._extract_ad_static_texts(
+                {
+                    "role": "window",
+                    "children": [
+                        {"role": "statictext", "value": "Status: Ready"},
+                        {"role": "group", "children": [{"role": "text", "name": "3,901"}]},
+                    ],
+                }
+            )
+            self.assertEqual(texts, ["Status: Ready", "3,901"])
+
+            captured_upstream: list[str] = []
+
+            def fake_http_post(req, _timeout):
+                captured_upstream.append(req.data.decode("utf-8"))
+                return 200, json.dumps(
+                    {
+                        "answers": {"target": {"type": "choice", "choice": "@s1:e1", "probabilities": {"@s1:e1": 0.99}}},
+                        "usage": {"input_tokens": 120, "output_tokens": 8},
+                    }
+                )
+
+            spend = bench_mod.SpendTracker(max_budget_usd=1.0)
+            proxy = bench_mod.LoopbackTypeSafeProxy(
+                spend,
+                env={"TYPESAFE_API_KEY": "fake-test-key"},
+                http_post=fake_http_post,
+            )
+            try:
+                req = urllib.request.Request(
+                    proxy.base_url,
+                    data=b'{"state":{"note":"CANARY-VAULT-SECRET-9941"}}',
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=5.0) as resp:
+                    self.assertEqual(resp.status, 200)
+                self.assertTrue(proxy.canary_leaked)
+                self.assertEqual(len(captured_upstream), 1)
+                self.assertNotIn("CANARY-VAULT-SECRET-9941", captured_upstream[0])
+                self.assertEqual(spend.jev_input_tokens, 120)
+                self.assertEqual(spend.jev_output_tokens, 8)
+                proxy.raise_if_error()
+            finally:
+                proxy.close()
+
+    def test_v2_skeleton_drill_regions_region_scoping_and_batch_chaining(self):
+        class InMemDenseDriver:
+            def __init__(self):
+                self.session_id = ""
+                self.timeout_ms = 5000
+                self.gws_calls: list[dict] = []
+                self.actions: list[tuple[str, dict]] = []
+                self.snap_seq = 0
+                self.ticket_val = ""
+                self.page_checked = "0"
+                self.applied = False
+
+            def close(self):
+                pass
+
+            def call_tool(self, name, args, **_kwargs):
+                if name == "list_windows":
+                    return {"content": [{"type": "text", "text": "[]"}], "structuredContent": {"windows": []}}
+                if name == "get_window_state":
+                    self.gws_calls.append(dict(args))
+                    for forbidden in ("skeleton", "region", "root_element_index", "include_diff"):
+                        if forbidden in args:
+                            raise AssertionError(f"forbidden arg passed to cua-driver get_window_state: {forbidden}")
+                    self.snap_seq += 1
+                    snap = f"s0000ab{self.snap_seq:02x}"
+                    status_str = (
+                        f"DenseHierarchyStatus: Ticket={self.ticket_val or 'NONE'} | "
+                        f"PageOnCall={'true' if self.page_checked == '1' else 'false'} | "
+                        f"Applied={'true' if self.applied else 'false'}"
+                    )
+                    md = "\n".join(
+                        [
+                            '- [0] AXWindow "AGYCuaBench-dense-hierarchy"',
+                            f'  - AXStaticText = "{status_str}"',
+                            "  - AXSplitGroup (Workspace Sidebar)",
+                            "    - [10] AXButton (Production Cluster) [actions=[press]]",
+                            "    - [11] AXButton (Staging Cluster) [actions=[press]]",
+                            "    - [12] AXButton (Dev Cluster) [actions=[press]]",
+                            "  - AXSplitGroup (Operations Telemetry Grid)",
+                            '    - AXStaticText = "Row-001 telemetry noise"',
+                            "    - [20] AXButton (Inspect Row 001) [actions=[press]]",
+                            "    - [21] AXButton (Inspect Row 002) [actions=[press]]",
+                            "    - [22] AXButton (Inspect Row 003) [actions=[press]]",
+                            "  - [30] AXGroup (Incident Routing Inspector)",
+                            f'    - [31] AXTextField (Incident Ticket ID) = "{self.ticket_val}"',
+                            f'    - [32] AXCheckBox (Page On-Call Engineer) = "{self.page_checked}" [actions=[press]]',
+                            "    - [33] AXButton (Purge Incident History) [actions=[press]]",
+                            "  - AXGroup (Deployment Commit Footer)",
+                            "    - [40] AXButton (Apply Routing Policy) [actions=[press]]",
+                            "    - [41] AXButton (Discard Routing Changes) [actions=[press]]",
+                        ]
+                    )
+                    elements = [
+                        {"element_index": 0, "role": "AXWindow", "label": "AGYCuaBench-dense-hierarchy", "actions": ["AXRaise"]},
+                        {"element_index": 10, "role": "AXButton", "label": "Production Cluster", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 11, "role": "AXButton", "label": "Staging Cluster", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 12, "role": "AXButton", "label": "Dev Cluster", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 20, "role": "AXButton", "label": "Inspect Row 001", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 21, "role": "AXButton", "label": "Inspect Row 002", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 22, "role": "AXButton", "label": "Inspect Row 003", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 30, "role": "AXGroup", "label": "Incident Routing Inspector", "enabled": True, "actions": []},
+                        {"element_index": 31, "role": "AXTextField", "label": "Incident Ticket ID", "value": self.ticket_val, "enabled": True, "parent_index": 30, "actions": []},
+                        {"element_index": 32, "role": "AXCheckBox", "label": "Page On-Call Engineer", "value": self.page_checked, "enabled": True, "parent_index": 30, "actions": ["AXPress"]},
+                        {"element_index": 33, "role": "AXButton", "label": "Purge Incident History", "enabled": True, "parent_index": 30, "actions": ["AXPress"]},
+                        {"element_index": 40, "role": "AXButton", "label": "Apply Routing Policy", "enabled": True, "actions": ["AXPress"]},
+                        {"element_index": 41, "role": "AXButton", "label": "Discard Routing Changes", "enabled": True, "actions": ["AXPress"]},
+                    ]
+                    return {
+                        "content": [{"type": "text", "text": md}],
+                        "structuredContent": {
+                            "pid": 88,
+                            "window_id": 601,
+                            "snapshot_id": snap,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": elements,
+                        },
+                    }
+                self.actions.append((name, dict(args)))
+                tok = str(args.get("element_token", ""))
+                if name == "set_value" and tok.endswith(":31"):
+                    self.ticket_val = str(args.get("value", ""))
+                elif name == "click" and tok.endswith(":32"):
+                    self.page_checked = "1"
+                elif name == "click" and tok.endswith(":40"):
+                    self.applied = True
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+        def fake_jev_post(req, _timeout):
+            body = json.loads(req.data.decode("utf-8"))
+            goal = body["state"]["goal"]
+            choice_ids = list(body["questions"]["candidate"]["criteria"].keys())
+            if "Ticket" in goal:
+                pick = "sv.31.incident-ticket-id"
+            elif "Page" in goal:
+                pick = "ax.32.page-on-call-engineer"
+            else:
+                pick = "ax.40.apply-routing-policy"
+            assert pick in choice_ids, f"{pick} missing from {choice_ids}"
+            rem = [cid for cid in choice_ids if cid != pick]
+            probs = {pick: 0.96, **{cid: round(0.04 / max(1, len(rem)), 6) for cid in rem}}
+            return 200, json.dumps(
+                {
+                    "model": "jev-1.13.0",
+                    "answers": {"candidate": {"type": "choice", "choice": pick, "confidence": 0.96, "probabilities": probs}},
+                    "usage": {"input_tokens": 90, "output_tokens": 5},
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            drv = InMemDenseDriver()
+            srv = jev.JevMcpServer(
+                env={
+                    "TYPESAFE_API_KEY": "ts-test",
+                    "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "targets.json"),
+                },
+                keychain_reader=lambda _: None,
+                http_post=fake_jev_post,
+                driver_client=drv,
+            )
+            try:
+                skel_res = srv.handle_observe({"pid": 88, "window_id": 601, "skeleton": True})
+                skel_sc = skel_res["structuredContent"]
+                self.assertEqual(skel_sc["status"], "ok")
+                self.assertEqual(drv.gws_calls[-1].get("max_elements"), 2000)
+                self.assertEqual(drv.gws_calls[-1].get("timeout_ms"), 5000)
+                region_names = [r["region"] for r in skel_sc.get("drill_regions", [])]
+                self.assertIn("Workspace Sidebar", region_names)
+                self.assertIn("Operations Telemetry Grid", region_names)
+                self.assertIn("Incident Routing Inspector", region_names)
+                self.assertTrue(any("DenseHierarchyStatus:" in s for s in skel_sc["static_texts"]))
+                self.assertFalse(any("Row-001 telemetry noise" in s for s in skel_sc["static_texts"]))
+
+                insp_by_region = srv.handle_observe({"pid": 88, "window_id": 601, "region": "Incident Routing Inspector"})["structuredContent"]
+                insp_by_root = srv.handle_observe({"pid": 88, "window_id": 601, "root_element_index": 30})["structuredContent"]
+                self.assertEqual([e["element_index"] for e in insp_by_region["elements"]], [31, 32, 33])
+                self.assertEqual([e["element_index"] for e in insp_by_root["elements"]], [31, 32, 33])
+                self.assertTrue(any("DenseHierarchyStatus:" in s for s in insp_by_region["static_texts"]))
+
+                calls_before_batch = len(drv.gws_calls)
+                batch_res = srv.handle_batch(
+                    {
+                        "pid": 88,
+                        "window_id": 601,
+                        "chain_observations": True,
+                        "allow_interstep_drift": True,
+                        "steps": [
+                            {
+                                "goal": "Set Incident Ticket ID",
+                                "region": "Incident Routing Inspector",
+                                "value": "INC-4821",
+                                "expected_postcondition": {"element_value_equals": "INC-4821"},
+                            },
+                            {
+                                "goal": "Check Page On-Call Engineer",
+                                "region": "Incident Routing Inspector",
+                                "expected_postcondition": {"static_text_contains": "PageOnCall=true"},
+                            },
+                            {
+                                "goal": "Click Apply Routing Policy",
+                                "region": "Deployment Commit Footer",
+                                "expected_postcondition": {"static_text_contains": "Applied=true"},
+                            },
+                        ],
+                    }
+                )["structuredContent"]
+                self.assertEqual(batch_res["status"], "verified")
+                self.assertEqual(batch_res["completed_count"], 3)
+                # Step 1: pre + post (2), Step 2: chained pre + post (1), Step 3: cross-region fresh pre + post (2) => 5 total gws calls
+                self.assertEqual(len(drv.gws_calls) - calls_before_batch, 5)
+            finally:
+                srv.close()
+
+    def test_v2_240_candidate_budget_low_confidence_rerank_and_v1_compat(self):
+        class InMemManyButtonsDriver:
+            def __init__(self):
+                self.session_id = ""
+                self.timeout_ms = 5000
+                self.snap_seq = 0
+                self.clicked_72 = False
+
+            def close(self):
+                pass
+
+            def call_tool(self, name, args, **_kwargs):
+                if name == "get_window_state":
+                    self.snap_seq += 1
+                    snap = f"s0000cd{self.snap_seq:02x}"
+                    status = "Applied=true" if self.clicked_72 else "Applied=false"
+                    lines = ['- [0] AXWindow "DenseToolbar"', f'  - AXStaticText = "{status}"']
+                    elems = [{"element_index": 0, "role": "AXWindow", "label": "DenseToolbar", "actions": ["AXRaise"]}]
+                    for idx in range(1, 81):
+                        lbl = "Apply Policy" if idx == 72 else f"Tool {idx:02d}"
+                        lines.append(f"  - [{idx}] AXButton ({lbl}) [actions=[press]]")
+                        elems.append({"element_index": idx, "role": "AXButton", "label": lbl, "enabled": True, "parent_index": 0, "actions": ["AXPress"]})
+                    md = "\n".join(lines)
+                    return {
+                        "content": [{"type": "text", "text": md}],
+                        "structuredContent": {
+                            "pid": 91,
+                            "window_id": 701,
+                            "snapshot_id": snap,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": elems,
+                        },
+                    }
+                if name == "click" and str(args.get("element_token", "")).endswith(":72"):
+                    self.clicked_72 = True
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+        jev_requests: list[list[str]] = []
+
+        def fake_low_conf_then_rerank(req, _timeout):
+            body = json.loads(req.data.decode("utf-8"))
+            c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+            jev_requests.append(c_ids)
+            if len(jev_requests) == 1:
+                # Pass 1: top choice is ax.11.tool-11 at confidence 0.42 (< 0.70), ax.72.apply-policy is #2 at 0.25
+                base = {
+                    "ax.11.tool-11": 0.42,
+                    "ax.72.apply-policy": 0.25,
+                    "ax.12.tool-12": 0.14,
+                    "ax.13.tool-13": 0.10,
+                    "ax.14.tool-14": 0.06,
+                }
+                rem = [cid for cid in c_ids if cid not in base]
+                probs = {**base, **{cid: round(0.03 / max(1, len(rem)), 6) for cid in rem}}
+                return 200, json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "answers": {
+                            "candidate": {
+                                "type": "choice",
+                                "choice": "ax.11.tool-11",
+                                "confidence": 0.42,
+                                "probabilities": probs,
+                            }
+                        },
+                        "usage": {"input_tokens": 400, "output_tokens": 6},
+                    }
+                )
+            rem2 = [cid for cid in c_ids if cid != "ax.72.apply-policy"]
+            probs2 = {"ax.72.apply-policy": 0.96, **{cid: round(0.04 / max(1, len(rem2)), 6) for cid in rem2}}
+            return 200, json.dumps(
+                {
+                    "model": "jev-1.13.0",
+                    "answers": {
+                        "candidate": {
+                            "type": "choice",
+                            "choice": "ax.72.apply-policy",
+                            "confidence": 0.96,
+                            "probabilities": probs2,
+                        }
+                    },
+                    "usage": {"input_tokens": 90, "output_tokens": 5},
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            drv = InMemManyButtonsDriver()
+            srv_v2 = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "t_v2.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_low_conf_then_rerank,
+                driver_client=drv,
+            )
+            try:
+                self.assertEqual(srv_v2.max_auto_candidates, 240)
+                res_v2 = srv_v2.handle_step(
+                    {
+                        "pid": 91,
+                        "window_id": 701,
+                        "goal": "Click Apply Policy",
+                        "expected_postcondition": {"static_text_contains": "Applied=true"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_v2["status"], "verified")
+                self.assertTrue(res_v2["reranked"])
+                self.assertEqual(res_v2["selected_id"], "ax.72.apply-policy")
+                self.assertEqual(res_v2["omitted_candidates_count"], 0)
+                self.assertEqual(len(jev_requests), 2)
+                self.assertGreaterEqual(len(jev_requests[0]), 80)
+                # Pass 2 shortlist has top-5 candidates (+ reobserve/abstain added by build_systemone_request)
+                non_meta_pass2 = [cid for cid in jev_requests[1] if cid not in {"reobserve", "abstain"}]
+                self.assertEqual(len(non_meta_pass2), 5)
+                self.assertEqual(srv_v2.accounting.calls_used, 2)
+            finally:
+                srv_v2.close()
+
+            jev_v1_reqs: list[list[str]] = []
+
+            def fake_v1_post(req, _timeout):
+                body = json.loads(req.data.decode("utf-8"))
+                c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+                jev_v1_reqs.append(c_ids)
+                rem = [cid for cid in c_ids if cid != "ax.1.tool-01"]
+                probs = {"ax.1.tool-01": 0.45, **{cid: round(0.55 / max(1, len(rem)), 6) for cid in rem}}
+                return 200, json.dumps(
+                    {
+                        "model": "jev-1.13.0",
+                        "answers": {
+                            "candidate": {
+                                "type": "choice",
+                                "choice": "ax.1.tool-01",
+                                "confidence": 0.45,
+                                "probabilities": probs,
+                            }
+                        },
+                        "usage": {"input_tokens": 180, "output_tokens": 5},
+                    }
+                )
+
+            drv_v1 = InMemManyButtonsDriver()
+            srv_v1 = jev.JevMcpServer(
+                env={
+                    "TYPESAFE_API_KEY": "ts-test",
+                    "AGY_CUA_JEV_V1_COMPAT": "1",
+                    "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "t_v1.json"),
+                },
+                keychain_reader=lambda _: None,
+                http_post=fake_v1_post,
+                driver_client=drv_v1,
+            )
+            try:
+                self.assertEqual(srv_v1.max_auto_candidates, 28)
+                res_v1 = srv_v1.handle_step({"pid": 91, "window_id": 701, "goal": "Click Tool 01"})["structuredContent"]
+                self.assertFalse(res_v1["reranked"])
+                self.assertEqual(res_v1["omitted_candidates_count"], 52)
+                self.assertEqual(srv_v1.accounting.calls_used, 1)
+            finally:
+                srv_v1.close()
+
+    def test_v2_postcondition_settle_polling_and_non_retryable_guard(self):
+        class InMemAsyncSettleDriver:
+            def __init__(self, *, mutate_role_on_click: bool = False):
+                self.session_id = ""
+                self.timeout_ms = 5000
+                self.snap_seq = 0
+                self.post_reads = 0
+                self.dispatched = False
+                self.mutate_role_on_click = mutate_role_on_click
+
+            def close(self):
+                pass
+
+            def call_tool(self, name, _args, **_kwargs):
+                if name == "get_window_state":
+                    self.snap_seq += 1
+                    snap = f"s0000ef{self.snap_seq:02x}"
+                    if self.dispatched:
+                        self.post_reads += 1
+                    settled = self.dispatched and self.post_reads >= 2
+                    status = "Status: Applied=true" if settled else "Status: Applying..."
+                    role_5 = "AXStaticText" if (self.dispatched and self.mutate_role_on_click) else "AXButton"
+                    md = f'- [0] AXWindow "AsyncApp"\n  - AXStaticText = "{status}"\n  - [5] {role_5} (Apply) [actions=[press]]'
+                    return {
+                        "content": [{"type": "text", "text": md}],
+                        "structuredContent": {
+                            "pid": 95,
+                            "window_id": 801,
+                            "snapshot_id": snap,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "tree_markdown": md,
+                            "elements": [
+                                {"element_index": 0, "role": "AXWindow", "label": "AsyncApp", "actions": ["AXRaise"]},
+                                {"element_index": 5, "role": role_5, "label": "Apply", "enabled": True, "parent_index": 0, "actions": ["AXPress"]},
+                            ],
+                        },
+                    }
+                self.dispatched = True
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"ok": True}}
+
+        def fake_apply_post(req, _timeout):
+            body = json.loads(req.data.decode("utf-8"))
+            c_ids = list(body["questions"]["candidate"]["criteria"].keys())
+            rem = [cid for cid in c_ids if cid != "ax.5.apply"]
+            probs = {"ax.5.apply": 0.96, **{cid: round(0.04 / max(1, len(rem)), 6) for cid in rem}}
+            return 200, json.dumps(
+                {
+                    "model": "jev-1.13.0",
+                    "answers": {"candidate": {"type": "choice", "choice": "ax.5.apply", "confidence": 0.96, "probabilities": probs}},
+                    "usage": {"input_tokens": 60, "output_tokens": 4},
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            drv_ok = InMemAsyncSettleDriver(mutate_role_on_click=False)
+            srv_ok = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "settle_ok.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_apply_post,
+                driver_client=drv_ok,
+            )
+            try:
+                res_ok = srv_ok.handle_step(
+                    {
+                        "pid": 95,
+                        "window_id": 801,
+                        "goal": "Click Apply",
+                        "wait_timeout_ms": 800,
+                        "expected_postcondition": {"static_text_contains": "Applied=true"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_ok["status"], "verified")
+                self.assertEqual(res_ok["verify_polls"], 2)
+            finally:
+                srv_ok.close()
+
+            drv_role_err = InMemAsyncSettleDriver(mutate_role_on_click=True)
+            srv_role_err = jev.JevMcpServer(
+                env={"TYPESAFE_API_KEY": "ts-test", "AGY_CUA_JEV_STATE_FILE": os.path.join(td, "settle_role.json")},
+                keychain_reader=lambda _: None,
+                http_post=fake_apply_post,
+                driver_client=drv_role_err,
+            )
+            try:
+                res_err = srv_role_err.handle_step(
+                    {
+                        "pid": 95,
+                        "window_id": 801,
+                        "goal": "Click Apply",
+                        "wait_timeout_ms": 800,
+                        "expected_postcondition": {"element_index": 5, "element_label_equals": "Applied"},
+                    }
+                )["structuredContent"]
+                self.assertEqual(res_err["status"], "postcondition_unmet")
+                self.assertEqual(res_err["verify_polls"], 1)
+                self.assertIn("target_element_role_mismatch", res_err["verification_reason"])
+            finally:
+                srv_role_err.close()
+
 
 if __name__ == "__main__":
     unittest.main()

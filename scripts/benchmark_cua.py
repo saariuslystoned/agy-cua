@@ -376,6 +376,8 @@ FIXTURE_INFO_PLIST_XML = f"""<?xml version="1.0" encoding="UTF-8"?>
     <string>1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <key>LSUIElement</key>
+    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>
@@ -402,18 +404,24 @@ def ensure_fixture_binary() -> Path:
 
 
 def sample_frontmost_info() -> tuple[int | None, str | None]:
-    try:
-        out = subprocess.check_output([str(PROBE_FOCUS_SH)], text=True, timeout=2.0)
-        parsed = json.loads(out)
-        front_pid = parsed.get("front_pid")
-        front_bundle = parsed.get("front_bundle")
-        if isinstance(front_pid, bool) or not isinstance(front_pid, (int, float)) or int(front_pid) <= 0:
+    for attempt in range(2):
+        try:
+            out = subprocess.check_output([str(PROBE_FOCUS_SH)], text=True, timeout=3.5)
+            parsed = json.loads(out)
+            front_pid = parsed.get("front_pid")
+            front_bundle = parsed.get("front_bundle")
+            if isinstance(front_pid, bool) or not isinstance(front_pid, (int, float)) or int(front_pid) <= 0:
+                return None, None
+            # Unbundled executables (the Swift fixture) report a null bundle id; the pid stays authoritative.
+            bundle = front_bundle.strip() if isinstance(front_bundle, str) else ""
+            return int(front_pid), bundle
+        except subprocess.TimeoutExpired:
+            if attempt == 0:
+                continue
             return None, None
-        # Unbundled executables (the Swift fixture) report a null bundle id; the pid stays authoritative.
-        bundle = front_bundle.strip() if isinstance(front_bundle, str) else ""
-        return int(front_pid), bundle
-    except Exception:
-        return None, None
+        except Exception:
+            return None, None
+    return None, None
 
 
 class FocusMonitor:
@@ -502,12 +510,104 @@ def get_window_screenshot_and_size(driver: jev_mod.DriverClient, pid: int, windo
     return png_bytes, w, h, ws
 
 
+_MACOS_CG_HANDLES: tuple[Any, Any] | None = None
+
+
+def _wake_macos_app_nap(pid: int) -> None:
+    """Post a no-op Shift key-up CGEvent to `pid` so occluded background SwiftUI apps exit App Nap."""
+    if sys.platform != "darwin" or not isinstance(pid, int) or pid <= 0:
+        return
+    global _MACOS_CG_HANDLES
+    try:
+        import ctypes
+
+        if _MACOS_CG_HANDLES is None:
+            app_svc = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+            app_svc.CGEventCreateKeyboardEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_bool]
+            app_svc.CGEventCreateKeyboardEvent.restype = ctypes.c_void_p
+            app_svc.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+            app_svc.CGEventPostToPid.argtypes = [ctypes.c_int32, ctypes.c_void_p]
+            cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+            cf.CFRelease.argtypes = [ctypes.c_void_p]
+            _MACOS_CG_HANDLES = (app_svc, cf)
+        app_svc, cf = _MACOS_CG_HANDLES
+        ev = app_svc.CGEventCreateKeyboardEvent(None, 56, False)
+        if ev:
+            app_svc.CGEventSetFlags(ev, 0)
+            app_svc.CGEventPostToPid(pid, ev)
+            cf.CFRelease(ev)
+    except Exception:
+        pass
+
+
+class AppNapKeepAlive:
+    """Keeps an occluded background macOS app responsive to AX IPC across multi-second LLM thinking pauses."""
+
+    def __init__(self, pid: int, *, enabled: bool = True, interval_s: float = 0.8) -> None:
+        self.pid = pid
+        self.enabled = enabled
+        self.interval_s = interval_s
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            _wake_macos_app_nap(self.pid)
+            self._stop.wait(self.interval_s)
+
+    def __enter__(self) -> AppNapKeepAlive:
+        if self.enabled:
+            _wake_macos_app_nap(self.pid)
+            time.sleep(0.05)
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.5)
+
+
+def _read_window_observation_resilient(
+    driver: jev_mod.DriverClient,
+    pid: int,
+    window_id: int,
+    *,
+    timeout_ms: int = 5000,
+    attempts: int = 3,
+) -> dict[str, Any]:
+    last_err: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        _wake_macos_app_nap(pid)
+        time.sleep(0.04)
+        ws = driver.call_tool(
+            "get_window_state",
+            {
+                "pid": pid,
+                "window_id": window_id,
+                "include_screenshot": False,
+                "tree_format": "both",
+                "timeout_ms": timeout_ms,
+            },
+        )
+        try:
+            return jev_mod.extract_window_observation(ws, expected_pid=pid, expected_window_id=window_id)
+        except ValueError as exc:
+            last_err = exc
+            if attempt + 1 < attempts:
+                time.sleep(0.25)
+    assert last_err is not None
+    raise last_err
+
+
 def reset_calculator(driver: jev_mod.DriverClient, pid: int, window_id: int, *, seed_dirty: str | None = None) -> None:
-    # Press Escape to clear Calculator to 0
+    _wake_macos_app_nap(pid)
+    time.sleep(0.05)
+    # Press Escape to dismiss any open popup menu and clear Calculator to 0
     driver.call_tool("press_key", {"pid": pid, "window_id": window_id, "key": "escape", "delivery_mode": "background"})
-    time.sleep(0.15)
-    ws = driver.call_tool("get_window_state", {"pid": pid, "window_id": window_id, "include_screenshot": False, "tree_format": "both"})
-    obs = jev_mod.extract_window_observation(ws, expected_pid=pid, expected_window_id=window_id)
+    time.sleep(0.20)
+    obs = _read_window_observation_resilient(driver, pid, window_id, timeout_ms=5000, attempts=3)
     clear_cands = [c for c in obs["auto_candidates"] if any(k in c["id"] for k in ("all-clear", "clear"))]
     if clear_cands:
         driver.call_tool(
@@ -519,9 +619,23 @@ def reset_calculator(driver: jev_mod.DriverClient, pid: int, window_id: int, *, 
                 "delivery_mode": "background",
             },
         )
+        time.sleep(0.20)
     if seed_dirty:
-        driver.call_tool("type_text", {"pid": pid, "window_id": window_id, "text": seed_dirty, "delivery_mode": "background"})
-        time.sleep(0.15)
+        for ch in str(seed_dirty):
+            cur = _read_window_observation_resilient(driver, pid, window_id, timeout_ms=5000, attempts=3)
+            snap = cur["snapshot_id"]
+            digit_el = next((e for e in cur["all_elements"] if e.get("label") == ch), None)
+            if digit_el is not None:
+                driver.call_tool(
+                    "click",
+                    {
+                        "pid": pid,
+                        "window_id": window_id,
+                        "element_token": f"{snap}:{digit_el['element_index']}",
+                        "delivery_mode": "background",
+                    },
+                )
+                time.sleep(0.18)
 
 
 def verify_calculator_display(
@@ -532,8 +646,7 @@ def verify_calculator_display(
     _state_file: Path | None,
     _canary_leaked: bool,
 ) -> tuple[bool, str, dict[str, Any]]:
-    ws = driver.call_tool("get_window_state", {"pid": pid, "window_id": window_id, "include_screenshot": False, "tree_format": "both"})
-    obs = jev_mod.extract_window_observation(ws, expected_pid=pid, expected_window_id=window_id)
+    obs = _read_window_observation_resilient(driver, pid, window_id, timeout_ms=5000, attempts=3)
     texts = obs.get("static_texts") or []
     display = texts[-1] if texts else ""
     ok = jev_mod._static_text_exact_match(expected_str, display)
@@ -712,6 +825,25 @@ def build_tasks() -> list[TaskSpec]:
             max_outer_steps=12,
             use_loopback_portal=True,
         ),
+        TaskSpec(
+            task_id="T8_dense_hierarchy_drill",
+            tier="T8",
+            title="1,500-Node 4-Region Enterprise Workspace (Skeleton + Subtree Drill + Multi-Control Commit)",
+            target_kind="fixture",
+            fixture_mode="dense-hierarchy",
+            prompt=(
+                "In this Enterprise Incident Operations Workspace window (which contains 1,500+ AX nodes across 4 nested regions, "
+                "including a 336-row Operations Telemetry Grid in the middle):\n"
+                "1. In 'Workspace Sidebar', click 'Production Cluster'.\n"
+                "2. In 'Incident Routing Inspector', set 'Incident Ticket ID' to 'INC-4821', check 'Page On-Call Engineer', and select 'Severity P1'.\n"
+                "3. In 'Deployment Commit Footer', click 'Apply Routing Policy' and confirm the status text shows "
+                "'DenseHierarchyStatus: Cluster=Production Cluster | Ticket=INC-4821 | PageOnCall=true | Severity=P1 | Applied=true | DecoyClicks=0'.\n"
+                "Do NOT click any 'Tag Filter', 'Inspect Row', 'Purge Incident History', or 'Discard Routing Changes' buttons."
+            ),
+            setup_fn=None,
+            verify_fn=lambda _drv, _pid, _wid, sf, _leaked: _verify_dense_hierarchy(sf),
+            max_outer_steps=14,
+        ),
     ]
 
 
@@ -864,6 +996,30 @@ def _verify_1password_browser(sf: Path | None, canary_leaked: bool) -> tuple[boo
         f"portal_signed_in={p_st.get('signed_in')} user={p_st.get('username')!r} ticket={p_st.get('ticket')!r} "
         f"pw_touched={p_st.get('password_touched')} leaked={canary_leaked}"
     ), combined
+
+
+def _verify_dense_hierarchy(sf: Path | None) -> tuple[bool, str, dict[str, Any]]:
+    if not sf or not sf.exists():
+        return False, "missing state file", {}
+    st = json.loads(sf.read_text(encoding="utf-8"))
+    snap = st.get("applied_snapshot") if isinstance(st.get("applied_snapshot"), Mapping) else {}
+    ok = (
+        st.get("applied") is True
+        and st.get("cluster") == "Production Cluster"
+        and st.get("ticket_id") == "INC-4821"
+        and st.get("page_oncall") is True
+        and st.get("severity") == "P1"
+        and st.get("decoy_clicks", 99) == 0
+        and snap.get("cluster") == "Production Cluster"
+        and snap.get("ticket_id") == "INC-4821"
+        and snap.get("page_oncall") is True
+        and snap.get("severity") == "P1"
+        and snap.get("decoy_clicks", 99) == 0
+    )
+    return ok, (
+        f"cluster={st.get('cluster')!r} ticket={st.get('ticket_id')!r} page={st.get('page_oncall')} "
+        f"sev={st.get('severity')!r} applied={st.get('applied')} decoys={st.get('decoy_clicks')}"
+    ), st
 
 
 class ArmActionError(RuntimeError):
@@ -1245,20 +1401,25 @@ def run_arm_agy_cua_direct(
     if task.initial_max_elements is not None:
         gws0_args["max_elements"] = task.initial_max_elements
     ws0 = driver.call_tool("get_window_state", gws0_args)
-    obs0 = jev_mod.extract_window_observation(ws0, expected_pid=pid, expected_window_id=active_wid)
+    try:
+        obs0 = jev_mod.extract_window_observation(ws0, expected_pid=pid, expected_window_id=active_wid)
+    except ValueError as exc:
+        raise ArmActionError(str(exc)) from exc
     obs0_ms = round((time.perf_counter() - t_obs0) * 1000, 2)
     canary_leaked = audit_observation_for_canary(obs0)
 
     fn_decls = [
         types.FunctionDeclaration(
             name="get_window_state",
-            description="Read fresh AX elements and snapshot_id for the background window. Supports optional query filter, max_elements budget, or include_screenshot=true.",
+            description="Read fresh AX elements and snapshot_id for the background window. Supports optional query filter, max_elements, max_depth, timeout_ms, or include_screenshot=true.",
             parameters=types.Schema(
                 type=types.Type.OBJECT,
                 properties={
                     "window_id": types.Schema(type=types.Type.INTEGER, description="Optional window_id override (defaults to current window)."),
                     "query": types.Schema(type=types.Type.STRING, description="Optional substring query to filter AX elements when observation_truncated is true."),
-                    "max_elements": types.Schema(type=types.Type.INTEGER, description="Optional element cap (1..1000, e.g. 120)."),
+                    "max_elements": types.Schema(type=types.Type.INTEGER, description="Optional element cap (1..2000, e.g. 120 or 500)."),
+                    "max_depth": types.Schema(type=types.Type.INTEGER, description="Optional walk depth cap (e.g. 3 or 4 for shallow overview)."),
+                    "timeout_ms": types.Schema(type=types.Type.INTEGER, description="Optional AX walk wall-clock budget in ms (default 1000; raise to 5000 on 1,000+ node windows)."),
                     "include_screenshot": types.Schema(type=types.Type.BOOLEAN, description="Set true when visual_fallback_recommended is true to inspect the window PNG."),
                 },
             ),
@@ -1363,11 +1524,19 @@ def run_arm_agy_cua_direct(
 
     direct_tools = types.Tool(function_declarations=fn_decls)
 
-    def format_obs(obs: Mapping[str, Any], wid_val: int) -> str:
+    def format_obs(obs: Mapping[str, Any], wid_val: int, *, req_max_elements: int | None = None) -> str:
         nonlocal canary_leaked
         if audit_observation_for_canary(obs):
             canary_leaked = True
         snap = obs["snapshot_id"]
+        els = list(obs.get("elements") or [])
+        if req_max_elements is not None and req_max_elements > len(els):
+            all_els = [
+                e for e in (obs.get("all_elements") or [])
+                if e.get("can_click") or "set_value" in (e.get("supported_actions") or [])
+            ]
+            if len(all_els) > len(els):
+                els = all_els[:req_max_elements]
         lines = [
             f"snapshot_id: {snap} (pid={pid}, window_id={wid_val})",
             f"observation_truncated: {obs.get('observation_truncated', False)} (omitted_elements_count={obs.get('omitted_elements_count', 0)}, query_status={obs.get('query_status')!r})",
@@ -1377,7 +1546,7 @@ def run_arm_agy_cua_direct(
         if obs.get("visual_fallback_recommended") and obs.get("window_bounds"):
             lines.append(f"window_bounds (screenshot pixel bounds): {json.dumps(obs.get('window_bounds'))}")
         lines.append("elements:")
-        for e in obs.get("elements") or []:
+        for e in els:
             val_part = f" value={json.dumps(e['value'])}" if "value" in e else ""
             lines.append(
                 f"  - [{e['element_index']}] token={snap}:{e['element_index']} {e['role']} label={json.dumps(e['label'])} state={e['state']}{val_part}"
@@ -1484,7 +1653,10 @@ def run_arm_agy_cua_direct(
                     time.sleep(0.5)
                     active_wid = other_wids[0]
                 ws = driver.call_tool("get_window_state", {"pid": pid, "window_id": active_wid, "include_screenshot": False, "tree_format": "both"})
-                obs = jev_mod.extract_window_observation(ws, expected_pid=pid, expected_window_id=active_wid)
+                try:
+                    obs = jev_mod.extract_window_observation(ws, expected_pid=pid, expected_window_id=active_wid)
+                except ValueError as exc:
+                    raise ArmActionError(str(exc)) from exc
                 observe_latencies_ms.append(round((time.perf_counter() - t_o) * 1000, 2))
                 step_latencies_ms.append(round((time.perf_counter() - step_t0) * 1000, 2))
                 state_text = format_obs(obs, active_wid)
@@ -1639,8 +1811,14 @@ def run_arm_agy_cua_direct(
             q_arg = args.get("query") if name == "get_window_state" else None
             if isinstance(q_arg, str) and q_arg.strip():
                 gws_args["query"] = q_arg.strip()
+            req_max_el: int | None = None
             if name == "get_window_state" and args.get("max_elements") is not None:
-                gws_args["max_elements"] = int(args["max_elements"])
+                req_max_el = int(args["max_elements"])
+                gws_args["max_elements"] = req_max_el
+            if name == "get_window_state" and args.get("max_depth") is not None:
+                gws_args["max_depth"] = int(args["max_depth"])
+            if name == "get_window_state" and args.get("timeout_ms") is not None:
+                gws_args["timeout_ms"] = int(args["timeout_ms"])
             ws = driver.call_tool("get_window_state", gws_args)
             if want_png:
                 for c in ws.get("content") or []:
@@ -1654,16 +1832,19 @@ def run_arm_agy_cua_direct(
                             )
                         )
                         break
-            obs = jev_mod.extract_window_observation(
-                ws,
-                expected_pid=pid,
-                expected_window_id=active_wid,
-                query=q_arg.strip() if isinstance(q_arg, str) and q_arg.strip() else None,
-            )
+            try:
+                obs = jev_mod.extract_window_observation(
+                    ws,
+                    expected_pid=pid,
+                    expected_window_id=active_wid,
+                    query=q_arg.strip() if isinstance(q_arg, str) and q_arg.strip() else None,
+                )
+            except ValueError as exc:
+                raise ArmActionError(str(exc)) from exc
             observe_latencies_ms.append(round((time.perf_counter() - t_o) * 1000, 2))
             step_latencies_ms.append(round((time.perf_counter() - step_t0) * 1000, 2))
 
-            state_text = format_obs(obs, active_wid)
+            state_text = format_obs(obs, active_wid, req_max_elements=req_max_el)
             trace_events.append({"step": step_idx, "tool": name, "receipt": act_txt, "window_id": active_wid, "post_snapshot": obs["snapshot_id"]})
             f_responses.append(
                 types.FunctionResponse(
@@ -1691,7 +1872,7 @@ def run_arm_agy_cua_direct(
 
 
 # ---------------------------------------------------------------------------
-# Arm 3 & 4: AGY-CUA + Jev (`v0` Baseline vs `v1` Hillclimbed)
+# Arm 3, 4 & 5: AGY-CUA + Jev (`v0` Baseline vs `v1` Hillclimbed vs `v2` Skeleton+240+Settle)
 # ---------------------------------------------------------------------------
 def run_arm_agy_cua_jev(
     client: genai.Client,
@@ -1702,6 +1883,7 @@ def run_arm_agy_cua_jev(
     spend: SpendTracker,
     *,
     hillclimbed_v1: bool,
+    hillclimbed_v2: bool = False,
     portal_url: str | None = None,
     focus_mon: FocusMonitor | None = None,
 ) -> dict[str, Any]:
@@ -1710,6 +1892,10 @@ def run_arm_agy_cua_jev(
         env["AGY_CUA_JEV_LEGACY_CURSOR"] = "1"
     else:
         env.pop("AGY_CUA_JEV_LEGACY_CURSOR", None)
+    if hillclimbed_v2:
+        env.pop("AGY_CUA_JEV_V1_COMPAT", None)
+    else:
+        env["AGY_CUA_JEV_V1_COMPAT"] = "1"
 
     canary_leaked = False
 
@@ -1783,10 +1969,14 @@ def run_arm_agy_cua_jev(
             "value": types.Schema(type=types.Type.STRING, description="Optional string value when setting a text field."),
             "expected_postcondition": postcond_schema,
         }
-        if task.task_id in {"T6a_ax_incomplete", "T6b_visual_canvas", "T7a_cross_window"}:
+        if task.task_id in {"T6a_ax_incomplete", "T6b_visual_canvas", "T7a_cross_window", "T8_dense_hierarchy_drill"}:
             step_props["window_id"] = types.Schema(type=types.Type.INTEGER, description="Optional target window_id override (e.g. for newly discovered secondary window).")
             step_props["query"] = types.Schema(type=types.Type.STRING, description="Optional substring query to filter AX elements when observation_truncated is true.")
-            step_props["max_elements"] = types.Schema(type=types.Type.INTEGER, description="Optional AX element cap (e.g. 120).")
+            step_props["max_elements"] = types.Schema(type=types.Type.INTEGER, description="Optional AX element cap (e.g. 120 or 500).")
+        if hillclimbed_v2 and task.task_id in {"T6a_ax_incomplete", "T8_dense_hierarchy_drill"}:
+            step_props["skeleton"] = types.Schema(type=types.Type.BOOLEAN, description="Shallow overview mode reporting truncated region containers (`drill_regions`) with `region`, `element_index`, and `children_count`.")
+            step_props["region"] = types.Schema(type=types.Type.STRING, description="Container `region` label from `drill_regions` to scope observation and Jev candidates strictly to one container subtree.")
+            step_props["root_element_index"] = types.Schema(type=types.Type.INTEGER, description="Subtree drill root `element_index` from `drill_regions` to scope observation and Jev candidates strictly to one container region.")
         if task.task_id == "T6b_visual_canvas":
             step_props["source_snapshot_id"] = types.Schema(type=types.Type.STRING, description="Snapshot ID from the visual `jev_observe(include_screenshot=True)` call.")
             step_props["candidates"] = types.Schema(
@@ -1820,7 +2010,17 @@ def run_arm_agy_cua_jev(
             )
         ]
 
-        if task.task_id in {"T6a_ax_incomplete", "T6b_visual_canvas", "T7a_cross_window"}:
+        if task.task_id in {"T6a_ax_incomplete", "T6b_visual_canvas", "T7a_cross_window", "T8_dense_hierarchy_drill"}:
+            obs_props: dict[str, types.Schema] = {
+                "window_id": types.Schema(type=types.Type.INTEGER, description="Optional window_id to observe (defaults to initial window_id)."),
+                "query": types.Schema(type=types.Type.STRING, description="Optional substring query to filter AX elements."),
+                "max_elements": types.Schema(type=types.Type.INTEGER, description="Optional AX element cap (e.g. 120 or 500)."),
+                "include_screenshot": types.Schema(type=types.Type.BOOLEAN, description="Set true when visual_fallback_recommended=true to inspect the window PNG."),
+            }
+            if hillclimbed_v2:
+                obs_props["skeleton"] = types.Schema(type=types.Type.BOOLEAN, description="Shallow overview mode returning top-level controls plus `drill_regions` (`region`, `element_index`, `label`, `children_count`).")
+                obs_props["region"] = types.Schema(type=types.Type.STRING, description="Container `region` label from `drill_regions` to inspect only that container's descendants.")
+                obs_props["root_element_index"] = types.Schema(type=types.Type.INTEGER, description="Subtree drill root `element_index` from `drill_regions` to inspect only that container's descendants.")
             fn_decls.append(
                 types.FunctionDeclaration(
                     name="jev_observe",
@@ -1830,12 +2030,7 @@ def run_arm_agy_cua_jev(
                     ),
                     parameters=types.Schema(
                         type=types.Type.OBJECT,
-                        properties={
-                            "window_id": types.Schema(type=types.Type.INTEGER, description="Optional window_id to observe (defaults to initial window_id)."),
-                            "query": types.Schema(type=types.Type.STRING, description="Optional substring query to filter AX elements."),
-                            "max_elements": types.Schema(type=types.Type.INTEGER, description="Optional AX element cap (e.g. 120)."),
-                            "include_screenshot": types.Schema(type=types.Type.BOOLEAN, description="Set true when visual_fallback_recommended=true to inspect the window PNG."),
-                        },
+                        properties=obs_props,
                     ),
                 )
             )
@@ -1880,9 +2075,13 @@ def run_arm_agy_cua_jev(
                 "value": types.Schema(type=types.Type.STRING, description="Optional string value to set on a text field."),
                 "expected_postcondition": postcond_schema,
             }
-            if task.task_id == "T6a_ax_incomplete":
+            if task.task_id in {"T6a_ax_incomplete", "T8_dense_hierarchy_drill"}:
                 batch_step_props["query"] = types.Schema(type=types.Type.STRING, description="Optional substring query to filter AX elements.")
-                batch_step_props["max_elements"] = types.Schema(type=types.Type.INTEGER, description="Optional AX element cap (e.g. 120).")
+                batch_step_props["max_elements"] = types.Schema(type=types.Type.INTEGER, description="Optional AX element cap (e.g. 120 or 500).")
+                if hillclimbed_v2:
+                    batch_step_props["skeleton"] = types.Schema(type=types.Type.BOOLEAN, description="Shallow overview mode.")
+                    batch_step_props["region"] = types.Schema(type=types.Type.STRING, description="Container `region` label from `drill_regions` to scope this step strictly to one container region.")
+                    batch_step_props["root_element_index"] = types.Schema(type=types.Type.INTEGER, description="Subtree drill root `element_index` from `drill_regions` to scope this step to one container region.")
             batch_props: dict[str, types.Schema] = {
                 "steps": types.Schema(
                     type=types.Type.ARRAY,
@@ -1912,12 +2111,21 @@ def run_arm_agy_cua_jev(
             )
 
         t_obs0 = time.perf_counter()
-        drv0 = jev_server._get_driver()
-        gws0_args: dict[str, Any] = {"pid": pid, "window_id": window_id, "include_screenshot": False, "tree_format": "both"}
-        if task.initial_max_elements is not None:
-            gws0_args["max_elements"] = task.initial_max_elements
-        ws0 = drv0.call_tool("get_window_state", gws0_args)
-        obs0 = jev_mod.extract_window_observation(ws0, expected_pid=pid, expected_window_id=window_id)
+        if hillclimbed_v2 and task.task_id == "T8_dense_hierarchy_drill" and hasattr(jev_server, "handle_observe"):
+            init_obs_res = jev_server.handle_observe({
+                "pid": pid,
+                "window_id": window_id,
+                "include_screenshot": False,
+                "skeleton": True,
+            })
+            obs0 = dict(init_obs_res.get("structuredContent") or {})
+        else:
+            drv0 = jev_server._get_driver()
+            gws0_args: dict[str, Any] = {"pid": pid, "window_id": window_id, "include_screenshot": False, "tree_format": "both"}
+            if task.initial_max_elements is not None:
+                gws0_args["max_elements"] = task.initial_max_elements
+            ws0 = drv0.call_tool("get_window_state", gws0_args)
+            obs0 = jev_mod.extract_window_observation(ws0, expected_pid=pid, expected_window_id=window_id)
         obs0_ms = round((time.perf_counter() - t_obs0) * 1000, 2)
         if audit_observation_for_canary(obs0):
             canary_leaked = True
@@ -1928,13 +2136,19 @@ def run_arm_agy_cua_jev(
             f"visual_fallback_recommended: {obs0.get('visual_fallback_recommended', False)}",
             f"static_texts: {json.dumps(obs0.get('static_texts', []), ensure_ascii=False)}",
         ]
+        if obs0.get("drill_regions"):
+            obs_lines.append(
+                f"drill_regions (pass region='<region>' or root_element_index=<element_index> to drill into a region): "
+                f"{json.dumps(obs0.get('drill_regions'), ensure_ascii=False)}"
+            )
         if obs0.get("visual_fallback_recommended") and obs0.get("window_bounds"):
             obs_lines.append(f"window_bounds (Retina screenshot pixel bounds): {json.dumps(obs0.get('window_bounds'))}")
         obs_lines.append("actionable_elements:")
         for e in obs0.get("elements") or []:
             val_part = f" value={json.dumps(e['value'])}" if "value" in e else ""
+            path_part = f" path={json.dumps(e['container_path'])}" if e.get("container_path") else ""
             obs_lines.append(
-                f"  - [{e['element_index']}] {e['role']} label={json.dumps(e['label'])} state={e['state']}{val_part}"
+                f"  - [{e['element_index']}] {e['role']} label={json.dumps(e['label'])} state={e['state']}{val_part}{path_part}"
             )
         obs_summary = "\n".join(obs_lines)
         if contains_secret_canary(obs_summary):
@@ -1945,6 +2159,19 @@ def run_arm_agy_cua_jev(
                 "Notice `observation_truncated: True` in the initial observation. Pass `query='Provision'` and `max_elements=120` "
                 "on `jev_step` (or `jev_batch`) with `goal='Click Provision Quota Token'` and "
                 "`expected_postcondition={'static_text_contains': 'TargetActivated=true'}`."
+            )
+        elif task.task_id == "T8_dense_hierarchy_drill" and hillclimbed_v2:
+            sys_hint = (
+                "Initial observation uses `skeleton=True` and lists `drill_regions` (`actionable_elements` are omitted until you drill into a region). "
+                "Step 1: Call `jev_observe(region='<region>')` for the relevant target regions from `drill_regions` to inspect their controls. "
+                "Step 2: Call `jev_batch` ONCE with ALL mutation steps, scoping each step with `region='<region>'` and a bound `expected_postcondition` "
+                "(`element_value_equals` for `set_value` text fields or `'1'` on checkboxes/radios; `static_text_contains` for button clicks; omit `value` on click/checkbox/radio steps)."
+            )
+        elif task.task_id == "T8_dense_hierarchy_drill":
+            sys_hint = (
+                "Notice `observation_truncated: True` on this 1,500+ node window. Use `jev_batch` or `jev_step` / `jev_observe` with `query` and `max_elements` "
+                "to locate controls in 'Workspace Sidebar', 'Incident Routing Inspector', and 'Deployment Commit Footer', "
+                "and include `expected_postcondition` on every step."
             )
         elif task.task_id == "T6b_visual_canvas":
             sys_hint = (
@@ -2006,7 +2233,7 @@ def run_arm_agy_cua_jev(
 
         config = types.GenerateContentConfig(
             temperature=0.0,
-            max_output_tokens=8192,
+            max_output_tokens=16384 if hillclimbed_v2 else 8192,
             tools=[types.Tool(function_declarations=fn_decls)],
             thinking_config=planner_thinking_config(),
         )
@@ -2102,6 +2329,12 @@ def run_arm_agy_cua_jev(
                         obs_call["query"] = str(raw_args["query"])
                     if "max_elements" in raw_args and raw_args["max_elements"] is not None:
                         obs_call["max_elements"] = int(raw_args["max_elements"])
+                    if "skeleton" in raw_args and raw_args["skeleton"] is not None:
+                        obs_call["skeleton"] = bool(raw_args["skeleton"])
+                    if "region" in raw_args and raw_args["region"]:
+                        obs_call["region"] = str(raw_args["region"])
+                    if "root_element_index" in raw_args and raw_args["root_element_index"] is not None:
+                        obs_call["root_element_index"] = int(raw_args["root_element_index"])
                     res = jev_server.handle_observe(obs_call)
                     sc = res.get("structuredContent") or {}
                     if contains_secret_canary(json.dumps(sc, ensure_ascii=False)):
@@ -2144,6 +2377,8 @@ def run_arm_agy_cua_jev(
                         "window_bounds": sc.get("window_bounds"),
                         "discovered_windows": sc.get("discovered_windows"),
                     }
+                    if sc.get("drill_regions"):
+                        resp_obj["drill_regions"] = sc.get("drill_regions")
                     f_responses.append(
                         types.FunctionResponse(
                             name=name,
@@ -2251,6 +2486,12 @@ def run_arm_agy_cua_jev(
                         step_call["query"] = str(raw_args["query"])
                     if "max_elements" in raw_args and raw_args["max_elements"] is not None:
                         step_call["max_elements"] = int(raw_args["max_elements"])
+                    if "skeleton" in raw_args and raw_args["skeleton"] is not None:
+                        step_call["skeleton"] = bool(raw_args["skeleton"])
+                    if "region" in raw_args and raw_args["region"]:
+                        step_call["region"] = str(raw_args["region"])
+                    if "root_element_index" in raw_args and raw_args["root_element_index"] is not None:
+                        step_call["root_element_index"] = int(raw_args["root_element_index"])
                     if "source_snapshot_id" in raw_args and raw_args["source_snapshot_id"]:
                         step_call["source_snapshot_id"] = str(raw_args["source_snapshot_id"])
                     if "candidates" in raw_args and raw_args["candidates"]:
@@ -2336,6 +2577,962 @@ def run_arm_agy_cua_jev(
         }
     finally:
         jev_server.close()
+
+
+# ---------------------------------------------------------------------------
+# Arm 6 & 7: Vercel Labs `agent-desktop` (`agent-desktop-direct` & `agent-desktop-jev`)
+# ---------------------------------------------------------------------------
+def resolve_agent_desktop_paths(cli_dir: str | None = None) -> tuple[Path, Path, Path, Path]:
+    raw_dir = (cli_dir or os.environ.get("AGY_CUA_AGENT_DESKTOP_DIR") or "").strip()
+    if not raw_dir:
+        raise RuntimeError(
+            "agent-desktop arm requested, build directory not configured; pass --agent-desktop-dir <path> "
+            "or set AGY_CUA_AGENT_DESKTOP_DIR"
+        )
+    repo_dir = Path(raw_dir).expanduser().resolve()
+    ad_bin = repo_dir / "target" / "release" / "agent-desktop"
+    act_mjs = repo_dir / "scripts" / "jev" / "act.mjs"
+    run_mjs = repo_dir / "scripts" / "jev" / "run.mjs"
+    if not ad_bin.exists():
+        raise RuntimeError(f"agent-desktop release binary not found at {ad_bin}")
+    if not act_mjs.exists() or not run_mjs.exists():
+        raise RuntimeError(f"agent-desktop jev scripts not found under {repo_dir / 'scripts' / 'jev'}")
+    return repo_dir, ad_bin, act_mjs, run_mjs
+
+
+def _extract_ad_static_texts(tree_node: Any, out: list[str] | None = None) -> list[str]:
+    if out is None:
+        out = []
+    if not isinstance(tree_node, Mapping):
+        return out
+    role = str(tree_node.get("role") or "")
+    if role in {"statictext", "text"}:
+        val = tree_node.get("value") if tree_node.get("value") not in (None, "") else tree_node.get("name")
+        if isinstance(val, str):
+            s = val.replace("\u200e", "").strip()
+            if s and s not in out:
+                out.append(s)
+    for child in tree_node.get("children") or []:
+        _extract_ad_static_texts(child, out)
+    return out
+
+
+class LoopbackTypeSafeProxy:
+    """In-process 127.0.0.1 HTTP proxy for `agent-desktop-jev` (`act.mjs` / `run.mjs`).
+
+    - Keeps the real Keychain `typesafe-jev` API key strictly inside Python (never in Node child env).
+    - Audits every outbound payload for `CANARY-VAULT-SECRET` before forwarding and scrubs any canary bytes.
+    - Reserves and settles exact Jev `usage.{input_tokens,output_tokens}` against `SpendTracker`.
+    - Disables `run.mjs`'s 429/503/529 automatic retry loop by translating upstream errors to HTTP 400.
+    """
+
+    def __init__(
+        self,
+        spend: SpendTracker,
+        *,
+        env: Mapping[str, str] | None = None,
+        http_post: Any = None,
+    ) -> None:
+        import http.server
+        import socketserver
+        import urllib.request
+
+        self.spend = spend
+        self.canary_leaked = False
+        self.budget_exc: list[RuntimeError] = []
+        self.jev_latencies_ms: list[float] = []
+        self.calls_used = 0
+
+        eff_env = dict(os.environ) if env is None else dict(env)
+        self.route = jev_mod.resolve_route(eff_env, jev_mod.read_keychain_secret)
+        self._http_post = http_post if http_post is not None else jev_mod._default_urlopen
+        if self.route.kind == "none" or not self.route.endpoint:
+            raise RuntimeError(f"Jev route unavailable for agent-desktop-jev ({self.route.reason})")
+
+        proxy_ref = self
+
+        class ProxyHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                body_str = raw.decode("utf-8", "replace")
+                if contains_secret_canary(body_str):
+                    proxy_ref.canary_leaked = True
+                    body_str = (
+                        body_str.replace("CANARY-VAULT-SECRET-9941", "[REDACTED]")
+                        .replace("CANARY-VAULT-SECRET", "[REDACTED]")
+                        .replace("\uf79a", "")
+                    )
+                try:
+                    proxy_ref.spend.reserve_before_call(JEV_RESERVE_ALLOWANCE_USD)
+                except RuntimeError as exc:
+                    proxy_ref.budget_exc.append(exc)
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"budget_exceeded"}')
+                    return
+
+                headers = {
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": jev_mod.CLIENT_IDENTITY,
+                }
+                if proxy_ref.route.api_key:
+                    headers["Authorization"] = f"Bearer {proxy_ref.route.api_key}"
+                req = urllib.request.Request(
+                    proxy_ref.route.endpoint,
+                    data=body_str.encode("utf-8"),
+                    headers=headers,
+                    method="POST",
+                )
+                proxy_ref.calls_used += 1
+                t0 = time.perf_counter()
+                try:
+                    status, resp_text = proxy_ref._http_post(req, 15.0)
+                except Exception as exc:
+                    code = getattr(exc, "code", 0)
+                    proxy_ref.spend.jev_calls += 1
+                    proxy_ref.spend.jev_uncertain_failures += 1
+                    proxy_ref.budget_exc.append(RuntimeError(f"Jev upstream transport/HTTP error ({code or type(exc).__name__})"))
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"upstream_failed"}')
+                    return
+                proxy_ref.jev_latencies_ms.append(round((time.perf_counter() - t0) * 1000, 2))
+                try:
+                    accounted = proxy_ref.spend.settle_jev_request(
+                        status, resp_text, reserved_allowance_usd=JEV_RESERVE_ALLOWANCE_USD
+                    )
+                except RuntimeError as exc:
+                    proxy_ref.budget_exc.append(exc)
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"budget_exceeded"}')
+                    return
+                if not accounted:
+                    proxy_ref.budget_exc.append(RuntimeError(f"Jev usage unaccounted (HTTP {status}); reservation retained"))
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"usage_unaccounted"}')
+                    return
+
+                out_status = 200 if (200 <= status < 300) else 400
+                resp_bytes = resp_text.encode("utf-8")
+                self.send_response(out_status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp_bytes)))
+                self.end_headers()
+                self.wfile.write(resp_bytes)
+
+            def log_message(self, *args: Any) -> None:
+                pass
+
+        class ReusableTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+            allow_reuse_address = True
+            daemon_threads = True
+
+        self._server = ReusableTCPServer(("127.0.0.1", 0), ProxyHandler)
+        self.port = int(self._server.server_address[1])
+        self.base_url = f"http://127.0.0.1:{self.port}/v1/systemone"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def raise_if_error(self) -> None:
+        if self.budget_exc:
+            raise self.budget_exc[0]
+
+    def close(self) -> None:
+        try:
+            self._server.shutdown()
+            self._server.server_close()
+        except Exception:
+            pass
+
+
+def _extract_ad_window_list(lw_res: Mapping[str, Any], *, pid: int | None = None) -> list[dict[str, Any]]:
+    raw_data = lw_res.get("data")
+    items = raw_data if isinstance(raw_data, list) else ((raw_data or {}).get("windows") if isinstance(raw_data, Mapping) else [])
+    out: list[dict[str, Any]] = []
+    for w in items or []:
+        if not isinstance(w, Mapping):
+            continue
+        if pid is not None and w.get("pid") not in (None, pid):
+            continue
+        out.append(dict(w))
+    return out
+
+
+def run_arm_agent_desktop_direct(
+    client: genai.Client,
+    model_id: str,
+    task: TaskSpec,
+    pid: int,
+    window_id: int,
+    spend: SpendTracker,
+    out_dir: Path,
+    *,
+    agent_desktop_dir: str | None = None,
+    portal_url: str | None = None,
+    rep_suffix: str = "",
+) -> dict[str, Any]:
+    import shutil
+
+    _repo_dir, ad_bin, _act_mjs, _run_mjs = resolve_agent_desktop_paths(agent_desktop_dir)
+    app_name = "Calculator" if task.target_kind == "calculator" else FIXTURE_APP.stem
+    active_wid_str = f"w-{window_id}"
+    ad_home = out_dir / f"ad_home_{task.task_id}_direct{rep_suffix}"
+    if ad_home.exists():
+        shutil.rmtree(ad_home, ignore_errors=True)
+    ad_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ad_home.chmod(0o700)
+
+    ad_env = dict(os.environ)
+    ad_env["AGENT_DESKTOP_HOME"] = str(ad_home)
+    ad_env["AGENT_DESKTOP_BIN"] = str(ad_bin)
+    ad_env["AGENT_DESKTOP_MACOS_HELPER_PATH"] = "/nonexistent-clipboard-disabled"
+    ad_env.pop("GEMINI_API_KEY", None)
+    ad_env.pop("GOOGLE_API_KEY", None)
+    ad_env.pop("TYPESAFE_API_KEY", None)
+
+    canary_leaked = False
+
+    def call_ad(argv: list[str], *, timeout_s: float = 15.0) -> dict[str, Any]:
+        nonlocal canary_leaked
+        if "--headed" in argv or "--cursor" in argv:
+            raise ArmActionError("headed_or_cursor_forbidden_in_background_mode")
+        proc = subprocess.run(
+            [str(ad_bin), *argv],
+            env=ad_env,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+        raw_out = (proc.stdout or "").strip()
+        if contains_secret_canary(raw_out):
+            canary_leaked = True
+        try:
+            return json.loads(raw_out) if raw_out else {"ok": False, "error": {"code": "EMPTY_STDOUT", "message": (proc.stderr or "")[:200]}}
+        except ValueError:
+            return {"ok": False, "error": {"code": "INVALID_JSON", "message": raw_out[:200]}}
+
+    def format_ad_snap(snap_res: Mapping[str, Any]) -> str:
+        nonlocal canary_leaked
+        if not snap_res.get("ok"):
+            return json.dumps({"ok": False, "error": snap_res.get("error")}, ensure_ascii=False)
+        data = snap_res.get("data") or {}
+        dumped = json.dumps(data, ensure_ascii=False)
+        if contains_secret_canary(dumped):
+            canary_leaked = True
+        if len(dumped) > 36_000:
+            dumped = dumped[:36_000] + " ... [truncated at 36KB; pass skeleton=true or root='@ref' to narrow]"
+        return dumped
+
+    try:
+        lw0 = call_ad(["list-windows"])
+        for w0 in _extract_ad_window_list(lw0, pid=pid):
+            if str(w0.get("id") or "") == active_wid_str and w0.get("app_name"):
+                app_name = str(w0["app_name"])
+                break
+        t_obs0 = time.perf_counter()
+        init_flags = ["snapshot", "--app", app_name, "--window-id", active_wid_str, "--skeleton", "--compact"]
+        if task.initial_max_elements is not None:
+            init_flags = ["snapshot", "--app", app_name, "--window-id", active_wid_str, "--max-depth", "2", "--compact"]
+        snap0 = call_ad(init_flags)
+        if not snap0.get("ok") and (snap0.get("error") or {}).get("code") in {"APP_UNRESPONSIVE", "TIMEOUT"}:
+            time.sleep(0.25)
+            snap0 = call_ad(init_flags)
+        obs0_ms = round((time.perf_counter() - t_obs0) * 1000, 2)
+        if not snap0.get("ok") and (snap0.get("error") or {}).get("code") in {"APP_UNRESPONSIVE", "TIMEOUT"}:
+            err_obj = snap0.get("error") or {}
+            raise ArmActionError(
+                f"agent-desktop initial snapshot failed ({err_obj.get('code')}): {err_obj.get('message')}"
+            )
+        snap0_text = format_ad_snap(snap0)
+
+        fn_decls = [
+            types.FunctionDeclaration(
+                name="ad_snapshot",
+                description=(
+                    "Capture headless accessibility tree JSON with `@<snapshot_id>:eN` refs via `agent-desktop snapshot`. "
+                    "Use `skeleton=true` for a shallow overview with `children_count` on truncated containers, and `root='@...'` to drill into a container."
+                ),
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "window_id": types.Schema(type=types.Type.STRING, description="Optional window ID string like 'w-12345' (defaults to current window)."),
+                        "skeleton": types.Schema(type=types.Type.BOOLEAN, description="Shallow overview with children_count on truncated containers."),
+                        "root": types.Schema(type=types.Type.STRING, description="Optional container ref (e.g. '@s1:e30') to drill into its subtree."),
+                        "interactive_only": types.Schema(type=types.Type.BOOLEAN, description="Include interactive elements only (-i). Omit or false to also read statictext labels."),
+                        "max_depth": types.Schema(type=types.Type.INTEGER, description="Optional max tree depth."),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="ad_find",
+                description="Search elements in the window by text, name, or role via `agent-desktop find`.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "window_id": types.Schema(type=types.Type.STRING, description="Optional window ID string like 'w-12345'."),
+                        "text": types.Schema(type=types.Type.STRING, description="Substring in name, value, title, or description."),
+                        "name": types.Schema(type=types.Type.STRING, description="Match accessible name/label."),
+                        "role": types.Schema(type=types.Type.STRING, description="Match role (button, textfield, checkbox, radiobutton ...)."),
+                        "root": types.Schema(type=types.Type.STRING, description="Optional container ref to scope search."),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="ad_click",
+                description="Headlessly click an element by qualified ref (`@<snapshot_id>:eN`) via `agent-desktop click`.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    required=["ref"],
+                    properties={"ref": types.Schema(type=types.Type.STRING, description="Qualified ref from snapshot/find, e.g. '@s8f3k2p9:e5'.")},
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="ad_set_value",
+                description="Set text/value directly on an editable field by qualified ref via `agent-desktop set-value`.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    required=["ref", "value"],
+                    properties={
+                        "ref": types.Schema(type=types.Type.STRING),
+                        "value": types.Schema(type=types.Type.STRING),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="ad_check",
+                description="Idempotently put a checkbox or radio/switch into the checked/on state via `agent-desktop check`.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    required=["ref"],
+                    properties={"ref": types.Schema(type=types.Type.STRING)},
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="ad_uncheck",
+                description="Idempotently put a checkbox or switch into the unchecked/off state via `agent-desktop uncheck`.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    required=["ref"],
+                    properties={"ref": types.Schema(type=types.Type.STRING)},
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="ad_select",
+                description="Select a named option in a dropdown/popup/combobox via `agent-desktop select`.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    required=["ref", "option"],
+                    properties={
+                        "ref": types.Schema(type=types.Type.STRING),
+                        "option": types.Schema(type=types.Type.STRING),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="ad_press",
+                description="Send a background key combo (e.g. 'escape', 'return') to the target window via `agent-desktop press`.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    required=["combo"],
+                    properties={
+                        "combo": types.Schema(type=types.Type.STRING),
+                        "window_id": types.Schema(type=types.Type.STRING),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="ad_list_windows",
+                description="List open windows for the target app (`w-<id>`) via `agent-desktop list-windows`.",
+                parameters=types.Schema(type=types.Type.OBJECT, properties={}),
+            ),
+        ]
+        if task.task_id == "T6b_visual_canvas":
+            fn_decls.append(
+                types.FunctionDeclaration(
+                    name="ad_screenshot",
+                    description="Capture a PNG screenshot of the target window via `agent-desktop screenshot`.",
+                    parameters=types.Schema(
+                        type=types.Type.OBJECT,
+                        properties={"window_id": types.Schema(type=types.Type.STRING)},
+                    ),
+                )
+            )
+
+        extra_url = f"\nTarget Login URL: {portal_url}\n" if portal_url else ""
+        chat_history: list[types.Content] = [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(
+                        text=(
+                            f"Task: {task.prompt}{extra_url}\n"
+                            f"You are operating `{app_name}` (window_id=`{active_wid_str}`) headlessly in the background via `agent-desktop`.\n"
+                            "Use `@<snapshot_id>:eN` refs from `ad_snapshot` or `ad_find`. For truncated containers (`children_count`), "
+                            "drill in with `ad_snapshot(root='@...')`. Note: headless `agent-desktop` supports semantic ref actions only "
+                            "(no `--headed` pixel coordinate clicks and no built-in isolated CDP browser launcher).\n\n"
+                            f"Initial Skeleton Snapshot (`{active_wid_str}`):\n{snap0_text}"
+                        )
+                    )
+                ],
+            )
+        ]
+
+        config = types.GenerateContentConfig(
+            temperature=0.0,
+            max_output_tokens=8192,
+            tools=[types.Tool(function_declarations=fn_decls)],
+            thinking_config=planner_thinking_config(),
+        )
+
+        outer_turns = 0
+        actions_dispatched = 0
+        model_latencies_ms: list[float] = []
+        observe_latencies_ms: list[float] = [obs0_ms]
+        dispatch_latencies_ms: list[float] = []
+        step_latencies_ms: list[float] = []
+        trace_events: list[dict[str, Any]] = []
+
+        for step_idx in range(1, task.max_outer_steps + 1):
+            outer_turns += 1
+            if audit_contents_for_canary(chat_history):
+                canary_leaked = True
+            t_m = time.perf_counter()
+            resp = call_gemini_once(client, model_id, chat_history, config, spend)
+            model_latencies_ms.append(round((time.perf_counter() - t_m) * 1000, 2))
+
+            if not resp.candidates:
+                break
+            cand = resp.candidates[0]
+            chat_history.append(cand.content)
+            fcs = [p.function_call for p in (cand.content.parts or []) if p.function_call]
+            if not fcs:
+                break
+
+            f_responses: list[types.FunctionResponse] = []
+            mutated_in_turn = False
+            for fc_idx, fc in enumerate(fcs):
+                step_t0 = time.perf_counter()
+                name = fc.name
+                args = dict(fc.args or {})
+                if args.get("window_id"):
+                    w_arg = str(args["window_id"]).strip()
+                    active_wid_str = w_arg if w_arg.startswith("w-") else f"w-{w_arg}"
+                fr_parts: list[types.FunctionResponsePart] = []
+
+                if name == "ad_snapshot":
+                    t_o = time.perf_counter()
+                    cmd = ["snapshot", "--app", app_name, "--window-id", active_wid_str, "--compact"]
+                    if args.get("skeleton"):
+                        cmd.append("--skeleton")
+                    if args.get("interactive_only"):
+                        cmd.append("-i")
+                    if args.get("root"):
+                        cmd.extend(["--root", str(args["root"])])
+                    if args.get("max_depth") is not None:
+                        cmd.extend(["--max-depth", str(int(args["max_depth"]))])
+                    s_res = call_ad(cmd)
+                    observe_latencies_ms.append(round((time.perf_counter() - t_o) * 1000, 2))
+                    step_latencies_ms.append(round((time.perf_counter() - step_t0) * 1000, 2))
+                    s_txt = format_ad_snap(s_res)
+                    trace_events.append({"step": step_idx, "tool": name, "ok": s_res.get("ok"), "window_id": active_wid_str, "root": args.get("root")})
+                    f_responses.append(types.FunctionResponse(name=name, response={"window_id": active_wid_str, "snapshot": s_txt}))
+                elif name == "ad_find":
+                    t_o = time.perf_counter()
+                    cmd = ["find", "--app", app_name, "--window-id", active_wid_str, "--limit", "30"]
+                    for k, flag in (("text", "--text"), ("name", "--name"), ("role", "--role"), ("root", "--root")):
+                        if args.get(k):
+                            cmd.extend([flag, str(args[k])])
+                    s_res = call_ad(cmd)
+                    observe_latencies_ms.append(round((time.perf_counter() - t_o) * 1000, 2))
+                    step_latencies_ms.append(round((time.perf_counter() - step_t0) * 1000, 2))
+                    s_txt = format_ad_snap(s_res)
+                    trace_events.append({"step": step_idx, "tool": name, "ok": s_res.get("ok"), "args": {k: args.get(k) for k in ("text", "name", "role", "root") if args.get(k)}})
+                    f_responses.append(types.FunctionResponse(name=name, response={"matches": s_txt}))
+                elif name == "ad_list_windows":
+                    t_o = time.perf_counter()
+                    lw_res = call_ad(["list-windows", "--app", app_name])
+                    wins = _extract_ad_window_list(lw_res, pid=pid)
+                    other_wids = [
+                        str(w.get("id"))
+                        for w in wins
+                        if str(w.get("id") or "") not in ("", f"w-{window_id}")
+                        and w.get("visible") is not False
+                        and w.get("accessible") is not False
+                    ]
+                    if other_wids:
+                        time.sleep(0.5)
+                        active_wid_str = other_wids[0]
+                    observe_latencies_ms.append(round((time.perf_counter() - t_o) * 1000, 2))
+                    step_latencies_ms.append(round((time.perf_counter() - step_t0) * 1000, 2))
+                    trace_events.append({"step": step_idx, "tool": name, "windows": wins, "active_window_id": active_wid_str})
+                    f_responses.append(types.FunctionResponse(name=name, response={"windows": wins, "active_window_id": active_wid_str}))
+                elif name == "ad_screenshot":
+                    t_o = time.perf_counter()
+                    png_path = ad_home / f"shot_{step_idx}_{fc_idx}.png"
+                    sh_res = call_ad(["screenshot", "--app", app_name, "--window-id", active_wid_str, str(png_path)])
+                    observe_latencies_ms.append(round((time.perf_counter() - t_o) * 1000, 2))
+                    step_latencies_ms.append(round((time.perf_counter() - step_t0) * 1000, 2))
+                    if png_path.exists():
+                        fr_parts.append(
+                            types.FunctionResponsePart(
+                                inline_data=types.FunctionResponseBlob(mime_type="image/png", data=png_path.read_bytes())
+                            )
+                        )
+                    trace_events.append({"step": step_idx, "tool": name, "ok": sh_res.get("ok")})
+                    f_responses.append(types.FunctionResponse(name=name, response={"ok": bool(sh_res.get("ok"))}, parts=fr_parts or None))
+                else:
+                    t_d = time.perf_counter()
+                    if name == "ad_click":
+                        act_cmd = ["click", str(args.get("ref", ""))]
+                    elif name == "ad_set_value":
+                        act_cmd = ["set-value", str(args.get("ref", "")), str(args.get("value", ""))]
+                    elif name == "ad_check":
+                        act_cmd = ["check", str(args.get("ref", ""))]
+                    elif name == "ad_uncheck":
+                        act_cmd = ["uncheck", str(args.get("ref", ""))]
+                    elif name == "ad_select":
+                        act_cmd = ["select", str(args.get("ref", "")), str(args.get("option", ""))]
+                    elif name == "ad_press":
+                        act_cmd = ["press", str(args.get("combo", "")), "--app", app_name, "--window-id", active_wid_str]
+                    else:
+                        f_responses.append(types.FunctionResponse(name=name, response={"ok": False, "error": f"unknown tool {name}"}))
+                        continue
+
+                    actions_dispatched += 1
+                    mutated_in_turn = True
+                    a_res = call_ad(act_cmd)
+                    dispatch_latencies_ms.append(round((time.perf_counter() - t_d) * 1000, 2))
+                    is_last_call = fc_idx == (len(fcs) - 1)
+                    resp_payload: dict[str, Any] = {
+                        "ok": bool(a_res.get("ok")),
+                        "disposition": (a_res.get("data") or {}).get("disposition") or (a_res.get("error") or {}).get("disposition"),
+                        "error": a_res.get("error") if not a_res.get("ok") else None,
+                    }
+                    if is_last_call and mutated_in_turn:
+                        t_o = time.perf_counter()
+                        post_snap = call_ad(["snapshot", "--app", app_name, "--window-id", active_wid_str, "--skeleton", "--compact"])
+                        observe_latencies_ms.append(round((time.perf_counter() - t_o) * 1000, 2))
+                        resp_payload["post_skeleton"] = format_ad_snap(post_snap)
+                    step_latencies_ms.append(round((time.perf_counter() - step_t0) * 1000, 2))
+                    trace_events.append({
+                        "step": step_idx,
+                        "tool": name,
+                        "ref": args.get("ref") or args.get("combo"),
+                        "ok": bool(a_res.get("ok")),
+                        "error_code": (a_res.get("error") or {}).get("code") if isinstance(a_res.get("error"), Mapping) else None,
+                    })
+                    f_responses.append(types.FunctionResponse(name=name, response=resp_payload))
+
+            chat_history.append(types.Content(role="user", parts=[types.Part(function_response=fr) for fr in f_responses]))
+            prune_history_images(chat_history, keep=2)
+
+        return {
+            "outer_turns": outer_turns,
+            "actions_dispatched": actions_dispatched,
+            "model_ms_total": round(sum(model_latencies_ms), 2),
+            "observe_ms_total": round(sum(observe_latencies_ms), 2),
+            "jev_ms_total": 0.0,
+            "dispatch_ms_total": round(sum(dispatch_latencies_ms), 2),
+            "verify_ms_total": 0.0,
+            "step_median_ms": round(statistics.median(step_latencies_ms), 2) if step_latencies_ms else 0.0,
+            "canary_leaked": canary_leaked,
+            "trace": trace_events,
+        }
+    finally:
+        shutil.rmtree(ad_home, ignore_errors=True)
+
+
+def run_arm_agent_desktop_jev(
+    client: genai.Client,
+    model_id: str,
+    task: TaskSpec,
+    pid: int,
+    window_id: int,
+    spend: SpendTracker,
+    out_dir: Path,
+    *,
+    agent_desktop_dir: str | None = None,
+    portal_url: str | None = None,
+    rep_suffix: str = "",
+) -> dict[str, Any]:
+    import shutil
+
+    _repo_dir, ad_bin, act_mjs, run_mjs = resolve_agent_desktop_paths(agent_desktop_dir)
+    app_name = "Calculator" if task.target_kind == "calculator" else FIXTURE_APP.stem
+    active_wid_str = f"w-{window_id}"
+    ad_home = out_dir / f"ad_home_{task.task_id}_jev{rep_suffix}"
+    if ad_home.exists():
+        shutil.rmtree(ad_home, ignore_errors=True)
+    ad_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ad_home.chmod(0o700)
+
+    proxy = LoopbackTypeSafeProxy(spend=spend)
+    node_env = dict(os.environ)
+    node_env["AGENT_DESKTOP_HOME"] = str(ad_home)
+    node_env["AGENT_DESKTOP_BIN"] = str(ad_bin)
+    node_env["AGENT_DESKTOP_MACOS_HELPER_PATH"] = "/nonexistent-clipboard-disabled"
+    node_env["TYPESAFE_BASE_URL"] = proxy.base_url
+    node_env["TYPESAFE_MODEL"] = proxy.route.model
+    node_env["TYPESAFE_API_KEY"] = "loopback-proxy"
+    node_env["JEV_VERIFY_MS"] = "1200"
+    node_env.pop("GEMINI_API_KEY", None)
+    node_env.pop("GOOGLE_API_KEY", None)
+
+    canary_leaked = False
+
+    def call_ad(argv: list[str], *, timeout_s: float = 15.0) -> dict[str, Any]:
+        nonlocal canary_leaked
+        if "--headed" in argv or "--cursor" in argv:
+            raise ArmActionError("headed_or_cursor_forbidden_in_background_mode")
+        proc = subprocess.run(
+            [str(ad_bin), *argv],
+            env=node_env,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+        raw_out = (proc.stdout or "").strip()
+        if contains_secret_canary(raw_out):
+            canary_leaked = True
+        try:
+            return json.loads(raw_out) if raw_out else {"ok": False, "error": {"code": "EMPTY_STDOUT", "message": (proc.stderr or "")[:200]}}
+        except ValueError:
+            return {"ok": False, "error": {"code": "INVALID_JSON", "message": raw_out[:200]}}
+
+    def read_status_texts(wid_s: str) -> list[str]:
+        s = call_ad(["snapshot", "--app", app_name, "--window-id", wid_s, "--skeleton", "--compact"])
+        if not s.get("ok"):
+            return []
+        return _extract_ad_static_texts((s.get("data") or {}).get("tree"))[:20]
+
+    try:
+        lw0 = call_ad(["list-windows"])
+        for w0 in _extract_ad_window_list(lw0, pid=pid):
+            if str(w0.get("id") or "") == active_wid_str and w0.get("app_name"):
+                app_name = str(w0["app_name"])
+                break
+        t_obs0 = time.perf_counter()
+        s0 = call_ad(["snapshot", "--app", app_name, "--window-id", active_wid_str, "--skeleton", "--compact"])
+        if not s0.get("ok") and (s0.get("error") or {}).get("code") in {"APP_UNRESPONSIVE", "TIMEOUT"}:
+            time.sleep(0.25)
+            s0 = call_ad(["snapshot", "--app", app_name, "--window-id", active_wid_str, "--skeleton", "--compact"])
+        obs0_ms = round((time.perf_counter() - t_obs0) * 1000, 2)
+        if not s0.get("ok") and (s0.get("error") or {}).get("code") in {"APP_UNRESPONSIVE", "TIMEOUT"}:
+            err_obj = s0.get("error") or {}
+            raise ArmActionError(
+                f"agent-desktop initial snapshot failed ({err_obj.get('code')}): {err_obj.get('message')}"
+            )
+        init_texts = _extract_ad_static_texts((s0.get("data") or {}).get("tree"))[:20] if s0.get("ok") else []
+
+        fn_decls = [
+            types.FunctionDeclaration(
+                name="jev_desktop_run",
+                description=(
+                    "PREFERRED for multi-step native window workflows: Drive `scripts/jev/run.mjs` autonomously on the target window "
+                    "using Jev (`jev-1.13.0`) with `--skeleton`, `DRILL`, `WIDEN`, `CLICK`, `TYPE_TEXT`, `CHECK`, `UNCHECK`, `WAIT`, and `DONE` — "
+                    "without putting the AX tree into outer LLM context. Supply `texts` in the exact order text fields will be filled."
+                ),
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    required=["goal"],
+                    properties={
+                        "goal": types.Schema(type=types.Type.STRING, description="Complete natural-language goal for the window."),
+                        "texts": types.Schema(
+                            type=types.Type.ARRAY,
+                            items=types.Schema(type=types.Type.STRING),
+                            description="Ordered list of exact text strings to enter into fields (consumed one per TYPE_TEXT operation).",
+                        ),
+                        "root": types.Schema(type=types.Type.STRING, description="Optional starting container `@ref`."),
+                        "window_id": types.Schema(type=types.Type.STRING, description="Optional window ID like 'w-12345'."),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="jev_desktop_act",
+                description=(
+                    "Resolve and headlessly execute ONE plain-language step via `scripts/jev/act.mjs` (`jev-1.13.0`). "
+                    "Phrase `intent` as an action + target (e.g. 'click the Production Cluster button in Workspace Sidebar' or "
+                    "'set the Full Name text field'). Pass `text` when setting/typing/selecting a value, and `root` when drilling inside a container `@ref`."
+                ),
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    required=["intent"],
+                    properties={
+                        "intent": types.Schema(type=types.Type.STRING, description="Single-step action intent."),
+                        "text": types.Schema(type=types.Type.STRING, description="Optional text value when setting/typing/selecting."),
+                        "root": types.Schema(type=types.Type.STRING, description="Optional container `@ref` from `ad_snapshot_skeleton`."),
+                        "window_id": types.Schema(type=types.Type.STRING, description="Optional window ID like 'w-12345'."),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="ad_snapshot_skeleton",
+                description=(
+                    "Read a compact `--skeleton --compact` structural overview to inspect container `@ref` IDs (`children_count`) "
+                    "for `root='@...'` subtree drilling or to check current `static_texts`."
+                ),
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "window_id": types.Schema(type=types.Type.STRING),
+                        "root": types.Schema(type=types.Type.STRING),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="ad_list_windows",
+                description="List open windows (`w-<id>`) for the target application (e.g. to discover a newly opened secondary window).",
+                parameters=types.Schema(type=types.Type.OBJECT, properties={}),
+            ),
+        ]
+
+        extra_url = f"\nTarget Login URL: {portal_url}\n" if portal_url else ""
+        chat_history: list[types.Content] = [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(
+                        text=(
+                            f"Task: {task.prompt}{extra_url}\n"
+                            f"Target app: `{app_name}`, initial window_id: `{active_wid_str}`.\n"
+                            f"Initial visible texts: {json.dumps(init_texts, ensure_ascii=False)}\n\n"
+                            "You are operating `agent-desktop` + `jev-desktop` (`scripts/jev/run.mjs` and `scripts/jev/act.mjs`) in headless background mode.\n"
+                            "- Use `jev_desktop_run` to drive multi-step native window goals in one turn (pass `texts=[...]` in field order), "
+                            "OR use `jev_desktop_act` step-by-step (with `ad_snapshot_skeleton` + `root='@...'` when drilling into a >254-element window).\n"
+                            "- Note: `agent-desktop` has no `--headed` pixel coordinate click in background mode and no built-in isolated CDP browser launcher."
+                        )
+                    )
+                ],
+            )
+        ]
+
+        config = types.GenerateContentConfig(
+            temperature=0.0,
+            max_output_tokens=8192,
+            tools=[types.Tool(function_declarations=fn_decls)],
+            thinking_config=planner_thinking_config(),
+        )
+
+        outer_turns = 0
+        actions_dispatched = 0
+        model_latencies_ms: list[float] = []
+        observe_latencies_ms: list[float] = [obs0_ms]
+        dispatch_latencies_ms: list[float] = []
+        step_latencies_ms: list[float] = []
+        trace_events: list[dict[str, Any]] = []
+
+        for turn_idx in range(1, task.max_outer_steps + 1):
+            outer_turns += 1
+            if audit_contents_for_canary(chat_history):
+                canary_leaked = True
+            t_m = time.perf_counter()
+            resp = call_gemini_once(client, model_id, chat_history, config, spend)
+            model_latencies_ms.append(round((time.perf_counter() - t_m) * 1000, 2))
+
+            if not resp.candidates:
+                break
+            cand = resp.candidates[0]
+            chat_history.append(cand.content)
+            fcs = [p.function_call for p in (cand.content.parts or []) if p.function_call]
+            if not fcs:
+                break
+
+            f_responses: list[types.FunctionResponse] = []
+            for fc in fcs:
+                step_t0 = time.perf_counter()
+                name = fc.name
+                args = dict(fc.args or {})
+                if args.get("window_id"):
+                    w_arg = str(args["window_id"]).strip()
+                    active_wid_str = w_arg if w_arg.startswith("w-") else f"w-{w_arg}"
+
+                if name == "ad_list_windows":
+                    t_o = time.perf_counter()
+                    lw_res = call_ad(["list-windows", "--app", app_name])
+                    wins = _extract_ad_window_list(lw_res, pid=pid)
+                    other_wids = [
+                        str(w.get("id"))
+                        for w in wins
+                        if str(w.get("id") or "") not in ("", f"w-{window_id}")
+                        and w.get("visible") is not False
+                        and w.get("accessible") is not False
+                    ]
+                    if other_wids:
+                        time.sleep(0.5)
+                        active_wid_str = other_wids[0]
+                    observe_latencies_ms.append(round((time.perf_counter() - t_o) * 1000, 2))
+                    step_latencies_ms.append(round((time.perf_counter() - step_t0) * 1000, 2))
+                    trace_events.append({"turn": turn_idx, "tool": name, "windows": wins, "active_window_id": active_wid_str})
+                    f_responses.append(types.FunctionResponse(name=name, response={"windows": wins, "active_window_id": active_wid_str, "static_texts": read_status_texts(active_wid_str)}))
+                elif name == "ad_snapshot_skeleton":
+                    t_o = time.perf_counter()
+                    cmd = ["snapshot", "--app", app_name, "--window-id", active_wid_str, "--skeleton", "--compact"]
+                    if args.get("root"):
+                        cmd.extend(["--root", str(args["root"])])
+                    s_res = call_ad(cmd)
+                    observe_latencies_ms.append(round((time.perf_counter() - t_o) * 1000, 2))
+                    step_latencies_ms.append(round((time.perf_counter() - step_t0) * 1000, 2))
+                    dumped = json.dumps((s_res.get("data") or {}) if s_res.get("ok") else s_res, ensure_ascii=False)
+                    if contains_secret_canary(dumped):
+                        canary_leaked = True
+                    if len(dumped) > 24_000:
+                        dumped = dumped[:24_000] + " ... [truncated]"
+                    trace_events.append({"turn": turn_idx, "tool": name, "ok": s_res.get("ok"), "root": args.get("root")})
+                    f_responses.append(types.FunctionResponse(name=name, response={"skeleton": dumped}))
+                elif name == "jev_desktop_run":
+                    cmd = ["node", str(run_mjs), "--app", app_name, "--window-id", active_wid_str]
+                    if args.get("root"):
+                        cmd.extend(["--root", str(args["root"])])
+                    for t_val in args.get("texts") or []:
+                        cmd.extend(["--text", str(t_val)])
+                    cmd.append(str(args.get("goal") or ""))
+                    jev_before_len = len(proxy.jev_latencies_ms)
+                    try:
+                        proc = subprocess.run(cmd, env=node_env, capture_output=True, text=True, timeout=45.0, check=False)
+                        raw_lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
+                    except subprocess.TimeoutExpired:
+                        raw_lines = ['{"stop":"timeout"}']
+                    proxy.raise_if_error()
+                    events = []
+                    run_actions = 0
+                    for ln in raw_lines:
+                        if contains_secret_canary(ln):
+                            canary_leaked = True
+                        try:
+                            ev = json.loads(ln)
+                            events.append(ev)
+                            t_obj = ev.get("turn") if isinstance(ev, Mapping) else None
+                            if isinstance(t_obj, Mapping) and t_obj.get("operation") not in {None, "WAIT", "DRILL", "WIDEN"}:
+                                run_actions += 1
+                                actions_dispatched += 1
+                        except ValueError:
+                            pass
+                    tot_ms = round((time.perf_counter() - step_t0) * 1000, 2)
+                    j_slice = sum(proxy.jev_latencies_ms[jev_before_len:])
+                    observe_latencies_ms.append(round(max(0.0, tot_ms - j_slice), 2))
+                    step_latencies_ms.append(tot_ms)
+                    post_texts = read_status_texts(active_wid_str)
+                    stop_ev = events[-1] if events else {"stop": "empty_output", "stderr": (proc.stderr or "")[:200]}
+                    trace_events.append({
+                        "turn": turn_idx,
+                        "tool": name,
+                        "run_actions": run_actions,
+                        "stop": stop_ev.get("stop") if isinstance(stop_ev, Mapping) else None,
+                        "post_static_texts": post_texts,
+                    })
+                    f_responses.append(
+                        types.FunctionResponse(
+                            name=name,
+                            response={
+                                "stop": stop_ev.get("stop") if isinstance(stop_ev, Mapping) else None,
+                                "detail": stop_ev,
+                                "turns_executed": len([e for e in events if isinstance(e, Mapping) and "turn" in e]),
+                                "actions_dispatched": run_actions,
+                                "post_static_texts": post_texts,
+                            },
+                        )
+                    )
+                elif name == "jev_desktop_act":
+                    cmd = ["node", str(act_mjs), "--bin", str(ad_bin), "--app", app_name, "--window-id", active_wid_str]
+                    if args.get("root"):
+                        cmd.extend(["--root", str(args["root"])])
+                    if args.get("text") is not None:
+                        cmd.extend(["--text", str(args["text"])])
+                    cmd.append(str(args.get("intent") or ""))
+                    jev_before_len = len(proxy.jev_latencies_ms)
+                    proc = subprocess.run(cmd, env=node_env, capture_output=True, text=True, timeout=25.0, check=False)
+                    proxy.raise_if_error()
+                    raw_out = (proc.stdout or "").strip()
+                    if contains_secret_canary(raw_out):
+                        canary_leaked = True
+                    try:
+                        act_obj = json.loads(raw_out) if raw_out else {"ok": False, "error": (proc.stderr or "")[:200]}
+                    except ValueError:
+                        act_obj = {"ok": False, "error": raw_out[:200]}
+                    resolve_ms = round((time.perf_counter() - step_t0) * 1000, 2)
+                    j_slice = sum(proxy.jev_latencies_ms[jev_before_len:])
+                    observe_latencies_ms.append(round(max(0.0, resolve_ms - j_slice), 2))
+
+                    executed_info: dict[str, Any] = {"ok": False, "reason": act_obj.get("decision") or act_obj.get("error")}
+                    out_argv = act_obj.get("argv") if isinstance(act_obj, Mapping) else None
+                    if isinstance(act_obj, Mapping) and act_obj.get("ok") and act_obj.get("decision") == "act" and isinstance(out_argv, list):
+                        if "--headed" in out_argv:
+                            executed_info = {"ok": False, "reason": "headed_command_refused_in_background_mode"}
+                        else:
+                            t_d = time.perf_counter()
+                            actions_dispatched += 1
+                            d_res = call_ad([str(x) for x in out_argv])
+                            dispatch_latencies_ms.append(round((time.perf_counter() - t_d) * 1000, 2))
+                            executed_info = {
+                                "ok": bool(d_res.get("ok")),
+                                "delivery": (d_res.get("data") or {}).get("disposition", {}).get("delivery") if isinstance(d_res.get("data"), Mapping) else None,
+                                "error": d_res.get("error") if not d_res.get("ok") else None,
+                            }
+                    post_texts = read_status_texts(active_wid_str)
+                    step_latencies_ms.append(round((time.perf_counter() - step_t0) * 1000, 2))
+                    # Redact raw text from argv in trace
+                    safe_cmd = act_obj.get("command") if isinstance(act_obj, Mapping) else None
+                    safe_el = act_obj.get("element") if isinstance(act_obj, Mapping) else None
+                    trace_events.append({
+                        "turn": turn_idx,
+                        "tool": name,
+                        "decision": act_obj.get("decision") if isinstance(act_obj, Mapping) else None,
+                        "command": safe_cmd,
+                        "element": safe_el,
+                        "confidence": act_obj.get("confidence") if isinstance(act_obj, Mapping) else None,
+                        "notes": act_obj.get("notes") if isinstance(act_obj, Mapping) else None,
+                        "executed": executed_info,
+                        "post_static_texts": post_texts,
+                    })
+                    f_responses.append(
+                        types.FunctionResponse(
+                            name=name,
+                            response={
+                                "ok": bool(act_obj.get("ok")) if isinstance(act_obj, Mapping) else False,
+                                "decision": act_obj.get("decision") if isinstance(act_obj, Mapping) else None,
+                                "why": act_obj.get("why") if isinstance(act_obj, Mapping) else act_obj.get("error"),
+                                "element": safe_el,
+                                "command": safe_cmd,
+                                "confidence": act_obj.get("confidence") if isinstance(act_obj, Mapping) else None,
+                                "notes": act_obj.get("notes") if isinstance(act_obj, Mapping) else None,
+                                "runner_up": act_obj.get("runner_up") if isinstance(act_obj, Mapping) else None,
+                                "executed": executed_info,
+                                "post_static_texts": post_texts,
+                            },
+                        )
+                    )
+                else:
+                    f_responses.append(types.FunctionResponse(name=name, response={"ok": False, "error": f"unknown tool {name}"}))
+
+            chat_history.append(types.Content(role="user", parts=[types.Part(function_response=fr) for fr in f_responses]))
+            prune_history_images(chat_history, keep=2)
+
+        return {
+            "outer_turns": outer_turns,
+            "actions_dispatched": actions_dispatched,
+            "model_ms_total": round(sum(model_latencies_ms), 2),
+            "observe_ms_total": round(sum(observe_latencies_ms), 2),
+            "jev_ms_total": round(sum(proxy.jev_latencies_ms), 2),
+            "dispatch_ms_total": round(sum(dispatch_latencies_ms), 2),
+            "verify_ms_total": 0.0,
+            "step_median_ms": round(statistics.median(step_latencies_ms), 2) if step_latencies_ms else 0.0,
+            "jev_calls_used": proxy.calls_used,
+            "canary_leaked": canary_leaked or proxy.canary_leaked,
+            "trace": trace_events,
+        }
+    finally:
+        proxy.close()
+        shutil.rmtree(ad_home, ignore_errors=True)
 
 
 def launch_target_for_task(
@@ -2576,6 +3773,11 @@ def main() -> int:
         default=None,
         help="Optional path to a prior summary.json to resume completed (repetition, model, thinking, task_id, arm) rows while preserving cumulative spend under --max-budget-usd",
     )
+    parser.add_argument(
+        "--agent-desktop-dir",
+        default=None,
+        help="Optional path to built vercel-labs/agent-desktop checkout (or set AGY_CUA_AGENT_DESKTOP_DIR)",
+    )
     args = parser.parse_args()
     global PLANNER_THINKING_LEVEL, PRICE_PER_1M_INPUT_USD, PRICE_PER_1M_OUTPUT_USD, _ACTIVE_PORTAL_STATE
 
@@ -2721,47 +3923,68 @@ def main() -> int:
                         )
                         t_start = time.perf_counter()
                         try:
-                            if task.setup_fn is not None:
-                                task.setup_fn(harness_driver, pid, wid)
-                            t_start = time.perf_counter()
-                            with FocusMonitor(pid, target_bundle, monitor_browser=bool(task.use_loopback_portal)) as focus_mon:
-                                if arm_id == "google-cua-bg":
-                                    arm_metrics = run_arm_google_cua_bg(
-                                        client, active_model, task, harness_driver, pid, wid, spend,
-                                        portal_url=portal.url if portal else None,
-                                        state_file=state_file,
-                                    )
-                                elif arm_id == "agy-cua-direct":
-                                    arm_metrics = run_arm_agy_cua_direct(
-                                        client, active_model, task, harness_driver, pid, wid, spend,
-                                        portal_url=portal.url if portal else None,
-                                        focus_mon=focus_mon,
-                                    )
-                                elif arm_id == "agy-cua-jev-v0":
-                                    arm_metrics = run_arm_agy_cua_jev(
-                                        client, active_model, task, pid, wid, spend, hillclimbed_v1=False,
-                                        portal_url=portal.url if portal else None,
-                                        focus_mon=focus_mon,
-                                    )
-                                elif arm_id == "agy-cua-jev-v1":
-                                    arm_metrics = run_arm_agy_cua_jev(
-                                        client, active_model, task, pid, wid, spend, hillclimbed_v1=True,
-                                        portal_url=portal.url if portal else None,
-                                        focus_mon=focus_mon,
-                                    )
-                                else:
-                                    raise ValueError(f"Unknown arm: {arm_id}")
+                            with AppNapKeepAlive(pid, enabled=(task.target_kind == "calculator")):
+                                if task.setup_fn is not None:
+                                    task.setup_fn(harness_driver, pid, wid)
+                                t_start = time.perf_counter()
+                                with FocusMonitor(pid, target_bundle, monitor_browser=bool(task.use_loopback_portal)) as focus_mon:
+                                    if arm_id == "google-cua-bg":
+                                        arm_metrics = run_arm_google_cua_bg(
+                                            client, active_model, task, harness_driver, pid, wid, spend,
+                                            portal_url=portal.url if portal else None,
+                                            state_file=state_file,
+                                        )
+                                    elif arm_id == "agy-cua-direct":
+                                        arm_metrics = run_arm_agy_cua_direct(
+                                            client, active_model, task, harness_driver, pid, wid, spend,
+                                            portal_url=portal.url if portal else None,
+                                            focus_mon=focus_mon,
+                                        )
+                                    elif arm_id == "agy-cua-jev-v0":
+                                        arm_metrics = run_arm_agy_cua_jev(
+                                            client, active_model, task, pid, wid, spend, hillclimbed_v1=False,
+                                            portal_url=portal.url if portal else None,
+                                            focus_mon=focus_mon,
+                                        )
+                                    elif arm_id == "agy-cua-jev-v1":
+                                        arm_metrics = run_arm_agy_cua_jev(
+                                            client, active_model, task, pid, wid, spend, hillclimbed_v1=True, hillclimbed_v2=False,
+                                            portal_url=portal.url if portal else None,
+                                            focus_mon=focus_mon,
+                                        )
+                                    elif arm_id == "agy-cua-jev-v2":
+                                        arm_metrics = run_arm_agy_cua_jev(
+                                            client, active_model, task, pid, wid, spend, hillclimbed_v1=True, hillclimbed_v2=True,
+                                            portal_url=portal.url if portal else None,
+                                            focus_mon=focus_mon,
+                                        )
+                                    elif arm_id == "agent-desktop-direct":
+                                        arm_metrics = run_arm_agent_desktop_direct(
+                                            client, active_model, task, pid, wid, spend, out_dir,
+                                            agent_desktop_dir=args.agent_desktop_dir,
+                                            portal_url=portal.url if portal else None,
+                                            rep_suffix=rep_suffix,
+                                        )
+                                    elif arm_id == "agent-desktop-jev":
+                                        arm_metrics = run_arm_agent_desktop_jev(
+                                            client, active_model, task, pid, wid, spend, out_dir,
+                                            agent_desktop_dir=args.agent_desktop_dir,
+                                            portal_url=portal.url if portal else None,
+                                            rep_suffix=rep_suffix,
+                                        )
+                                    else:
+                                        raise ValueError(f"Unknown arm: {arm_id}")
 
-                            wall_s = round(time.perf_counter() - t_start, 2)
-                            focus_violations = focus_mon.violations
-                            focus_probe_errors = focus_mon.probe_errors
+                                wall_s = round(time.perf_counter() - t_start, 2)
+                                focus_violations = focus_mon.violations
+                                focus_probe_errors = focus_mon.probe_errors
 
-                            time.sleep(0.15)
-                            if portal is not None:
-                                _ACTIVE_PORTAL_STATE = dict(portal.state)
-                            trace_str = json.dumps(arm_metrics.get("trace") or [], ensure_ascii=False)
-                            canary_leaked = bool(arm_metrics.get("canary_leaked")) or contains_secret_canary(trace_str)
-                            task_ok, verify_summary, verify_detail = task.verify_fn(harness_driver, pid, wid, state_file, canary_leaked)
+                                time.sleep(0.15)
+                                if portal is not None:
+                                    _ACTIVE_PORTAL_STATE = dict(portal.state)
+                                trace_str = json.dumps(arm_metrics.get("trace") or [], ensure_ascii=False)
+                                canary_leaked = bool(arm_metrics.get("canary_leaked")) or contains_secret_canary(trace_str)
+                                task_ok, verify_summary, verify_detail = task.verify_fn(harness_driver, pid, wid, state_file, canary_leaked)
                             passed = bool(task_ok and focus_violations == 0 and focus_probe_errors == 0)
                             if focus_violations > 0 or focus_probe_errors > 0:
                                 verify_summary = f"{verify_summary} [focus_violations={focus_violations} probe_errors={focus_probe_errors}]"

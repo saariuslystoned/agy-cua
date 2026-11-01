@@ -33,14 +33,14 @@ import weakref
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
-SERVER_INFO = {"name": "agy-cua-jev", "version": "0.2.0"}
+SERVER_INFO = {"name": "agy-cua-jev", "version": "0.3.0"}
 DEFAULT_PROTOCOL = "2025-06-18"
 
 HOSTED_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_KEYCHAIN_SERVICE = "typesafe-jev"
 PINNED_JEV_MODEL = "jev-1.13.0"
 LOCAL_KEV_MODEL = "kev-latest"
-CLIENT_IDENTITY = "agy-cua-jev-stdlib/0.2.0"
+CLIENT_IDENTITY = "agy-cua-jev-stdlib/0.3.0"
 
 DEFAULT_TIMEOUT_MS = 10_000
 MIN_TIMEOUT_MS = 1_000
@@ -59,6 +59,17 @@ MAX_CANDIDATES = 32
 MAX_AUTO_CANDIDATES = 28
 MAX_ELEMENTS = 64
 MAX_HISTORY = 16
+
+V2_MAX_JSON_BYTES = 131_072
+V2_MAX_CANDIDATES = 250
+V2_MAX_AUTO_CANDIDATES = 240
+V2_MAX_ELEMENTS = 240
+V2_RERANK_CONFIDENCE_THRESHOLD = 0.70
+V2_RERANK_SHORTLIST_K = 5
+DEFAULT_V2_WAIT_TIMEOUT_MS = 1_200
+MIN_WAIT_TIMEOUT_MS = 0
+MAX_WAIT_TIMEOUT_MS = 10_000
+SKELETON_SHALLOW_MAX_DEPTH = 2
 
 SNAPSHOT_ID_RE = re.compile(r"^s[0-9a-f]{8,}$")
 BROWSER_SNAPSHOT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
@@ -290,6 +301,19 @@ def clamp_batch_timeout_ms(raw: Any) -> int:
     return max(MIN_BATCH_TIMEOUT_MS, min(val, MAX_BATCH_TIMEOUT_MS))
 
 
+def is_v1_compat(env: Mapping[str, str] = os.environ) -> bool:
+    return (env.get("AGY_CUA_JEV_V1_COMPAT") or "").strip() == "1"
+
+
+def wake_macos_app_nap(pid: int) -> None:
+    if sys.platform != "darwin" or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return
+    try:
+        os.kill(pid, signal.SIGCONT)
+    except OSError:
+        pass
+
+
 def resolve_session_id(env: Mapping[str, str] = os.environ) -> str:
     raw = (env.get("AGY_CUA_SESSION_ID") or "").strip()
     if raw and SESSION_ID_RE.match(raw):
@@ -358,6 +382,7 @@ def resolve_route(
 
 def describe_status(route: JevRoute, accounting: SessionAccounting, env: Mapping[str, str] = os.environ) -> dict[str, Any]:
     driver = find_driver(env)
+    v1_mode = is_v1_compat(env)
     payload: dict[str, Any] = {
         "schema": "agy_cua.jev_status_v1",
         "ready": route.kind != "none" and not accounting.halted,
@@ -365,6 +390,9 @@ def describe_status(route: JevRoute, accounting: SessionAccounting, env: Mapping
         "pinned_model": PINNED_JEV_MODEL,
         "configured_model": route.model,
         "sdk_identity": CLIENT_IDENTITY,
+        "controller_profile": "v1_compat" if v1_mode else "v2",
+        "max_auto_candidates": MAX_AUTO_CANDIDATES if v1_mode else V2_MAX_AUTO_CANDIDATES,
+        "default_wait_timeout_ms": 0 if v1_mode else DEFAULT_V2_WAIT_TIMEOUT_MS,
         "endpoint_origin": urllib.parse.urlsplit(route.endpoint).netloc if route.endpoint else None,
         "timeout_ms": route.timeout_ms,
         "driver_available": bool(driver),
@@ -405,12 +433,18 @@ def _reject_binary_or_image_payload(raw_json_or_obj: Any, obj: Any = None) -> No
         )
 
 
-def validate_select_request(args: Mapping[str, Any]) -> dict[str, Any]:
+def validate_select_request(
+    args: Mapping[str, Any],
+    *,
+    max_elements: int = MAX_ELEMENTS,
+    max_candidates: int = MAX_CANDIDATES,
+    max_json_bytes: int = MAX_JSON_BYTES,
+) -> dict[str, Any]:
     if not isinstance(args, Mapping):
         raise ValueError("request arguments must be a JSON object")
     raw_json = json.dumps(args, ensure_ascii=False)
-    if len(raw_json.encode("utf-8")) > MAX_JSON_BYTES:
-        raise ValueError(f"request exceeds maximum size of {MAX_JSON_BYTES} bytes")
+    if len(raw_json.encode("utf-8")) > max_json_bytes:
+        raise ValueError(f"request exceeds maximum size of {max_json_bytes} bytes")
     _reject_binary_or_image_payload(raw_json, args)
 
     allowed_keys = {"goal", "pid", "window_id", "snapshot_id", "elements", "history", "candidates"}
@@ -434,8 +468,8 @@ def validate_select_request(args: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("snapshot_id must match ^s[0-9a-f]{8,}$")
 
     raw_elements = args.get("elements", [])
-    if not isinstance(raw_elements, list) or len(raw_elements) > MAX_ELEMENTS:
-        raise ValueError(f"elements must be a list of at most {MAX_ELEMENTS} items")
+    if not isinstance(raw_elements, list) or len(raw_elements) > max_elements:
+        raise ValueError(f"elements must be a list of at most {max_elements} items")
     elements: list[dict[str, Any]] = []
     for item in raw_elements:
         if not isinstance(item, Mapping):
@@ -449,6 +483,7 @@ def validate_select_request(args: Mapping[str, Any]) -> dict[str, Any]:
             "depth",
             "in_toolbar",
             "supported_actions",
+            "container_path",
         }
         if not set(item.keys()).issubset(el_allowed):
             raise ValueError(f"element contains unsupported fields: {sorted(set(item.keys()) - el_allowed)}")
@@ -486,6 +521,12 @@ def validate_select_request(args: Mapping[str, Any]) -> dict[str, Any]:
             if not isinstance(raw_sa, list) or not all(isinstance(a, str) for a in raw_sa):
                 raise ValueError("element supported_actions must be a list of strings")
             entry["supported_actions"] = [a.strip()[:32] for a in raw_sa if a.strip()][:8]
+        if "container_path" in item and item["container_path"] is not None:
+            if not isinstance(item["container_path"], str):
+                raise ValueError("element container_path must be a string")
+            cp_val = item["container_path"].strip()[:256]
+            if cp_val:
+                entry["container_path"] = cp_val
         elements.append(entry)
 
     raw_history = args.get("history", [])
@@ -528,8 +569,8 @@ def validate_select_request(args: Mapping[str, Any]) -> dict[str, Any]:
             candidates.append({"id": reserved_id, "description": reserved_desc})
             seen_ids.add(reserved_id)
 
-    if len(candidates) < 2 or len(candidates) > MAX_CANDIDATES:
-        raise ValueError(f"total candidates (including reobserve/abstain) must be between 2 and {MAX_CANDIDATES}")
+    if len(candidates) < 2 or len(candidates) > max_candidates:
+        raise ValueError(f"total candidates (including reobserve/abstain) must be between 2 and {max_candidates}")
 
     executable_count = sum(1 for c in candidates if c["id"] not in RESERVED_CANDIDATES)
     if executable_count < 1:
@@ -550,7 +591,7 @@ def _default_urlopen(req: urllib.request.Request, timeout_s: float) -> tuple[int
     opener = urllib.request.build_opener(_NoRedirectHandler())
     with opener.open(req, timeout=timeout_s) as resp:
         status = getattr(resp, "status", 200)
-        body = resp.read(4 * MAX_JSON_BYTES + 1).decode("utf-8", errors="replace")
+        body = resp.read(4 * V2_MAX_JSON_BYTES + 1).decode("utf-8", errors="replace")
         return status, body
 
 
@@ -669,7 +710,7 @@ def evaluate_jev_choice(
         accounting.halt_reason = "uncertain_provider_outcome"
         return error_result("provider_http_error", f"Unexpected HTTP status {status}.")
 
-    if len(text.encode("utf-8")) > 4 * MAX_JSON_BYTES:
+    if len(text.encode("utf-8")) > 4 * V2_MAX_JSON_BYTES:
         accounting.halted = True
         accounting.halt_reason = "invalid_provider_response"
         return error_result("invalid_response", "Provider response exceeded size limit.")
@@ -857,6 +898,152 @@ def _is_unlabeled_window_button(element: Mapping[str, Any], by_index: Mapping[in
 
 
 _TREE_MD_LINE_RE = re.compile(r"^(\s*)-\s*(?:\[(?:e)?(\d+)\]\s*)?([A-Za-z0-9_]+)")
+
+_LEAF_CONTROL_ROLES = frozenset({
+    "AXButton",
+    "AXRadioButton",
+    "AXCheckBox",
+    "AXPopUpButton",
+    "AXTextField",
+    "AXSecureTextField",
+    "AXTextArea",
+    "AXSearchField",
+    "AXComboBox",
+    "AXSlider",
+    "AXIncrementor",
+    "AXLink",
+    "AXMenuButton",
+    "AXDisclosureTriangle",
+    "AXStaticText",
+})
+
+
+def _extract_md_node_label(rest: str) -> str:
+    s = rest.strip()
+    if not s or s.startswith("="):
+        return ""
+    if s.startswith('"'):
+        m_q = re.match(r'^"((?:[^"\\]|\\.)*)"', s)
+        if m_q:
+            try:
+                return str(json.loads(f'"{m_q.group(1)}"')).replace("\u200e", "").strip()
+            except ValueError:
+                return m_q.group(1).replace("\u200e", "").strip()
+    if s.startswith("("):
+        head = s.split(" = ", 1)[0].strip()
+        if head.startswith("(") and head.endswith(")"):
+            return head[1:-1].replace("\u200e", "").strip()
+        m_p = re.match(r"^\(([^)]+)\)", s)
+        if m_p:
+            return m_p.group(1).replace("\u200e", "").strip()
+    return ""
+
+
+def _matches_region(segments: list[str], region_filter: str) -> bool:
+    if not segments:
+        return False
+    norm_segs = [s.strip().lower() for s in segments if s.strip()]
+    parts = [p.strip().lower() for p in region_filter.split(">") if p.strip()]
+    if not parts:
+        return False
+    if len(parts) == 1:
+        target = parts[0]
+        return any(s == target for s in norm_segs)
+    pos = 0
+    for seg in norm_segs:
+        if seg == parts[pos]:
+            pos += 1
+            if pos == len(parts):
+                return True
+    return False
+
+
+def _parse_markdown_containers(
+    tree_md: str,
+) -> tuple[
+    dict[int, list[str]],
+    dict[int, set[int]],
+    dict[str, int],
+    set[int],
+    list[list[str]],
+    list[tuple[str, list[str], set[int], set[int]]],
+]:
+    """Parse container paths, ancestor index sets, region root indices, and scoped static texts from tree_markdown."""
+    container_segments_by_el: dict[int, list[str]] = {}
+    ancestor_indices_by_el: dict[int, set[int]] = {}
+    container_index_by_region: dict[str, int] = {}
+    known_container_indices: set[int] = set()
+    known_container_paths: list[list[str]] = []
+    md_static_entries: list[tuple[str, list[str], set[int], set[int]]] = []
+    node_by_level: dict[int, tuple[str, int | None, str]] = {}
+
+    for line in tree_md.splitlines():
+        m = _TREE_MD_LINE_RE.match(line)
+        if not m:
+            for st_raw in re.findall(r'AXStaticText = "([^"]*)"', line):
+                st_clean = st_raw.replace("\u200e", "").strip()
+                if st_clean:
+                    md_static_entries.append((st_clean, [], set(), set()))
+            continue
+        indent, idx_str, role = m.group(1), m.group(2), m.group(3)
+        level = len(indent) // 2
+        for deeper in [k for k in node_by_level if k >= level]:
+            del node_by_level[deeper]
+
+        sorted_anc = sorted(node_by_level.keys())
+        all_anc_ids: set[int] = set()
+        non_root_anc_ids: set[int] = set()
+        anc_segments: list[str] = []
+        for k in sorted_anc:
+            a_role, a_idx, a_lbl = node_by_level[k]
+            if a_idx is not None:
+                all_anc_ids.add(a_idx)
+                if a_role not in WINDOW_ROOT_ROLES:
+                    non_root_anc_ids.add(a_idx)
+            if (
+                a_role not in WINDOW_ROOT_ROLES
+                and a_role not in MENU_BAR_ROLES
+                and a_role not in _LEAF_CONTROL_ROLES
+                and a_lbl
+                and (not anc_segments or anc_segments[-1] != a_lbl)
+            ):
+                anc_segments.append(a_lbl)
+
+        own_idx = int(idx_str) if idx_str is not None else None
+        own_label = _extract_md_node_label(line[m.end() :])
+
+        if role not in WINDOW_ROOT_ROLES and role not in MENU_BAR_ROLES and role not in _LEAF_CONTROL_ROLES:
+            if own_idx is not None:
+                known_container_indices.add(own_idx)
+            if own_label:
+                curr_path = anc_segments + ([own_label] if not anc_segments or anc_segments[-1] != own_label else [])
+                known_container_paths.append(curr_path)
+                if own_idx is not None:
+                    container_index_by_region.setdefault(own_label, own_idx)
+        elif own_idx is not None and role in WINDOW_ROOT_ROLES:
+            known_container_indices.add(own_idx)
+
+        if own_idx is not None:
+            ancestor_indices_by_el[own_idx] = set(all_anc_ids)
+            if anc_segments:
+                container_segments_by_el[own_idx] = list(anc_segments)
+
+        if role == "AXStaticText":
+            for st_raw in re.findall(r'AXStaticText = "([^"]*)"', line):
+                st_clean = st_raw.replace("\u200e", "").strip()
+                if st_clean:
+                    md_static_entries.append((st_clean, list(anc_segments), set(all_anc_ids), set(non_root_anc_ids)))
+
+        node_by_level[level] = (role, own_idx, own_label)
+
+    return (
+        container_segments_by_el,
+        ancestor_indices_by_el,
+        container_index_by_region,
+        known_container_indices,
+        known_container_paths,
+        md_static_entries,
+    )
 
 
 def _parse_markdown_hierarchy(tree_md: str) -> tuple[dict[int, int], set[int]]:
@@ -1690,6 +1877,12 @@ def extract_window_observation(
     query: str | None = None,
     baseline_observation: Mapping[str, Any] | None = None,
     previous_observation: Mapping[str, Any] | None = None,
+    skeleton: bool = False,
+    region: str | None = None,
+    root_element_index: int | None = None,
+    max_elements_cap: int = MAX_ELEMENTS,
+    max_auto_candidates: int = MAX_AUTO_CANDIDATES,
+    enrich_descriptions: bool = False,
 ) -> dict[str, Any]:
     """Validate and extract structured AX elements and static texts from get_window_state."""
     if baseline_observation is None and previous_observation is not None:
@@ -1847,11 +2040,111 @@ def extract_window_observation(
                 if st_clean and st_clean not in raw_static_texts:
                     raw_static_texts.append(st_clean)
     md_depth, md_toolbar_ids, md_menubar_ids, md_unlabeled_value_ids = _parse_markdown_hierarchy_full(tree_md)
+    (
+        container_segments_by_el,
+        ancestor_indices_by_el,
+        container_index_by_region,
+        known_container_indices,
+        known_container_paths,
+        md_static_entries,
+    ) = _parse_markdown_containers(tree_md)
 
     by_index: dict[int, Mapping[str, Any]] = {}
     for item in raw_elements:
         if isinstance(item, Mapping) and isinstance(item.get("element_index"), int):
             by_index[item["element_index"]] = item
+
+    def _parent_chain_meta(el_map: Mapping[str, Any]) -> tuple[list[str], set[int], set[int]]:
+        seen_p: set[int] = set()
+        curr_p = el_map.get("parent_index")
+        all_p_ids: set[int] = set()
+        non_root_p_ids: set[int] = set()
+        rev_segs: list[str] = []
+        while isinstance(curr_p, int) and not isinstance(curr_p, bool) and curr_p not in seen_p:
+            seen_p.add(curr_p)
+            all_p_ids.add(curr_p)
+            p_el = by_index.get(curr_p)
+            if p_el is None:
+                non_root_p_ids.add(curr_p)
+                break
+            p_role = str(p_el.get("role") or "").strip()
+            if p_role not in WINDOW_ROOT_ROLES:
+                non_root_p_ids.add(curr_p)
+            p_lbl = str(
+                p_el.get("label")
+                if p_el.get("label") not in (None, "")
+                else (p_el.get("title") if p_el.get("title") not in (None, "") else p_el.get("description") or "")
+            ).replace("\u200e", "").strip()
+            if (
+                p_role not in WINDOW_ROOT_ROLES
+                and p_role not in MENU_BAR_ROLES
+                and p_role not in _LEAF_CONTROL_ROLES
+            ):
+                known_container_indices.add(curr_p)
+                if p_lbl:
+                    container_index_by_region.setdefault(p_lbl, curr_p)
+                    if not rev_segs or rev_segs[-1] != p_lbl:
+                        rev_segs.append(p_lbl)
+            elif p_role in WINDOW_ROOT_ROLES:
+                known_container_indices.add(curr_p)
+            curr_p = p_el.get("parent_index")
+        segs_out = list(reversed(rev_segs))
+        if segs_out:
+            known_container_paths.append(segs_out)
+        return segs_out, all_p_ids, non_root_p_ids
+
+    for idx_k, el_k in by_index.items():
+        k_role = str(el_k.get("role") or "").strip()
+        k_lbl = str(
+            el_k.get("label")
+            if el_k.get("label") not in (None, "")
+            else (el_k.get("title") if el_k.get("title") not in (None, "") else el_k.get("description") or "")
+        ).replace("\u200e", "").strip()
+        p_segs, p_all_ids, _ = _parent_chain_meta(el_k)
+        ancestor_indices_by_el.setdefault(idx_k, set()).update(p_all_ids)
+        if not container_segments_by_el.get(idx_k) and p_segs:
+            container_segments_by_el[idx_k] = p_segs
+        if k_role not in WINDOW_ROOT_ROLES and k_role not in MENU_BAR_ROLES and k_role not in _LEAF_CONTROL_ROLES:
+            known_container_indices.add(idx_k)
+            if k_lbl:
+                container_index_by_region.setdefault(k_lbl, idx_k)
+                own_segs = list(container_segments_by_el.get(idx_k) or [])
+                if not own_segs or own_segs[-1] != k_lbl:
+                    own_segs.append(k_lbl)
+                known_container_paths.append(own_segs)
+        elif k_role in WINDOW_ROOT_ROLES:
+            known_container_indices.add(idx_k)
+
+    seen_md_st = {entry[0] for entry in md_static_entries}
+    for raw_el in raw_elements:
+        if isinstance(raw_el, Mapping) and str(raw_el.get("role") or "").strip() == "AXStaticText":
+            st_val = raw_el.get("value") if raw_el.get("value") not in (None, "") else raw_el.get("label")
+            if isinstance(st_val, str):
+                st_clean = st_val.replace("\u200e", "").strip()
+                if st_clean and st_clean not in seen_md_st:
+                    p_segs, p_all_ids, p_non_root_ids = _parent_chain_meta(raw_el)
+                    st_idx = raw_el.get("element_index")
+                    if isinstance(st_idx, int) and st_idx in container_segments_by_el and not p_segs:
+                        p_segs = list(container_segments_by_el[st_idx])
+                    if isinstance(st_idx, int) and st_idx in ancestor_indices_by_el:
+                        p_all_ids = p_all_ids | ancestor_indices_by_el[st_idx]
+                        p_non_root_ids = {
+                            aid
+                            for aid in p_all_ids
+                            if str((by_index.get(aid) or {}).get("role") or "") not in WINDOW_ROOT_ROLES
+                        }
+                    md_static_entries.append((st_clean, p_segs, p_all_ids, p_non_root_ids))
+                    seen_md_st.add(st_clean)
+
+    eff_region = region.strip() if isinstance(region, str) and region.strip() else None
+    if root_element_index is not None:
+        if root_element_index not in by_index and root_element_index not in known_container_indices:
+            raise ValueError(
+                f"unknown_root_element_index: element_index={root_element_index} not found in snapshot {snapshot_id}"
+            )
+    if eff_region is not None:
+        if not any(_matches_region(c_segs, eff_region) for c_segs in known_container_paths):
+            raise ValueError(f"unknown_region: region={eff_region!r} not found in window hierarchy")
 
     win_root_label = ""
     for raw_el in raw_elements:
@@ -1979,6 +2272,7 @@ def extract_window_observation(
         )
         priority_tier = 0 if (in_toolbar or is_open_and_fill_ctrl) else sidebar_secondary_ids.get(idx, 1)
 
+        el_segs = container_segments_by_el.get(idx) or []
         compact_el: dict[str, Any] = {
             "element_index": idx,
             "role": role,
@@ -1994,6 +2288,8 @@ def extract_window_observation(
         }
         if value is not None:
             compact_el["value"] = value
+        if el_segs and (enrich_descriptions or skeleton or eff_region is not None or root_element_index is not None):
+            compact_el["container_path"] = " > ".join(el_segs)[:240]
 
         matches_query = True
         if eff_query is not None:
@@ -2003,6 +2299,7 @@ def extract_window_observation(
                 raw_label_val,
                 role,
                 value or "",
+                " > ".join(el_segs),
                 str(el.get("title") or ""),
                 str(el.get("description") or ""),
             ]).lower()
@@ -2013,15 +2310,92 @@ def extract_window_observation(
         else:
             explicit_target_elements.append(compact_el)
 
-    static_texts = [
+    window_total_actionable = len(compact_elements)
+
+    region_buckets: dict[str, dict[str, Any]] = {}
+    for cel in compact_elements:
+        c_idx = cel["element_index"]
+        c_segs = container_segments_by_el.get(c_idx) or []
+        if not c_segs:
+            continue
+        top_reg = c_segs[0]
+        bucket = region_buckets.get(top_reg)
+        if bucket is None:
+            bucket = {
+                "region": top_reg,
+                "actionable_count": 0,
+                "subregions": [],
+                "sample_labels": [],
+            }
+            if top_reg in container_index_by_region:
+                bucket["element_index"] = container_index_by_region[top_reg]
+            region_buckets[top_reg] = bucket
+        bucket["actionable_count"] += 1
+        if len(c_segs) > 1 and c_segs[1] not in bucket["subregions"] and len(bucket["subregions"]) < 8:
+            bucket["subregions"].append(c_segs[1])
+        c_lbl = str(cel.get("label") or "").strip()
+        if c_lbl and c_lbl not in bucket["sample_labels"] and len(bucket["sample_labels"]) < 4:
+            bucket["sample_labels"].append(c_lbl)
+    drill_regions: list[dict[str, Any]] = list(region_buckets.values())
+
+    def _el_in_subtree_scope(cel: Mapping[str, Any]) -> bool:
+        c_idx = cel["element_index"]
+        c_segs = container_segments_by_el.get(c_idx) or []
+        c_anc_ids = ancestor_indices_by_el.get(c_idx, set())
+        if eff_region is not None and not _matches_region(c_segs, eff_region):
+            return False
+        if root_element_index is not None and c_idx != root_element_index and root_element_index not in c_anc_ids:
+            return False
+        return True
+
+    if eff_region is not None or root_element_index is not None:
+        scoped_compact_elements = [e for e in compact_elements if _el_in_subtree_scope(e)]
+        scoped_explicit_elements = [e for e in explicit_target_elements if _el_in_subtree_scope(e)]
+    elif skeleton:
+        scoped_compact_elements = [
+            e
+            for e in compact_elements
+            if not container_segments_by_el.get(e["element_index"])
+            and (e.get("in_toolbar") or e.get("depth", 1) <= SKELETON_SHALLOW_MAX_DEPTH)
+        ]
+        scoped_explicit_elements = [
+            e
+            for e in explicit_target_elements
+            if not container_segments_by_el.get(e["element_index"])
+            and (e.get("in_toolbar") or e.get("depth", 1) <= SKELETON_SHALLOW_MAX_DEPTH)
+        ]
+    else:
+        scoped_compact_elements = compact_elements
+        scoped_explicit_elements = explicit_target_elements
+
+    all_clean_static_texts = [
         t
         for t in raw_static_texts
         if not _BULLET_MASK_RE.search(t) and t not in redacted_static_values
     ]
+    if not skeleton and eff_region is None and root_element_index is None:
+        static_texts = all_clean_static_texts
+    else:
+        scoped_st: list[str] = []
+        for st_txt, st_segs, st_all_ids, st_non_root_ids in md_static_entries:
+            if _BULLET_MASK_RE.search(st_txt) or st_txt in redacted_static_values or st_txt in scoped_st:
+                continue
+            is_top_level_st = not st_segs and not st_non_root_ids
+            if eff_region is not None or root_element_index is not None:
+                in_reg = eff_region is None or _matches_region(st_segs, eff_region)
+                in_root = root_element_index is None or root_element_index in st_all_ids
+                if is_top_level_st or (in_reg and in_root):
+                    scoped_st.append(st_txt)
+            elif skeleton:
+                if is_top_level_st:
+                    scoped_st.append(st_txt)
+        if skeleton and eff_region is None and root_element_index is None and not scoped_st:
+            scoped_st = all_clean_static_texts[:8]
+        static_texts = scoped_st
 
     # Prioritize toolbar controls first, then primary content controls, then secondary sidebar lists, breaking ties by depth and element_index
     prioritized_elements = sorted(
-        compact_elements,
+        scoped_compact_elements,
         key=lambda e: (
             e.get("priority_tier", 1),
             max(1, e.get("depth", 1) - 1) if e.get("role") == "AXMenuItem" else e.get("depth", 1),
@@ -2042,7 +2416,7 @@ def extract_window_observation(
         ) is not None:
             continue
         total_click_candidates += 1
-        if len(auto_candidates) >= MAX_AUTO_CANDIDATES:
+        if len(auto_candidates) >= max_auto_candidates:
             continue
         idx = compact_el["element_index"]
         role = compact_el["role"]
@@ -2054,6 +2428,17 @@ def extract_window_observation(
             suffix += 1
         used_ids.add(cid)
         desc = f"Click [{idx}] {role} {json.dumps(display_label, ensure_ascii=False)}"
+        if enrich_descriptions:
+            c_path = compact_el.get("container_path")
+            if isinstance(c_path, str) and c_path:
+                desc += f" in {c_path[:160]}"
+            if (
+                role in {"AXPopUpButton", "AXCheckBox", "AXRadioButton"}
+                and "value" in compact_el
+                and compact_el["value"] not in (None, "")
+                and len(str(compact_el["value"])) <= 40
+            ):
+                desc += f" (current={json.dumps(str(compact_el['value']), ensure_ascii=False)})"
         auto_candidates.append({
             "id": cid,
             "description": desc,
@@ -2071,9 +2456,13 @@ def extract_window_observation(
             },
         })
 
-    bounded_elements = prioritized_elements[:MAX_ELEMENTS]
-    all_elements = prioritized_elements + explicit_target_elements
-    total_actionable_elements = len(prioritized_elements)
+    bounded_elements = prioritized_elements[:max_elements_cap]
+    all_elements = prioritized_elements + scoped_explicit_elements
+    total_actionable_elements = (
+        window_total_actionable
+        if (skeleton and eff_region is None and root_element_index is None)
+        else len(prioritized_elements)
+    )
     matched_elements_count = len(prioritized_elements)
     omitted_elements_count = max(0, total_actionable_elements - len(bounded_elements))
     omitted_candidates_count = max(0, total_click_candidates - len(auto_candidates))
@@ -2100,7 +2489,14 @@ def extract_window_observation(
     else:
         query_status = "unfiltered_truncated" if observation_truncated else "unfiltered_complete"
     visual_fallback_recommended = bool(
-        matched_elements_count == 0 and not driver_truncated and not walk_truncated and eff_query is None
+        window_total_actionable == 0
+        and matched_elements_count == 0
+        and not driver_truncated
+        and not walk_truncated
+        and eff_query is None
+        and not skeleton
+        and eff_region is None
+        and root_element_index is None
     )
 
     win_w, win_h = _observation_window_size(sc)
@@ -2143,6 +2539,10 @@ def extract_window_observation(
         "candidates_omitted": omitted_candidates_count,
         "observation_truncated": observation_truncated,
         "reconstructed_from_diff": bool(is_diff_payload),
+        "skeleton": bool(skeleton),
+        "region": eff_region,
+        "root_element_index": root_element_index,
+        "drill_regions": drill_regions,
         "static_texts": static_texts,
         "indexed_element_ids": {e["element_index"] for e in all_elements},
         "secure_element_ids": {
@@ -2167,6 +2567,8 @@ def build_bound_candidates(
     *,
     action_value: str | None = None,
     source_snapshot_id: str | None = None,
+    max_auto_candidates: int = MAX_AUTO_CANDIDATES,
+    enrich_descriptions: bool = False,
 ) -> list[dict[str, Any]]:
     """Build or validate caller-supplied executable candidates bound to (pid, window_id, snapshot_id)."""
     pid = observation["pid"]
@@ -2207,7 +2609,7 @@ def build_bound_candidates(
                     or (role == "AXCheckBox" and not is_bool_action_val)
                 ):
                     continue
-                if len(sv_candidates) >= MAX_AUTO_CANDIDATES:
+                if len(sv_candidates) >= max_auto_candidates:
                     break
                 base_id = f"sv.{idx}.{_slug(label)}"
                 cid = base_id
@@ -2216,9 +2618,13 @@ def build_bound_candidates(
                     cid = f"{base_id}-{suffix}"
                     suffix += 1
                 used_sv_ids.add(cid)
+                sv_desc = f"Set [{idx}] {role} {json.dumps(label, ensure_ascii=False)}"
+                if enrich_descriptions and isinstance(el.get("container_path"), str) and el.get("container_path"):
+                    sv_desc += f" in {str(el['container_path'])[:160]}"
+                sv_desc += " to value"
                 sv_candidates.append({
                     "id": cid,
-                    "description": f"Set [{idx}] {role} {json.dumps(label, ensure_ascii=False)} to value",
+                    "description": sv_desc,
                     "pid": pid,
                     "window_id": window_id,
                     "snapshot_id": snapshot_id,
@@ -2273,8 +2679,8 @@ def build_bound_candidates(
             )
         return auto
 
-    if not isinstance(raw_candidates, list) or len(raw_candidates) < 1 or len(raw_candidates) > MAX_AUTO_CANDIDATES:
-        raise ValueError(f"candidates must be a list of 1 to {MAX_AUTO_CANDIDATES} items")
+    if not isinstance(raw_candidates, list) or len(raw_candidates) < 1 or len(raw_candidates) > max_auto_candidates:
+        raise ValueError(f"candidates must be a list of 1 to {max_auto_candidates} items")
 
     _reject_binary_or_image_payload(json.dumps(raw_candidates, ensure_ascii=False), raw_candidates)
     win_w, win_h = _observation_window_size(observation)
@@ -3115,6 +3521,8 @@ def extract_browser_observation(
     *,
     expected_target_id: str | None = None,
     expected_tab_id: str | None = None,
+    max_elements_cap: int = MAX_ELEMENTS,
+    max_auto_candidates: int = MAX_AUTO_CANDIDATES,
 ) -> dict[str, Any]:
     if not isinstance(driver_result, Mapping):
         raise ValueError("get_browser_state result must be a JSON object")
@@ -3287,15 +3695,15 @@ def extract_browser_observation(
         "snapshot_id": snap,
         "url": url,
         "title": title,
-        "elements": elements[:MAX_ELEMENTS],
+        "elements": elements[:max_elements_cap],
         "all_elements": elements,
         "valid_refs": valid_refs,
         "secure_refs": secure_refs,
         "static_texts": static_texts,
         "total_actionable_elements": len(elements),
-        "omitted_elements_count": max(0, len(elements) - len(elements[:MAX_ELEMENTS])),
-        "omitted_candidates_count": max(0, len(elements) - MAX_AUTO_CANDIDATES),
-        "observation_truncated": len(elements) > MAX_ELEMENTS or len(elements) > MAX_AUTO_CANDIDATES,
+        "omitted_elements_count": max(0, len(elements) - len(elements[:max_elements_cap])),
+        "omitted_candidates_count": max(0, len(elements) - max_auto_candidates),
+        "observation_truncated": len(elements) > max_elements_cap or len(elements) > max_auto_candidates,
     }
 
 
@@ -3305,6 +3713,7 @@ def build_bound_browser_candidates(
     *,
     action_value: str | None = None,
     source_snapshot_id: str | None = None,
+    max_auto_candidates: int = MAX_AUTO_CANDIDATES,
 ) -> list[dict[str, Any]]:
     target_id = str(observation["target_id"])
     tab_id = str(observation["tab_id"])
@@ -3316,7 +3725,7 @@ def build_bound_browser_candidates(
 
     if raw_candidates is None:
         built: list[dict[str, Any]] = []
-        for e in (observation.get("elements") or [])[:MAX_AUTO_CANDIDATES]:
+        for e in (observation.get("elements") or [])[:max_auto_candidates]:
             ref = str(e["ref"])
             if ref in secure_refs or "secure" in str(e.get("state") or ""):
                 continue
@@ -3373,8 +3782,8 @@ def build_bound_browser_candidates(
 
     if not isinstance(raw_candidates, list) or len(raw_candidates) == 0:
         raise ValueError("browser candidates must be a non-empty list when provided")
-    if len(raw_candidates) > MAX_AUTO_CANDIDATES:
-        raise ValueError(f"at most {MAX_AUTO_CANDIDATES} browser candidates allowed")
+    if len(raw_candidates) > max_auto_candidates:
+        raise ValueError(f"at most {max_auto_candidates} browser candidates allowed")
 
     validated: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -3971,7 +4380,8 @@ TOOLS = [
         "name": "jev_observe",
         "description": (
             "Observe a background window (pid, window_id) with query/completeness metadata, supported_actions per element, "
-            "diff-baseline validation with automatic fresh-read fallback, and optional same-PID window discovery."
+            "diff-baseline validation with automatic fresh-read fallback, optional skeleton overview / container subtree drilling, "
+            "and optional same-PID window discovery."
         ),
         "inputSchema": {
             "type": "object",
@@ -3984,6 +4394,20 @@ TOOLS = [
                 "max_depth": {"type": "integer", "minimum": MIN_OBSERVE_MAX_DEPTH, "maximum": MAX_OBSERVE_MAX_DEPTH},
                 "max_elements": {"type": "integer", "minimum": MIN_OBSERVE_MAX_ELEMENTS, "maximum": MAX_OBSERVE_MAX_ELEMENTS},
                 "walk_timeout_ms": {"type": "integer", "minimum": MIN_OBSERVE_WALK_TIMEOUT_MS, "maximum": MAX_OBSERVE_WALK_TIMEOUT_MS},
+                "skeleton": {
+                    "type": "boolean",
+                    "description": "Shallow overview mode returning top-level controls plus drill_regions container summaries.",
+                },
+                "region": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional container region label/path from drill_regions to drill into one subtree.",
+                },
+                "root_element_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional container element_index from drill_regions to drill into one subtree.",
+                },
                 "include_diff": {"type": "boolean"},
                 "discover_windows": {"type": "boolean"},
             },
@@ -4101,6 +4525,26 @@ TOOLS = [
                         "Stage 1 (pre-action) and Stage 5 (post-action) get_window_state calls."
                     ),
                 },
+                "skeleton": {
+                    "type": "boolean",
+                    "description": "Shallow overview mode scoping observation to top-level controls and drill_regions.",
+                },
+                "region": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional container region label/path from drill_regions to scope candidates and verification to one subtree.",
+                },
+                "root_element_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional container element_index from drill_regions to scope candidates and verification to one subtree.",
+                },
+                "wait_timeout_ms": {
+                    "type": "integer",
+                    "minimum": MIN_WAIT_TIMEOUT_MS,
+                    "maximum": MAX_WAIT_TIMEOUT_MS,
+                    "description": "Optional post-dispatch verification settle window in milliseconds (0..10000; default 1200 in v2 when expected_postcondition is supplied).",
+                },
                 "mode": {
                     "type": "string",
                     "enum": ["jev", "deterministic"],
@@ -4170,6 +4614,11 @@ TOOLS = [
                 "value": {"type": "string"},
                 "mode": {"type": "string", "enum": ["jev", "deterministic"]},
                 "expected_snapshot_id": {"type": "string"},
+                "wait_timeout_ms": {
+                    "type": "integer",
+                    "minimum": MIN_WAIT_TIMEOUT_MS,
+                    "maximum": MAX_WAIT_TIMEOUT_MS,
+                },
                 "candidates": {"type": "array", "items": {"type": "object"}},
                 "expected_postcondition": {"type": "object"},
             },
@@ -4251,6 +4700,14 @@ TOOLS = [
                                 "minimum": MIN_OBSERVE_WALK_TIMEOUT_MS,
                                 "maximum": MAX_OBSERVE_WALK_TIMEOUT_MS,
                             },
+                            "skeleton": {"type": "boolean"},
+                            "region": {"type": "string", "minLength": 1},
+                            "root_element_index": {"type": "integer", "minimum": 0},
+                            "wait_timeout_ms": {
+                                "type": "integer",
+                                "minimum": MIN_WAIT_TIMEOUT_MS,
+                                "maximum": MAX_WAIT_TIMEOUT_MS,
+                            },
                             "expected_snapshot_id": {"type": "string", "pattern": "^s[0-9a-f]{8,}$"},
                             "candidates": {"type": "array", "items": {"type": "object"}},
                             "expected_postcondition": EXPECTED_POSTCONDITION_SCHEMA,
@@ -4261,6 +4718,17 @@ TOOLS = [
         },
     },
 ]
+
+
+def _is_retryable_postcondition_reason(reason: str) -> bool:
+    if not isinstance(reason, str) or not reason:
+        return False
+    return (
+        reason.startswith("expected ")
+        or reason.startswith("target_element_missing: ")
+        or reason.startswith("target_ref_missing_in_post_obs:")
+        or reason.startswith("static_text_index_out_of_range")
+    )
 
 
 def _format_tool_result(payload: Mapping[str, Any], is_error: bool = False) -> dict[str, Any]:
@@ -4321,6 +4789,12 @@ class JevMcpServer:
         self.keychain_reader = keychain_reader
         self.http_post = http_post
         self.session_id = resolve_session_id(env)
+        self.v1_compat = is_v1_compat(env)
+        self._driver_client_injected = driver_client is not None
+        self.max_elements_cap = MAX_ELEMENTS if self.v1_compat else V2_MAX_ELEMENTS
+        self.max_auto_candidates = MAX_AUTO_CANDIDATES if self.v1_compat else V2_MAX_AUTO_CANDIDATES
+        self.max_candidates = MAX_CANDIDATES if self.v1_compat else V2_MAX_CANDIDATES
+        self.max_json_bytes = MAX_JSON_BYTES if self.v1_compat else V2_MAX_JSON_BYTES
         self.accounting = SessionAccounting(max_calls=clamp_max_calls(env.get("AGY_CUA_JEV_MAX_CALLS")))
         self._driver_client = driver_client
         if self._driver_client is not None and not self._driver_client.session_id:
@@ -4618,6 +5092,52 @@ class JevMcpServer:
                 )
             walk_timeout_ms_val = raw_walk_to
 
+        skeleton_val = False
+        if "skeleton" in args and args["skeleton"] is not None:
+            if not isinstance(args["skeleton"], bool):
+                return _format_tool_result(
+                    {"schema": "agy_cua.jev_step_v1", "status": "refused", "reason": "invalid_skeleton"},
+                    is_error=True,
+                )
+            skeleton_val = args["skeleton"]
+
+        region_val: str | None = None
+        if "region" in args and args["region"] is not None:
+            raw_region = args["region"]
+            if not isinstance(raw_region, str) or not raw_region.strip():
+                return _format_tool_result(
+                    {"schema": "agy_cua.jev_step_v1", "status": "refused", "reason": "invalid_region"},
+                    is_error=True,
+                )
+            region_val = raw_region.strip()
+
+        root_element_index_val: int | None = None
+        if "root_element_index" in args and args["root_element_index"] is not None:
+            raw_root_idx = args["root_element_index"]
+            if not isinstance(raw_root_idx, int) or isinstance(raw_root_idx, bool) or raw_root_idx < 0:
+                return _format_tool_result(
+                    {"schema": "agy_cua.jev_step_v1", "status": "refused", "reason": "invalid_root_element_index"},
+                    is_error=True,
+                )
+            root_element_index_val = raw_root_idx
+
+        wait_timeout_ms_val: int | None = None
+        if "wait_timeout_ms" in args and args["wait_timeout_ms"] is not None:
+            raw_wait_to = args["wait_timeout_ms"]
+            if (
+                not isinstance(raw_wait_to, int)
+                or isinstance(raw_wait_to, bool)
+                or raw_wait_to < MIN_WAIT_TIMEOUT_MS
+                or raw_wait_to > MAX_WAIT_TIMEOUT_MS
+            ):
+                return _format_tool_result(
+                    {"schema": "agy_cua.jev_step_v1", "status": "refused", "reason": "invalid_wait_timeout_ms"},
+                    is_error=True,
+                )
+            wait_timeout_ms_val = raw_wait_to
+
+        is_hierarchy_scoped = bool(skeleton_val or region_val is not None or root_element_index_val is not None)
+
         mode = str(args.get("mode") or ("deterministic" if args.get("deterministic") is True else "jev")).strip()
         if mode not in {"jev", "deterministic"}:
             return _format_tool_result(
@@ -4686,10 +5206,10 @@ class JevMcpServer:
                 raise TimeoutError("batch deadline exceeded")
             return min(default_s, rem)
 
-        def obs_call_timeout_s(drv: DriverClient) -> float:
+        def obs_call_timeout_s(drv: DriverClient, walk_ms: int | None = walk_timeout_ms_val) -> float:
             base_ms = (
-                max(drv.timeout_ms, walk_timeout_ms_val + 1000)
-                if walk_timeout_ms_val is not None
+                max(drv.timeout_ms, walk_ms + 1000)
+                if walk_ms is not None
                 else drv.timeout_ms
             )
             return remaining_timeout_s(base_ms / 1000.0)
@@ -4734,6 +5254,8 @@ class JevMcpServer:
             obs_ms = 0.0
         else:
             try:
+                if not self.v1_compat and not self._driver_client_injected and not self.env.get("AGY_CUA_DRIVER"):
+                    wake_macos_app_nap(pid)
                 driver = self._get_driver()
                 pre_obs_args: dict[str, Any] = {
                     "pid": pid,
@@ -4747,19 +5269,23 @@ class JevMcpServer:
                     pre_obs_args["max_depth"] = max_depth_val
                 if max_elements_val is not None:
                     pre_obs_args["max_elements"] = max_elements_val
+                elif not self.v1_compat and is_hierarchy_scoped:
+                    pre_obs_args["max_elements"] = 2000
                 if walk_timeout_ms_val is not None:
                     pre_obs_args["timeout_ms"] = walk_timeout_ms_val
+                elif not self.v1_compat and is_hierarchy_scoped and driver.timeout_ms >= 4000:
+                    pre_obs_args["timeout_ms"] = 5000
                 raw_pre = driver.call_tool(
                     "get_window_state",
                     pre_obs_args,
-                    timeout_s=obs_call_timeout_s(driver),
+                    timeout_s=obs_call_timeout_s(driver, pre_obs_args.get("timeout_ms")),
                     deadline_monotonic=_deadline_monotonic,
                 )
                 if raw_pre.get("isError"):
                     err_txt = "".join(c.get("text", "") for c in (raw_pre.get("content") or []) if isinstance(c, Mapping))
                     raise RuntimeError(err_txt or "get_window_state returned isError=true")
                 prev_cached_obs = self._last_observations.get((pid, window_id))
-                prev_baseline = prev_cached_obs
+                prev_baseline = None if is_hierarchy_scoped else prev_cached_obs
                 try:
                     pre_obs = extract_window_observation(
                         raw_pre,
@@ -4767,6 +5293,12 @@ class JevMcpServer:
                         expected_window_id=window_id,
                         query=query_val,
                         previous_observation=prev_baseline,
+                        skeleton=skeleton_val,
+                        region=region_val,
+                        root_element_index=root_element_index_val,
+                        max_elements_cap=self.max_elements_cap,
+                        max_auto_candidates=self.max_auto_candidates,
+                        enrich_descriptions=not self.v1_compat,
                     )
                 except ValueError as diff_exc:
                     if "invalid_diff_baseline" not in str(diff_exc):
@@ -4775,7 +5307,7 @@ class JevMcpServer:
                     raw_pre = driver.call_tool(
                         "get_window_state",
                         fallback_args,
-                        timeout_s=obs_call_timeout_s(driver),
+                        timeout_s=obs_call_timeout_s(driver, pre_obs_args.get("timeout_ms")),
                         deadline_monotonic=_deadline_monotonic,
                     )
                     if raw_pre.get("isError"):
@@ -4787,6 +5319,12 @@ class JevMcpServer:
                         expected_window_id=window_id,
                         query=query_val,
                         previous_observation=None,
+                        skeleton=skeleton_val,
+                        region=region_val,
+                        root_element_index=root_element_index_val,
+                        max_elements_cap=self.max_elements_cap,
+                        max_auto_candidates=self.max_auto_candidates,
+                        enrich_descriptions=not self.v1_compat,
                     )
                 if isinstance(prev_cached_obs, Mapping) and isinstance(prev_cached_obs.get("window_bounds"), Mapping):
                     prev_wb = prev_cached_obs["window_bounds"]
@@ -4797,7 +5335,7 @@ class JevMcpServer:
                         cur_wb["width"] = prev_wb["width"]
                         cur_wb["height"] = prev_wb["height"]
                         pre_obs["window_bounds"] = cur_wb
-                if not pre_obs.get("query_incomplete"):
+                if not pre_obs.get("query_incomplete") and not is_hierarchy_scoped:
                     self._last_observations[(pid, window_id)] = pre_obs
                 self._snapshot_targets[pre_obs["snapshot_id"]] = (pid, window_id)
             except Exception as exc:
@@ -4826,7 +5364,7 @@ class JevMcpServer:
                 self._record_trace(payload)
                 return _format_tool_result(payload, is_error=True)
             obs_ms = round((time.perf_counter() - obs_started) * 1000, 2)
-        obs_disclosure = {
+        obs_disclosure: dict[str, Any] = {
             "total_actionable_elements": pre_obs["total_actionable_elements"],
             "omitted_elements_count": pre_obs["omitted_elements_count"],
             "omitted_candidates_count": pre_obs["omitted_candidates_count"],
@@ -4836,6 +5374,11 @@ class JevMcpServer:
             "search_complete": pre_obs.get("search_complete", True),
             "visual_fallback_recommended": pre_obs.get("visual_fallback_recommended", False),
         }
+        if is_hierarchy_scoped or pre_obs.get("drill_regions"):
+            obs_disclosure["drill_regions"] = pre_obs.get("drill_regions") or []
+            obs_disclosure["skeleton"] = bool(pre_obs.get("skeleton", False))
+            obs_disclosure["region"] = pre_obs.get("region")
+            obs_disclosure["root_element_index"] = pre_obs.get("root_element_index")
 
         if expected_snap is not None and pre_obs["snapshot_id"] != expected_snap:
             release_if_unowned()
@@ -4964,6 +5507,8 @@ class JevMcpServer:
                 pre_obs,
                 action_value=action_value,
                 source_snapshot_id=source_snap,
+                max_auto_candidates=self.max_auto_candidates,
+                enrich_descriptions=not self.v1_compat,
             )
             history_in = args.get("history")
             if history_in is None:
@@ -4980,16 +5525,17 @@ class JevMcpServer:
             all_els = pre_obs.get("all_elements") or pre_obs["elements"]
             prompt_els: list[Mapping[str, Any]] = [
                 e for e in all_els if e.get("element_index") in referenced_el_ids
-            ][:MAX_ELEMENTS]
+            ][: self.max_elements_cap]
             seen_prompt_ids = {e["element_index"] for e in prompt_els}
             for e in pre_obs["elements"]:
-                if len(prompt_els) >= MAX_ELEMENTS:
+                if len(prompt_els) >= self.max_elements_cap:
                     break
                 if e["element_index"] not in seen_prompt_ids:
                     prompt_els.append(e)
                     seen_prompt_ids.add(e["element_index"])
-            select_elements = [
-                {
+            select_elements: list[dict[str, Any]] = []
+            for e in prompt_els:
+                se_item: dict[str, Any] = {
                     "element_index": e["element_index"],
                     "role": e["role"],
                     "label": e["label"],
@@ -4998,8 +5544,9 @@ class JevMcpServer:
                     "in_toolbar": bool(e.get("in_toolbar", False)),
                     "supported_actions": list(e.get("supported_actions") or []),
                 }
-                for e in prompt_els
-            ]
+                if not self.v1_compat and isinstance(e.get("container_path"), str) and e["container_path"]:
+                    se_item["container_path"] = e["container_path"]
+                select_elements.append(se_item)
             if not select_elements:
                 for idx_c, c in enumerate(bound_candidates):
                     c_args = c.get("arguments")
@@ -5013,15 +5560,20 @@ class JevMcpServer:
                             "in_toolbar": False,
                             "supported_actions": [str(c.get("tool") or "click")],
                         })
-            select_req = validate_select_request({
-                "goal": goal,
-                "pid": pid,
-                "window_id": window_id,
-                "snapshot_id": pre_obs["snapshot_id"],
-                "elements": select_elements,
-                "history": history_in,
-                "candidates": [{"id": c["id"], "description": c["description"]} for c in bound_candidates],
-            })
+            select_req = validate_select_request(
+                {
+                    "goal": goal,
+                    "pid": pid,
+                    "window_id": window_id,
+                    "snapshot_id": pre_obs["snapshot_id"],
+                    "elements": select_elements,
+                    "history": history_in,
+                    "candidates": [{"id": c["id"], "description": c["description"]} for c in bound_candidates],
+                },
+                max_elements=self.max_elements_cap,
+                max_candidates=self.max_candidates,
+                max_json_bytes=self.max_json_bytes,
+            )
         except Exception as exc:
             release_if_unowned()
             err_msg = str(exc)
@@ -5052,6 +5604,7 @@ class JevMcpServer:
             return _format_tool_result(payload, is_error=True)
 
         # Stage 3: Jev bounded candidate selection or deterministic single-candidate validation
+        reranked = False
         if mode == "deterministic":
             only_cand = bound_candidates[0]
             decision = {
@@ -5113,6 +5666,66 @@ class JevMcpServer:
                     )
             decision = evaluate_jev_choice(select_req, route, self.accounting, self.http_post)
             provider_ms = decision.get("provider_ms", 0.0)
+            if (
+                not self.v1_compat
+                and decision.get("kind") == "selected"
+                and len(bound_candidates) > V2_RERANK_SHORTLIST_K
+                and 0.0 < float(decision.get("confidence") or 1.0) < V2_RERANK_CONFIDENCE_THRESHOLD
+                and self.accounting.calls_used < self.accounting.max_calls
+            ):
+                probs_p1 = decision.get("probabilities") if isinstance(decision.get("probabilities"), Mapping) else {}
+                ranked_cands = sorted(
+                    bound_candidates,
+                    key=lambda c: (1 if c["id"] == decision.get("selected_id") else 0, float(probs_p1.get(c["id"], 0.0))),
+                    reverse=True,
+                )
+                shortlist_cands = ranked_cands[:V2_RERANK_SHORTLIST_K]
+                short_el_ids = {
+                    c["arguments"]["element_index"]
+                    for c in shortlist_cands
+                    if isinstance(c.get("arguments"), Mapping) and isinstance(c["arguments"].get("element_index"), int)
+                }
+                short_elements = (
+                    [se for se in select_elements if se.get("element_index") in short_el_ids]
+                    if short_el_ids
+                    else select_elements[:V2_RERANK_SHORTLIST_K]
+                )
+                can_rerank = True
+                route_p2 = route
+                if _deadline_monotonic is not None:
+                    rem_p2_ms = int((_deadline_monotonic - time.monotonic()) * 1000)
+                    if rem_p2_ms <= 0:
+                        can_rerank = False
+                    elif rem_p2_ms < route.timeout_ms:
+                        route_p2 = JevRoute(
+                            kind=route.kind,
+                            reason=route.reason,
+                            endpoint=route.endpoint,
+                            model=route.model,
+                            api_key=route.api_key,
+                            key_source=route.key_source,
+                            timeout_ms=max(1, rem_p2_ms),
+                            note=route.note,
+                        )
+                if can_rerank:
+                    rerank_req = validate_select_request(
+                        {
+                            "goal": f"{goal} (disambiguate shortlisted top-{len(shortlist_cands)} candidates)",
+                            "pid": pid,
+                            "window_id": window_id,
+                            "snapshot_id": pre_obs["snapshot_id"],
+                            "elements": short_elements,
+                            "history": history_in,
+                            "candidates": [{"id": c["id"], "description": c["description"]} for c in shortlist_cands],
+                        },
+                        max_elements=self.max_elements_cap,
+                        max_candidates=self.max_candidates,
+                        max_json_bytes=self.max_json_bytes,
+                    )
+                    rerank_dec = evaluate_jev_choice(rerank_req, route_p2, self.accounting, self.http_post)
+                    provider_ms = round(float(provider_ms) + float(rerank_dec.get("provider_ms", 0.0)), 2)
+                    decision = rerank_dec
+                    reranked = True
 
         if decision["kind"] != "selected":
             release_if_unowned()
@@ -5134,6 +5747,7 @@ class JevMcpServer:
                 "sdk_identity": CLIENT_IDENTITY,
                 "confidence": decision.get("confidence"),
                 "probabilities": decision.get("probabilities"),
+                "reranked": reranked,
                 "verified": False,
                 "uncertain_side_effect": False,
                 "timings_ms": {
@@ -5175,6 +5789,7 @@ class JevMcpServer:
                 "returned_model": decision.get("returned_model"),
                 "confidence": decision.get("confidence"),
                 "probabilities": decision.get("probabilities"),
+                "reranked": reranked,
                 "verified": False,
                 "uncertain_side_effect": False,
                 "timings_ms": {
@@ -5220,6 +5835,7 @@ class JevMcpServer:
                 "returned_model": decision.get("returned_model"),
                 "confidence": decision.get("confidence"),
                 "probabilities": decision.get("probabilities"),
+                "reranked": reranked,
                 "verified": False,
                 "uncertain_side_effect": False,
                 "timings_ms": {
@@ -5281,6 +5897,7 @@ class JevMcpServer:
                 "returned_model": decision.get("returned_model"),
                 "confidence": decision.get("confidence"),
                 "probabilities": decision.get("probabilities"),
+                "reranked": reranked,
                 "verified": False,
                 "uncertain_side_effect": True,
                 "timings_ms": {
@@ -5299,6 +5916,16 @@ class JevMcpServer:
 
         # Stage 5: Fresh observation & independent postcondition verification
         expected_post = args.get("expected_postcondition")
+        eff_wait_ms = (
+            0
+            if expected_post is None
+            else (
+                wait_timeout_ms_val
+                if wait_timeout_ms_val is not None
+                else (0 if self.v1_compat else DEFAULT_V2_WAIT_TIMEOUT_MS)
+            )
+        )
+        verify_polls = 0
         verify_started = time.perf_counter()
         try:
             post_obs_args: dict[str, Any] = {
@@ -5313,46 +5940,68 @@ class JevMcpServer:
                 post_obs_args["max_depth"] = max_depth_val
             if max_elements_val is not None:
                 post_obs_args["max_elements"] = max_elements_val
+            elif not self.v1_compat and is_hierarchy_scoped:
+                post_obs_args["max_elements"] = 2000
             if walk_timeout_ms_val is not None:
                 post_obs_args["timeout_ms"] = walk_timeout_ms_val
-            raw_post = driver.call_tool(
-                "get_window_state",
-                post_obs_args,
-                timeout_s=obs_call_timeout_s(driver),
-                deadline_monotonic=_deadline_monotonic,
-            )
-            if raw_post.get("isError"):
-                err_txt = "".join(c.get("text", "") for c in (raw_post.get("content") or []) if isinstance(c, Mapping))
-                raise RuntimeError(err_txt or "post-dispatch get_window_state returned isError=true")
-            try:
-                post_obs = extract_window_observation(
-                    raw_post,
-                    expected_pid=pid,
-                    expected_window_id=window_id,
-                    query=query_val,
-                    previous_observation=pre_obs,
-                )
-            except ValueError as diff_exc:
-                if "invalid_diff_baseline" not in str(diff_exc):
-                    raise
-                fallback_post_args = dict(post_obs_args, include_diff=False, tree_format="both")
-                raw_post = driver.call_tool(
+            elif not self.v1_compat and is_hierarchy_scoped and driver.timeout_ms >= 4000:
+                post_obs_args["timeout_ms"] = 5000
+
+            def _read_post_observation(baseline_obs: Mapping[str, Any] | None) -> dict[str, Any]:
+                eff_base = None if is_hierarchy_scoped else baseline_obs
+                raw_p = driver.call_tool(
                     "get_window_state",
-                    fallback_post_args,
-                    timeout_s=obs_call_timeout_s(driver),
+                    post_obs_args,
+                    timeout_s=obs_call_timeout_s(driver, post_obs_args.get("timeout_ms")),
                     deadline_monotonic=_deadline_monotonic,
                 )
-                if raw_post.get("isError"):
-                    err_txt = "".join(c.get("text", "") for c in (raw_post.get("content") or []) if isinstance(c, Mapping))
-                    raise RuntimeError(err_txt or "post-dispatch get_window_state fallback returned isError=true")
-                post_obs = extract_window_observation(
-                    raw_post,
-                    expected_pid=pid,
-                    expected_window_id=window_id,
-                    query=query_val,
-                    previous_observation=None,
-                )
-            if not post_obs.get("query_incomplete"):
+                if raw_p.get("isError"):
+                    err_t = "".join(c.get("text", "") for c in (raw_p.get("content") or []) if isinstance(c, Mapping))
+                    raise RuntimeError(err_t or "post-dispatch get_window_state returned isError=true")
+                try:
+                    return extract_window_observation(
+                        raw_p,
+                        expected_pid=pid,
+                        expected_window_id=window_id,
+                        query=query_val,
+                        previous_observation=eff_base,
+                        skeleton=skeleton_val,
+                        region=region_val,
+                        root_element_index=root_element_index_val,
+                        max_elements_cap=self.max_elements_cap,
+                        max_auto_candidates=self.max_auto_candidates,
+                        enrich_descriptions=not self.v1_compat,
+                    )
+                except ValueError as diff_exc:
+                    if "invalid_diff_baseline" not in str(diff_exc):
+                        raise
+                    fallback_post_args = dict(post_obs_args, include_diff=False, tree_format="both")
+                    raw_p = driver.call_tool(
+                        "get_window_state",
+                        fallback_post_args,
+                        timeout_s=obs_call_timeout_s(driver, post_obs_args.get("timeout_ms")),
+                        deadline_monotonic=_deadline_monotonic,
+                    )
+                    if raw_p.get("isError"):
+                        err_t = "".join(c.get("text", "") for c in (raw_p.get("content") or []) if isinstance(c, Mapping))
+                        raise RuntimeError(err_t or "post-dispatch get_window_state fallback returned isError=true")
+                    return extract_window_observation(
+                        raw_p,
+                        expected_pid=pid,
+                        expected_window_id=window_id,
+                        query=query_val,
+                        previous_observation=None,
+                        skeleton=skeleton_val,
+                        region=region_val,
+                        root_element_index=root_element_index_val,
+                        max_elements_cap=self.max_elements_cap,
+                        max_auto_candidates=self.max_auto_candidates,
+                        enrich_descriptions=not self.v1_compat,
+                    )
+
+            post_obs = _read_post_observation(pre_obs)
+            verify_polls = 1
+            if not post_obs.get("query_incomplete") and not is_hierarchy_scoped:
                 self._last_observations[(pid, window_id)] = post_obs
             self._snapshot_targets[post_obs["snapshot_id"]] = (pid, window_id)
             state_changed, post_ok, verify_reason = check_postcondition(
@@ -5361,6 +6010,32 @@ class JevMcpServer:
                 post_obs,
                 target_element_index=target_el_idx,
             )
+            if eff_wait_ms > 0 and not post_ok and _is_retryable_postcondition_reason(verify_reason):
+                settle_deadline = time.monotonic() + (eff_wait_ms / 1000.0)
+                if _deadline_monotonic is not None:
+                    settle_deadline = min(settle_deadline, _deadline_monotonic - 0.05)
+                while not post_ok and _is_retryable_postcondition_reason(verify_reason):
+                    rem_settle = settle_deadline - time.monotonic()
+                    if rem_settle <= 0:
+                        break
+                    time.sleep(min(0.10, rem_settle))
+                    if time.monotonic() >= settle_deadline:
+                        break
+                    try:
+                        next_post_obs = _read_post_observation(post_obs)
+                    except Exception:
+                        break
+                    post_obs = next_post_obs
+                    verify_polls += 1
+                    if not post_obs.get("query_incomplete") and not is_hierarchy_scoped:
+                        self._last_observations[(pid, window_id)] = post_obs
+                    self._snapshot_targets[post_obs["snapshot_id"]] = (pid, window_id)
+                    state_changed, post_ok, verify_reason = check_postcondition(
+                        expected_post,
+                        pre_obs,
+                        post_obs,
+                        target_element_index=target_el_idx,
+                    )
         except Exception as exc:
             verify_ms = round((time.perf_counter() - verify_started) * 1000, 2)
             self.accounting.uncertain_side_effects += 1
@@ -5382,6 +6057,7 @@ class JevMcpServer:
                 "returned_model": decision.get("returned_model"),
                 "confidence": decision.get("confidence"),
                 "probabilities": decision.get("probabilities"),
+                "reranked": reranked,
                 "verified": False,
                 "action_dispatched": True,
                 "uncertain_side_effect": True,
@@ -5410,7 +6086,7 @@ class JevMcpServer:
                 driver,
                 pid,
                 window_id,
-                timeout_s=min(0.4, obs_call_timeout_s(driver)),
+                timeout_s=min(0.4, obs_call_timeout_s(driver, post_obs_args.get("timeout_ms"))),
                 deadline_monotonic=_deadline_monotonic,
             )
             pre_wids = {w["window_id"] for w in pre_same_pid_windows} | {window_id}
@@ -5467,6 +6143,8 @@ class JevMcpServer:
             "point_fallback_used": point_fallback_used,
             "uncertain_side_effect": False,
             "verification_reason": verify_reason,
+            "verify_polls": verify_polls,
+            "reranked": reranked,
             "state_changed": state_changed,
             "pid": pid,
             "window_id": window_id,
@@ -5532,6 +6210,37 @@ class JevMcpServer:
                 )
             query_val = raw_q.strip()
 
+        skeleton_val = False
+        if "skeleton" in args and args["skeleton"] is not None:
+            if not isinstance(args["skeleton"], bool):
+                return _format_tool_result(
+                    {"schema": "agy_cua.jev_observe_v1", "status": "refused", "reason": "invalid_skeleton"},
+                    is_error=True,
+                )
+            skeleton_val = args["skeleton"]
+
+        region_val: str | None = None
+        if "region" in args and args["region"] is not None:
+            raw_region = args["region"]
+            if not isinstance(raw_region, str) or not raw_region.strip():
+                return _format_tool_result(
+                    {"schema": "agy_cua.jev_observe_v1", "status": "refused", "reason": "invalid_region"},
+                    is_error=True,
+                )
+            region_val = raw_region.strip()
+
+        root_element_index_val: int | None = None
+        if "root_element_index" in args and args["root_element_index"] is not None:
+            raw_root_idx = args["root_element_index"]
+            if not isinstance(raw_root_idx, int) or isinstance(raw_root_idx, bool) or raw_root_idx < 0:
+                return _format_tool_result(
+                    {"schema": "agy_cua.jev_observe_v1", "status": "refused", "reason": "invalid_root_element_index"},
+                    is_error=True,
+                )
+            root_element_index_val = raw_root_idx
+
+        is_hierarchy_scoped = bool(skeleton_val or region_val is not None or root_element_index_val is not None)
+
         want_screenshot = bool(args.get("include_screenshot", False))
         obs_call_args: dict[str, Any] = {
             "pid": pid,
@@ -5545,6 +6254,8 @@ class JevMcpServer:
             obs_call_args["max_depth"] = args["max_depth"]
         if "max_elements" in args and args["max_elements"] is not None:
             obs_call_args["max_elements"] = args["max_elements"]
+        elif not self.v1_compat and is_hierarchy_scoped:
+            obs_call_args["max_elements"] = 2000
         if "walk_timeout_ms" in args and args["walk_timeout_ms"] is not None:
             obs_call_args["timeout_ms"] = args["walk_timeout_ms"]
         if "include_diff" in args and isinstance(args["include_diff"], bool):
@@ -5552,12 +6263,21 @@ class JevMcpServer:
 
         diff_fallback_used = False
         try:
+            if not self.v1_compat and not self._driver_client_injected and not self.env.get("AGY_CUA_DRIVER"):
+                wake_macos_app_nap(pid)
             driver = self._get_driver()
+            if (
+                not self.v1_compat
+                and is_hierarchy_scoped
+                and "timeout_ms" not in obs_call_args
+                and driver.timeout_ms >= 4000
+            ):
+                obs_call_args["timeout_ms"] = 5000
             raw_obs = driver.call_tool("get_window_state", obs_call_args)
             if raw_obs.get("isError"):
                 err_txt = "".join(c.get("text", "") for c in (raw_obs.get("content") or []) if isinstance(c, Mapping))
                 raise RuntimeError(err_txt or "get_window_state returned isError=true")
-            prev_baseline = self._last_observations.get((pid, window_id))
+            prev_baseline = None if is_hierarchy_scoped else self._last_observations.get((pid, window_id))
             try:
                 obs = extract_window_observation(
                     raw_obs,
@@ -5565,6 +6285,12 @@ class JevMcpServer:
                     expected_window_id=window_id,
                     query=query_val,
                     previous_observation=prev_baseline,
+                    skeleton=skeleton_val,
+                    region=region_val,
+                    root_element_index=root_element_index_val,
+                    max_elements_cap=self.max_elements_cap,
+                    max_auto_candidates=self.max_auto_candidates,
+                    enrich_descriptions=not self.v1_compat,
                 )
             except ValueError as diff_exc:
                 if "invalid_diff_baseline" not in str(diff_exc):
@@ -5581,8 +6307,14 @@ class JevMcpServer:
                     expected_window_id=window_id,
                     query=query_val,
                     previous_observation=None,
+                    skeleton=skeleton_val,
+                    region=region_val,
+                    root_element_index=root_element_index_val,
+                    max_elements_cap=self.max_elements_cap,
+                    max_auto_candidates=self.max_auto_candidates,
+                    enrich_descriptions=not self.v1_compat,
                 )
-            if not obs.get("query_incomplete"):
+            if not obs.get("query_incomplete") and not is_hierarchy_scoped:
                 self._last_observations[(pid, window_id)] = obs
             self._snapshot_targets[obs["snapshot_id"]] = (pid, window_id)
             discovered_windows: list[dict[str, Any]] = []
@@ -5628,7 +6360,7 @@ class JevMcpServer:
         if want_screenshot and image_blocks:
             self._visual_snapshots[(pid, window_id)] = obs["snapshot_id"]
             self._visual_snapshot_targets[obs["snapshot_id"]] = (pid, window_id)
-        elif not want_screenshot and not obs.get("query_incomplete"):
+        elif not want_screenshot and not obs.get("query_incomplete") and not is_hierarchy_scoped:
             self._visual_snapshots.pop((pid, window_id), None)
 
         payload = {
@@ -5643,6 +6375,10 @@ class JevMcpServer:
             "window_bounds": obs.get("window_bounds"),
             "elements": obs["elements"],
             "static_texts": obs["static_texts"],
+            "skeleton": bool(obs.get("skeleton", False)),
+            "region": obs.get("region"),
+            "root_element_index": obs.get("root_element_index"),
+            "drill_regions": obs.get("drill_regions") or [],
             "total_actionable_elements": obs["total_actionable_elements"],
             "omitted_elements_count": obs["omitted_elements_count"],
             "omitted_candidates_count": obs["omitted_candidates_count"],
@@ -5808,6 +6544,21 @@ class JevMcpServer:
                 {"schema": "agy_cua.jev_browser_step_v1", "status": "refused", "reason": "invalid_goal", "action_dispatched": False},
                 is_error=True,
             )
+        wait_timeout_ms_val: int | None = None
+        if "wait_timeout_ms" in args and args["wait_timeout_ms"] is not None:
+            raw_wait_to = args["wait_timeout_ms"]
+            if (
+                not isinstance(raw_wait_to, int)
+                or isinstance(raw_wait_to, bool)
+                or raw_wait_to < MIN_WAIT_TIMEOUT_MS
+                or raw_wait_to > MAX_WAIT_TIMEOUT_MS
+            ):
+                return _format_tool_result(
+                    {"schema": "agy_cua.jev_browser_step_v1", "status": "refused", "reason": "invalid_wait_timeout_ms", "action_dispatched": False},
+                    is_error=True,
+                )
+            wait_timeout_ms_val = raw_wait_to
+
         target_id = str(args.get("target_id") or "isolated").strip()
         tab_id = str(args.get("tab_id") or "tab-1").strip()
         action_value = args.get("value") if isinstance(args.get("value"), str) else None
@@ -5833,6 +6584,8 @@ class JevMcpServer:
                 raw_pre,
                 expected_target_id=target_id,
                 expected_tab_id=tab_id,
+                max_elements_cap=self.max_elements_cap,
+                max_auto_candidates=self.max_auto_candidates,
             )
         except Exception as exc:
             return _format_tool_result(
@@ -5875,6 +6628,7 @@ class JevMcpServer:
                 args.get("candidates"),
                 pre_obs,
                 action_value=action_value,
+                max_auto_candidates=self.max_auto_candidates,
             )
         except Exception as exc:
             return _format_tool_result(
@@ -5894,6 +6648,7 @@ class JevMcpServer:
                 is_error=True,
             )
 
+        reranked = False
         if mode == "deterministic":
             if len(bound_cands) != 1:
                 return _format_tool_result(
@@ -5927,26 +6682,77 @@ class JevMcpServer:
                 if SNAPSHOT_ID_RE.match(pre_obs["snapshot_id"])
                 else f"s{abs(hash(pre_obs['snapshot_id'])) & 0xFFFFFFFF:08x}"
             )
-            select_req = validate_select_request({
-                "goal": goal,
-                "pid": 1,
-                "window_id": 1,
-                "snapshot_id": synth_snap,
-                "elements": [
-                    {
-                        "element_index": e["element_index"],
-                        "role": e["role"],
-                        "label": f"[{e['ref']}] {e['label']}",
-                        "state": e["state"],
-                        "supported_actions": list(e.get("supported_actions") or []),
-                    }
-                    for e in pre_obs["elements"]
-                ],
-                "candidates": [{"id": c["id"], "description": c["description"]} for c in bound_cands],
-            })
+            browser_select_els = [
+                {
+                    "element_index": e["element_index"],
+                    "role": e["role"],
+                    "label": f"[{e['ref']}] {e['label']}",
+                    "state": e["state"],
+                    "supported_actions": list(e.get("supported_actions") or []),
+                }
+                for e in pre_obs["elements"]
+            ]
+            select_req = validate_select_request(
+                {
+                    "goal": goal,
+                    "pid": 1,
+                    "window_id": 1,
+                    "snapshot_id": synth_snap,
+                    "elements": browser_select_els[: self.max_elements_cap],
+                    "candidates": [{"id": c["id"], "description": c["description"]} for c in bound_cands],
+                },
+                max_elements=self.max_elements_cap,
+                max_candidates=self.max_candidates,
+                max_json_bytes=self.max_json_bytes,
+            )
             route = resolve_route(self.env, self.keychain_reader)
             decision = evaluate_jev_choice(select_req, route, self.accounting, self.http_post)
             provider_ms = decision.get("provider_ms", 0.0)
+            if (
+                not self.v1_compat
+                and decision.get("kind") == "selected"
+                and len(bound_cands) > V2_RERANK_SHORTLIST_K
+                and 0.0 < float(decision.get("confidence") or 1.0) < V2_RERANK_CONFIDENCE_THRESHOLD
+                and self.accounting.calls_used < self.accounting.max_calls
+            ):
+                probs_p1 = decision.get("probabilities") if isinstance(decision.get("probabilities"), Mapping) else {}
+                ranked_cands = sorted(
+                    bound_cands,
+                    key=lambda c: (1 if c["id"] == decision.get("selected_id") else 0, float(probs_p1.get(c["id"], 0.0))),
+                    reverse=True,
+                )
+                shortlist_cands = ranked_cands[:V2_RERANK_SHORTLIST_K]
+                short_refs = {
+                    str(c["arguments"].get("ref"))
+                    for c in shortlist_cands
+                    if isinstance(c.get("arguments"), Mapping) and c["arguments"].get("ref")
+                }
+                short_els = (
+                    [
+                        se
+                        for se, orig_e in zip(browser_select_els, pre_obs["elements"])
+                        if str(orig_e.get("ref")) in short_refs
+                    ]
+                    if short_refs
+                    else browser_select_els[:V2_RERANK_SHORTLIST_K]
+                )
+                rerank_req = validate_select_request(
+                    {
+                        "goal": f"{goal} (disambiguate shortlisted top-{len(shortlist_cands)} browser candidates)",
+                        "pid": 1,
+                        "window_id": 1,
+                        "snapshot_id": synth_snap,
+                        "elements": short_els,
+                        "candidates": [{"id": c["id"], "description": c["description"]} for c in shortlist_cands],
+                    },
+                    max_elements=self.max_elements_cap,
+                    max_candidates=self.max_candidates,
+                    max_json_bytes=self.max_json_bytes,
+                )
+                rerank_dec = evaluate_jev_choice(rerank_req, route, self.accounting, self.http_post)
+                provider_ms = round(float(provider_ms) + float(rerank_dec.get("provider_ms", 0.0)), 2)
+                decision = rerank_dec
+                reranked = True
 
         if decision["kind"] != "selected":
             return _format_tool_result(
@@ -5959,6 +6765,7 @@ class JevMcpServer:
                     "tab_id": tab_id,
                     "pre_snapshot_id": pre_obs["snapshot_id"],
                     "selected_id": decision.get("selected_id"),
+                    "reranked": reranked,
                     "verified": False,
                     "action_dispatched": False,
                     "uncertain_side_effect": False,
@@ -5986,6 +6793,7 @@ class JevMcpServer:
                     "target_id": target_id,
                     "tab_id": tab_id,
                     "pre_snapshot_id": pre_obs["snapshot_id"],
+                    "reranked": reranked,
                     "verified": False,
                     "action_dispatched": False,
                     "uncertain_side_effect": False,
@@ -6017,6 +6825,7 @@ class JevMcpServer:
                     "target_id": target_id,
                     "tab_id": tab_id,
                     "pre_snapshot_id": pre_obs["snapshot_id"],
+                    "reranked": reranked,
                     "verified": False,
                     "action_dispatched": False,
                     "uncertain_side_effect": True,
@@ -6026,32 +6835,69 @@ class JevMcpServer:
             )
         dispatch_ms = round((time.perf_counter() - dispatch_started) * 1000, 2)
 
+        expected_post = args.get("expected_postcondition")
+        eff_wait_ms = (
+            0
+            if expected_post is None
+            else (
+                wait_timeout_ms_val
+                if wait_timeout_ms_val is not None
+                else (0 if self.v1_compat else DEFAULT_V2_WAIT_TIMEOUT_MS)
+            )
+        )
+        verify_polls = 0
         verify_started = time.perf_counter()
         try:
-            raw_post = driver.call_tool(
-                "get_browser_state",
-                {
-                    "target_id": target_id,
-                    "tab_id": tab_id,
-                    "include_screenshot": False,
-                    "snapshot_format": "semantic_v2",
-                },
-            )
-            if raw_post.get("isError"):
-                err_txt = "".join(c.get("text", "") for c in (raw_post.get("content") or []) if isinstance(c, Mapping))
-                raise RuntimeError(err_txt or "post-dispatch get_browser_state returned isError=true")
-            post_obs = extract_browser_observation(
-                raw_post,
-                expected_target_id=target_id,
-                expected_tab_id=tab_id,
-            )
-            expected_post = args.get("expected_postcondition")
+            def _read_post_browser_obs() -> dict[str, Any]:
+                raw_p = driver.call_tool(
+                    "get_browser_state",
+                    {
+                        "target_id": target_id,
+                        "tab_id": tab_id,
+                        "include_screenshot": False,
+                        "snapshot_format": "semantic_v2",
+                    },
+                )
+                if raw_p.get("isError"):
+                    err_t = "".join(c.get("text", "") for c in (raw_p.get("content") or []) if isinstance(c, Mapping))
+                    raise RuntimeError(err_t or "post-dispatch get_browser_state returned isError=true")
+                return extract_browser_observation(
+                    raw_p,
+                    expected_target_id=target_id,
+                    expected_tab_id=tab_id,
+                    max_elements_cap=self.max_elements_cap,
+                    max_auto_candidates=self.max_auto_candidates,
+                )
+
+            post_obs = _read_post_browser_obs()
+            verify_polls = 1
             state_changed, post_ok, verify_reason = check_browser_postcondition(
                 expected_post,
                 pre_obs,
                 post_obs,
                 target_ref=authorized["arguments"].get("ref"),
             )
+            if eff_wait_ms > 0 and not post_ok and _is_retryable_postcondition_reason(verify_reason):
+                settle_deadline = time.monotonic() + (eff_wait_ms / 1000.0)
+                while not post_ok and _is_retryable_postcondition_reason(verify_reason):
+                    rem_settle = settle_deadline - time.monotonic()
+                    if rem_settle <= 0:
+                        break
+                    time.sleep(min(0.10, rem_settle))
+                    if time.monotonic() >= settle_deadline:
+                        break
+                    try:
+                        next_post_obs = _read_post_browser_obs()
+                    except Exception:
+                        break
+                    post_obs = next_post_obs
+                    verify_polls += 1
+                    state_changed, post_ok, verify_reason = check_browser_postcondition(
+                        expected_post,
+                        pre_obs,
+                        post_obs,
+                        target_ref=authorized["arguments"].get("ref"),
+                    )
         except Exception as exc:
             self.accounting.uncertain_side_effects += 1
             self.accounting.halted = True
@@ -6065,6 +6911,7 @@ class JevMcpServer:
                     "target_id": target_id,
                     "tab_id": tab_id,
                     "pre_snapshot_id": pre_obs["snapshot_id"],
+                    "reranked": reranked,
                     "verified": False,
                     "action_dispatched": True,
                     "uncertain_side_effect": True,
@@ -6099,6 +6946,8 @@ class JevMcpServer:
             "action_dispatched": True,
             "uncertain_side_effect": False,
             "verification_reason": verify_reason,
+            "verify_polls": verify_polls,
+            "reranked": reranked,
             "state_changed": state_changed,
             "target_id": target_id,
             "tab_id": tab_id,
@@ -6369,16 +7218,80 @@ class JevMcpServer:
                         },
                         is_error=True,
                     )
+            if "skeleton" in step_spec and step_spec["skeleton"] is not None:
+                if not isinstance(step_spec["skeleton"], bool):
+                    return _format_tool_result(
+                        {
+                            "schema": "agy_cua.jev_batch_v1",
+                            "status": "refused",
+                            "reason": "invalid_skeleton",
+                            "step_index": idx,
+                            "pid": pid,
+                            "window_id": window_id,
+                            "session_id": self.session_id,
+                        },
+                        is_error=True,
+                    )
+            if "region" in step_spec and step_spec["region"] is not None:
+                s_reg = step_spec["region"]
+                if not isinstance(s_reg, str) or not s_reg.strip():
+                    return _format_tool_result(
+                        {
+                            "schema": "agy_cua.jev_batch_v1",
+                            "status": "refused",
+                            "reason": "invalid_region",
+                            "step_index": idx,
+                            "pid": pid,
+                            "window_id": window_id,
+                            "session_id": self.session_id,
+                        },
+                        is_error=True,
+                    )
+            if "root_element_index" in step_spec and step_spec["root_element_index"] is not None:
+                s_root = step_spec["root_element_index"]
+                if not isinstance(s_root, int) or isinstance(s_root, bool) or s_root < 0:
+                    return _format_tool_result(
+                        {
+                            "schema": "agy_cua.jev_batch_v1",
+                            "status": "refused",
+                            "reason": "invalid_root_element_index",
+                            "step_index": idx,
+                            "pid": pid,
+                            "window_id": window_id,
+                            "session_id": self.session_id,
+                        },
+                        is_error=True,
+                    )
+            if "wait_timeout_ms" in step_spec and step_spec["wait_timeout_ms"] is not None:
+                s_wait = step_spec["wait_timeout_ms"]
+                if (
+                    not isinstance(s_wait, int)
+                    or isinstance(s_wait, bool)
+                    or s_wait < MIN_WAIT_TIMEOUT_MS
+                    or s_wait > MAX_WAIT_TIMEOUT_MS
+                ):
+                    return _format_tool_result(
+                        {
+                            "schema": "agy_cua.jev_batch_v1",
+                            "status": "refused",
+                            "reason": "invalid_wait_timeout_ms",
+                            "step_index": idx,
+                            "pid": pid,
+                            "window_id": window_id,
+                            "session_id": self.session_id,
+                        },
+                        is_error=True,
+                    )
             s_cands = step_spec.get("candidates")
             if s_cands is not None and (
-                not isinstance(s_cands, list) or len(s_cands) == 0 or len(s_cands) > MAX_AUTO_CANDIDATES
+                not isinstance(s_cands, list) or len(s_cands) == 0 or len(s_cands) > self.max_auto_candidates
             ):
                 return _format_tool_result(
                     {
                         "schema": "agy_cua.jev_batch_v1",
                         "status": "refused",
                         "verification_outcome": "not_executed",
-                        "reason": f"step[{idx}] candidates must be a non-empty list of at most {MAX_AUTO_CANDIDATES} items",
+                        "reason": f"step[{idx}] candidates must be a non-empty list of at most {self.max_auto_candidates} items",
                         "pid": pid,
                         "window_id": window_id,
                         "session_id": self.session_id,
@@ -6473,7 +7386,7 @@ class JevMcpServer:
         remaining_steps: list[dict[str, Any]] = []
         prev_post_sig: tuple[Any, ...] | None = None
         prev_post_obs: dict[str, Any] | None = None
-        prev_obs_scope: tuple[str | None, int | None, int | None, int | None] | None = None
+        prev_obs_scope: tuple[Any, ...] | None = None
 
         agg_observe_ms = 0.0
         agg_provider_ms = 0.0
@@ -6515,6 +7428,14 @@ class JevMcpServer:
                 step_args["max_elements"] = step_spec["max_elements"]
             if "walk_timeout_ms" in step_spec and step_spec["walk_timeout_ms"] is not None:
                 step_args["walk_timeout_ms"] = step_spec["walk_timeout_ms"]
+            if "skeleton" in step_spec and step_spec["skeleton"] is not None:
+                step_args["skeleton"] = step_spec["skeleton"]
+            if "region" in step_spec and step_spec["region"] is not None:
+                step_args["region"] = step_spec["region"]
+            if "root_element_index" in step_spec and step_spec["root_element_index"] is not None:
+                step_args["root_element_index"] = step_spec["root_element_index"]
+            if "wait_timeout_ms" in step_spec and step_spec["wait_timeout_ms"] is not None:
+                step_args["wait_timeout_ms"] = step_spec["wait_timeout_ms"]
             if "candidates" in step_spec:
                 step_args["candidates"] = step_spec["candidates"]
             if "expected_snapshot_id" in step_spec:
@@ -6527,6 +7448,9 @@ class JevMcpServer:
                 step_spec.get("max_depth"),
                 step_spec.get("max_elements"),
                 step_spec.get("walk_timeout_ms"),
+                bool(step_spec.get("skeleton", False)),
+                step_spec["region"].strip() if isinstance(step_spec.get("region"), str) else None,
+                step_spec.get("root_element_index"),
             )
             out_sig: list[tuple[Any, ...]] = []
             out_obs: list[dict[str, Any]] = []
@@ -6578,6 +7502,8 @@ class JevMcpServer:
                 "returned_model": step_sc.get("returned_model"),
                 "sdk_identity": step_sc.get("sdk_identity"),
                 "confidence": step_sc.get("confidence"),
+                "reranked": bool(step_sc.get("reranked", False)),
+                "verify_polls": step_sc.get("verify_polls", 1),
                 "observation_chained": summary_chained,
                 "timings_ms": t_ms,
             }
@@ -6718,7 +7644,12 @@ class JevMcpServer:
                 return reply(self.handle_observe(arguments))
             if name == "jev_select_action":
                 try:
-                    validated = validate_select_request(arguments)
+                    validated = validate_select_request(
+                        arguments,
+                        max_elements=self.max_elements_cap,
+                        max_candidates=self.max_candidates,
+                        max_json_bytes=self.max_json_bytes,
+                    )
                 except ValueError as exc:
                     err_payload = {
                         "schema": "agy_cua.jev_decision_v1",

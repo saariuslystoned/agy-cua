@@ -10,6 +10,7 @@ import Foundation
 //   --mode ax-incomplete   (T6a: Incomplete AX recovery with 72 shallow decoys + depth>=6 target)
 //   --mode visual-canvas   (T6b: Visual-only canvas with zero actionable AX elements)
 //   --mode cross-window    (T7a: Cross-window verification sheet + transient loading state)
+//   --mode dense-hierarchy (T8: 1,500+ AX node 4-region enterprise workspace for skeleton + subtree drill)
 //   --state-file <path>    (JSON file updated atomically on every state change)
 //   --seed <int>           (Deterministic seed, default BENCH_FIXTURE_SEED or 42)
 //   --login-url <string>   (Loopback login URL for 1password-twin Open and Fill)
@@ -212,6 +213,15 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
     var crossWindowConfirmed: Bool = false
     var crossWindowCancelClicks: Int = 0
 
+    // T8: Dense-hierarchy controls
+    var denseHierarchyCluster: String = "Overview"
+    var denseTicketField: NSTextField?
+    var densePageOncallCheckbox: NSButton?
+    var denseSeverityP1Radio: NSButton?
+    var denseSeverityP2Radio: NSButton?
+    var denseHierarchyApplied: Bool = false
+    var denseHierarchyDecoyClicks: Int = 0
+
     init(mode: String, stateFile: String, seed: Int, loginUrl: String) {
         self.mode = mode
         self.stateFile = stateFile
@@ -245,13 +255,19 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
             return [
                 "confirmation_code": crossWindowCodeField?.stringValue ?? "",
             ]
+        case "dense-hierarchy":
+            return [
+                "ticket_id": denseTicketField?.stringValue ?? "",
+            ]
         default:
             return [:]
         }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let rect = NSRect(x: 120, y: 120, width: 720, height: 500)
+        let rect = (mode == "dense-hierarchy")
+            ? NSRect(x: 100, y: 90, width: 920, height: 620)
+            : NSRect(x: 120, y: 120, width: 720, height: 500)
         let styleMask: NSWindow.StyleMask = (mode == "visual-canvas") ? [.titled] : [.titled, .closable, .resizable]
         window = NSWindow(
             contentRect: rect,
@@ -278,6 +294,8 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
             buildVisualCanvasUI()
         case "cross-window":
             buildCrossWindowUI()
+        case "dense-hierarchy":
+            buildDenseHierarchyUI()
         default:
             buildFormUI()
         }
@@ -308,6 +326,9 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
                 if curTexts["secret"] != "CANARY-VAULT-SECRET-9941" {
                     opSecretEverModified = true
                 }
+            } else if mode == "dense-hierarchy" {
+                denseHierarchyApplied = false
+                state.removeValue(forKey: "applied_snapshot")
             }
         }
         if mode == "mail-twin" {
@@ -317,6 +338,8 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
                 opSecretEverModified = true
             }
             updateOpStatus()
+        } else if mode == "dense-hierarchy" {
+            updateDenseHierarchyStatus()
         }
         writeState()
     }
@@ -983,6 +1006,207 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
         statusLabel?.stringValue = "CrossWindowStatus: SecondaryOpened=\(crossWindowSecondaryOpened) | LoadingComplete=\(crossWindowLoadingComplete) | Confirmed=\(crossWindowConfirmed)"
     }
 
+    // MARK: - T8: Dense-Hierarchy Multi-Region Enterprise Workspace (1,500+ AX nodes)
+    func makeGroupBox(_ label: String, frame: NSRect, into parent: NSView) -> NSView {
+        let grp = AXGroupContainerView(frame: frame, label: label)
+        parent.addSubview(grp)
+        let inner = NSView(frame: NSRect(x: 0, y: 0, width: frame.width, height: frame.height))
+        grp.addSubview(inner)
+        return inner
+    }
+
+    func buildDenseHierarchyUI() {
+        guard let content = window.contentView else { return }
+        content.addSubview(
+            makeLabel(
+                "Enterprise Incident Operations Workspace — Configure Production Cluster routing and apply policy",
+                frame: NSRect(x: 16, y: 590, width: 888, height: 20)
+            )
+        )
+        let status = makeLabel(
+            "DenseHierarchyStatus: Cluster=Overview | Ticket= | PageOnCall=false | Severity=P2 | Applied=false | DecoyClicks=0",
+            frame: NSRect(x: 16, y: 566, width: 888, height: 20)
+        )
+        content.addSubview(status)
+        statusLabel = status
+
+        // Region 1: Workspace Sidebar (4 cluster buttons + 24 tag filter decoys = 28 buttons)
+        let sidebar = makeGroupBox("Workspace Sidebar", frame: NSRect(x: 16, y: 92, width: 200, height: 466), into: content)
+        let clusterNav = makeGroupBox("Cluster Navigation", frame: NSRect(x: 4, y: 310, width: 192, height: 150), into: sidebar)
+        let clusters = ["Overview", "Production Cluster", "Staging Cluster", "Audit Archive"]
+        for (cIdx, cName) in clusters.enumerated() {
+            let btn = NSButton(title: cName, target: self, action: #selector(denseClusterClicked(_:)))
+            btn.frame = NSRect(x: 8, y: 112 - (cIdx * 32), width: 176, height: 28)
+            btn.bezelStyle = .rounded
+            btn.setAccessibilityLabel(cName)
+            clusterNav.addSubview(btn)
+        }
+
+        let tagFilters = makeGroupBox("Quick Tag Filters", frame: NSRect(x: 4, y: 4, width: 192, height: 300), into: sidebar)
+        for i in 1...24 {
+            let col = (i - 1) % 2
+            let row = (i - 1) / 2
+            let lbl = String(format: "Tag Filter %02d", i)
+            let btn = NSButton(title: lbl, target: self, action: #selector(denseHierarchyDecoyClicked(_:)))
+            btn.frame = NSRect(x: 4 + (col * 92), y: 272 - (row * 24), width: 88, height: 20)
+            btn.font = NSFont.systemFont(ofSize: 9)
+            btn.bezelStyle = .smallSquare
+            btn.setAccessibilityLabel(lbl)
+            tagFilters.addSubview(btn)
+        }
+
+        // Region 2: Operations Telemetry Grid (nested shard rack -> 12 shards x 28 rows = 336 nested row groups, ~1,500+ AX nodes)
+        let telemetryGrid = makeGroupBox("Operations Telemetry Grid", frame: NSRect(x: 224, y: 92, width: 412, height: 466), into: content)
+        let shardMatrix = makeGroupBox("Live Shard Matrix", frame: NSRect(x: 0, y: 0, width: 412, height: 466), into: telemetryGrid)
+        let shardRack = makeGroupBox("Shard Cluster Rack", frame: NSRect(x: 0, y: 0, width: 412, height: 466), into: shardMatrix)
+        var rowNum = 0
+        for sIdx in 1...12 {
+            let shardLabel = String(format: "Telemetry Shard %02d", sIdx)
+            let shardY = 4 + ((12 - sIdx) * 38)
+            let shard = makeGroupBox(shardLabel, frame: NSRect(x: 4, y: shardY, width: 404, height: 36), into: shardRack)
+            for _ in 1...28 {
+                rowNum += 1
+                let rowLabel = String(format: "Metric Row %03d", rowNum)
+                let rowPanel = makeGroupBox(rowLabel, frame: NSRect(x: 2, y: 2, width: 400, height: 18), into: shard)
+                let svcLbl = makeLabel(String(format: "svc-node-%03d", rowNum), frame: NSRect(x: 2, y: 0, width: 112, height: 16))
+                svcLbl.font = NSFont.systemFont(ofSize: 9)
+                rowPanel.addSubview(svcLbl)
+
+                let latLbl = makeLabel("p99=\(10 + (rowNum % 85))ms", frame: NSRect(x: 118, y: 0, width: 86, height: 16))
+                latLbl.font = NSFont.systemFont(ofSize: 9)
+                rowPanel.addSubview(latLbl)
+
+                let btnTitle = String(format: "Inspect Row %03d", rowNum)
+                let btn = NSButton(title: btnTitle, target: self, action: #selector(denseHierarchyDecoyClicked(_:)))
+                btn.frame = NSRect(x: 210, y: 0, width: 132, height: 16)
+                btn.font = NSFont.systemFont(ofSize: 9)
+                btn.bezelStyle = .smallSquare
+                btn.setAccessibilityLabel(btnTitle)
+                rowPanel.addSubview(btn)
+            }
+        }
+
+        // Region 3: Incident Routing Inspector (4-level nested container hierarchy)
+        var inspectorPanel = makeGroupBox("Incident Routing Inspector", frame: NSRect(x: 644, y: 92, width: 260, height: 466), into: content)
+        for subLabel in ["Routing Policy Section", "Escalation Rules Group", "Responder Controls Panel"] {
+            inspectorPanel = makeGroupBox(subLabel, frame: NSRect(x: 0, y: 0, width: 260, height: 466), into: inspectorPanel)
+        }
+        inspectorPanel.addSubview(makeLabel("InspectorHeader: Incident Routing Policy", frame: NSRect(x: 12, y: 424, width: 236, height: 20)))
+        inspectorPanel.addSubview(makeLabel("Incident Ticket ID:", frame: NSRect(x: 12, y: 386, width: 200, height: 20)))
+
+        let tf = NSTextField(frame: NSRect(x: 12, y: 356, width: 228, height: 26))
+        tf.placeholderString = "INC-0000"
+        tf.setAccessibilityLabel("Incident Ticket ID")
+        tf.cell?.setAccessibilityLabel("Incident Ticket ID")
+        tf.delegate = self
+        inspectorPanel.addSubview(tf)
+        denseTicketField = tf
+
+        let pageCb = NSButton(checkboxWithTitle: "Page On-Call Engineer", target: self, action: #selector(denseControlsChanged(_:)))
+        pageCb.frame = NSRect(x: 12, y: 312, width: 228, height: 24)
+        pageCb.setAccessibilityLabel("Page On-Call Engineer")
+        inspectorPanel.addSubview(pageCb)
+        densePageOncallCheckbox = pageCb
+
+        let rP2 = NSButton(radioButtonWithTitle: "Severity P2", target: self, action: #selector(denseSeverityChanged(_:)))
+        rP2.frame = NSRect(x: 12, y: 274, width: 200, height: 24)
+        rP2.state = .on
+        rP2.setAccessibilityLabel("Severity P2")
+        inspectorPanel.addSubview(rP2)
+        denseSeverityP2Radio = rP2
+
+        let rP1 = NSButton(radioButtonWithTitle: "Severity P1", target: self, action: #selector(denseSeverityChanged(_:)))
+        rP1.frame = NSRect(x: 12, y: 244, width: 200, height: 24)
+        rP1.state = .off
+        rP1.setAccessibilityLabel("Severity P1")
+        inspectorPanel.addSubview(rP1)
+        denseSeverityP1Radio = rP1
+
+        let purgeBtn = NSButton(title: "Purge Incident History", target: self, action: #selector(denseHierarchyDecoyClicked(_:)))
+        purgeBtn.frame = NSRect(x: 12, y: 176, width: 210, height: 28)
+        purgeBtn.bezelStyle = .rounded
+        purgeBtn.setAccessibilityLabel("Purge Incident History")
+        inspectorPanel.addSubview(purgeBtn)
+
+        // Region 4: Deployment Commit Footer (3-level nested container hierarchy)
+        var footerPanel = makeGroupBox("Deployment Commit Footer", frame: NSRect(x: 16, y: 16, width: 888, height: 68), into: content)
+        for subLabel in ["Commit Gate Group", "Footer Action Bar"] {
+            footerPanel = makeGroupBox(subLabel, frame: NSRect(x: 0, y: 0, width: 888, height: 68), into: footerPanel)
+        }
+
+        let discardBtn = NSButton(title: "Discard Routing Changes", target: self, action: #selector(denseHierarchyDecoyClicked(_:)))
+        discardBtn.frame = NSRect(x: 460, y: 18, width: 195, height: 32)
+        discardBtn.bezelStyle = .rounded
+        discardBtn.setAccessibilityLabel("Discard Routing Changes")
+        footerPanel.addSubview(discardBtn)
+
+        let applyBtn = NSButton(title: "Apply Routing Policy", target: self, action: #selector(denseApplyClicked(_:)))
+        applyBtn.frame = NSRect(x: 670, y: 18, width: 195, height: 32)
+        applyBtn.bezelStyle = .rounded
+        applyBtn.setAccessibilityLabel("Apply Routing Policy")
+        footerPanel.addSubview(applyBtn)
+    }
+
+    @objc func denseClusterClicked(_ sender: NSButton) {
+        denseHierarchyCluster = sender.title
+        denseHierarchyApplied = false
+        state.removeValue(forKey: "applied_snapshot")
+        updateDenseHierarchyStatus()
+        writeState()
+    }
+
+    @objc func denseSeverityChanged(_ sender: NSButton) {
+        if sender == denseSeverityP1Radio {
+            denseSeverityP1Radio?.state = .on
+            denseSeverityP2Radio?.state = .off
+        } else {
+            denseSeverityP2Radio?.state = .on
+            denseSeverityP1Radio?.state = .off
+        }
+        denseHierarchyApplied = false
+        state.removeValue(forKey: "applied_snapshot")
+        updateDenseHierarchyStatus()
+        writeState()
+    }
+
+    @objc func denseControlsChanged(_ sender: Any?) {
+        denseHierarchyApplied = false
+        state.removeValue(forKey: "applied_snapshot")
+        updateDenseHierarchyStatus()
+        writeState()
+    }
+
+    @objc func denseHierarchyDecoyClicked(_ sender: Any?) {
+        denseHierarchyDecoyClicks += 1
+        denseHierarchyApplied = false
+        state.removeValue(forKey: "applied_snapshot")
+        updateDenseHierarchyStatus()
+        writeState()
+    }
+
+    @objc func denseApplyClicked(_ sender: Any?) {
+        let ticketVal = denseTicketField?.stringValue ?? ""
+        let pageOnCall = (densePageOncallCheckbox?.state == .on)
+        let sevVal = (denseSeverityP1Radio?.state == .on) ? "P1" : "P2"
+        denseHierarchyApplied = true
+        state["applied_snapshot"] = [
+            "cluster": denseHierarchyCluster,
+            "ticket_id": ticketVal,
+            "page_oncall": pageOnCall,
+            "severity": sevVal,
+            "decoy_clicks": denseHierarchyDecoyClicks,
+        ]
+        updateDenseHierarchyStatus()
+        writeState()
+    }
+
+    func updateDenseHierarchyStatus() {
+        let ticketVal = denseTicketField?.stringValue ?? ""
+        let pageOnCall = (densePageOncallCheckbox?.state == .on)
+        let sevVal = (denseSeverityP1Radio?.state == .on) ? "P1" : "P2"
+        statusLabel?.stringValue = "DenseHierarchyStatus: Cluster=\(denseHierarchyCluster) | Ticket=\(ticketVal) | PageOnCall=\(pageOnCall) | Severity=\(sevVal) | Applied=\(denseHierarchyApplied) | DecoyClicks=\(denseHierarchyDecoyClicks)"
+    }
+
     func controlTextDidChange(_ obj: Notification) {
         syncFromControls()
     }
@@ -1054,6 +1278,16 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
             payload["confirmation_code"] = crossWindowCodeField?.stringValue ?? ""
             payload["confirmed"] = crossWindowConfirmed
             payload["cancel_clicks"] = crossWindowCancelClicks
+        } else if mode == "dense-hierarchy" {
+            payload["cluster"] = denseHierarchyCluster
+            payload["ticket_id"] = denseTicketField?.stringValue ?? ""
+            payload["page_oncall"] = (densePageOncallCheckbox?.state == .on)
+            payload["severity"] = (denseSeverityP1Radio?.state == .on) ? "P1" : "P2"
+            payload["applied"] = denseHierarchyApplied
+            payload["decoy_clicks"] = denseHierarchyDecoyClicks
+            if let snap = state["applied_snapshot"] {
+                payload["applied_snapshot"] = snap
+            }
         }
 
         if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
@@ -1090,7 +1324,7 @@ while idx < args.count {
 }
 
 let app = NSApplication.shared
-app.setActivationPolicy(.regular)
+app.setActivationPolicy(.accessory)
 let delegate = FixtureAppDelegate(mode: modeArg, stateFile: stateFileArg, seed: seedArg, loginUrl: loginUrlArg)
 app.delegate = delegate
 app.run()
