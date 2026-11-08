@@ -10,6 +10,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 import urllib.error
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -92,6 +93,114 @@ def sample_select_args(**overrides):
     }
     base.update(overrides)
     return base
+
+
+class DriverSessionEnvironmentTest(unittest.TestCase):
+    SESSION = {
+        "DISPLAY": ":123",
+        "WAYLAND_DISPLAY": "wayland-fixture",
+        "XDG_RUNTIME_DIR": "/tmp/fictional-runtime",
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/fictional-bus",
+    }
+
+    def probe(self, platform, session=None, direct=False, hang=False):
+        script = textwrap.dedent("""\
+            #!/usr/bin/env python3
+            import json, os, sys, time
+            initialized = False
+            for line in sys.stdin:
+                msg = json.loads(line)
+                if msg.get("method") == "notifications/initialized":
+                    initialized = True
+                if "id" not in msg:
+                    continue
+                if msg.get("method") == "initialize":
+                    result = {"protocolVersion": "2025-06-18", "serverInfo": {"name": "fictional-env-fixture"}}
+                elif msg.get("params", {}).get("name") == "fixture_hang":
+                    time.sleep(5)
+                    continue
+                else:
+                    result = {"structuredContent": {"pid": os.getpid(), "initialized": initialized}}
+                print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}), flush=True)
+        """)
+        with tempfile.TemporaryDirectory() as tmp:
+            driver = os.path.join(tmp, "fictional-driver")
+            with open(driver, "w", encoding="utf-8") as handle:
+                handle.write(script)
+            os.chmod(driver, 0o700)
+            base = {
+                "PATH": os.path.dirname(sys.executable) + os.pathsep + os.defpath,
+                "HOME": tmp,
+                "AGY_CUA_DRIVER": "/fictional/override",
+                "CUA_DRIVER_HOME": "/fictional/driver-home",
+            }
+            env = {
+                **base,
+                **(self.SESSION if session is None else session),
+                "TYPESAFE_API_KEY": "selector-only-sentinel",
+                "UNRELATED_SENTINEL": "not-a-session-descriptor",
+                "CUA_ARBITRARY": "not-admitted",
+                "XAUTHORITY": "/fictional/not-forwarded",
+                "WAYLAND_SOCKET": "999",
+            }
+            if direct:
+                env["AGY_CUA_DRIVER_DIRECT"] = "1"
+                base["AGY_CUA_DRIVER_DIRECT"] = "1"
+            spawn = subprocess.Popen
+            with mock.patch.object(jev.sys, "platform", platform), mock.patch.object(
+                jev.subprocess, "Popen", wraps=spawn
+            ) as started:
+                client = jev.DriverClient(driver, timeout_ms=350, env=env)
+                try:
+                    first = client.call_tool("fixture_env", {})["structuredContent"]
+                    second = client.call_tool("fixture_env", {})["structuredContent"]
+                    self.assertTrue(first["initialized"])
+                    self.assertEqual(first["pid"], second["pid"])
+                    self.assertEqual(started.call_count, 1)
+                    if hang:
+                        with self.assertRaisesRegex(TimeoutError, "timed out"):
+                            client.call_tool("fixture_hang", {})
+                        self.assertIsNone(client._proc)
+                        restarted = client.call_tool("fixture_env", {})["structuredContent"]
+                        self.assertTrue(restarted["initialized"])
+                        self.assertNotEqual(first["pid"], restarted["pid"])
+                        self.assertEqual(started.call_count, 2)
+                    for call in started.call_args_list:
+                        self.assertEqual(call.args[0], [driver, "mcp"] + (["--direct"] if direct else []))
+                    actual_env = [call.kwargs["env"] for call in started.call_args_list]
+                finally:
+                    client.close()
+                    self.assertIsNone(client._proc)
+            return base, actual_env
+
+    def test_linux_passes_only_the_four_session_descriptors(self):
+        base, actual = self.probe("linux")
+        self.assertEqual(actual, [{**base, **self.SESSION}])
+
+    def test_macos_keeps_its_existing_environment_and_default_command(self):
+        base, actual = self.probe("darwin")
+        self.assertEqual(actual, [base])
+
+    def test_unknown_platform_keeps_its_existing_environment(self):
+        base, actual = self.probe("fictional-os")
+        self.assertEqual(actual, [base])
+
+    def test_missing_linux_descriptors_do_not_fall_back_to_host_environment(self):
+        with mock.patch.dict(os.environ, self.SESSION):
+            base, actual = self.probe("linux", session={})
+        self.assertEqual(actual, [base])
+
+    def test_empty_linux_descriptors_are_not_forwarded(self):
+        base, actual = self.probe("linux", session={name: "" for name in self.SESSION})
+        self.assertEqual(actual, [base])
+
+    def test_linux_overrides_and_explicit_direct_command_are_preserved(self):
+        base, actual = self.probe("linux", direct=True)
+        self.assertEqual(actual, [{**base, **self.SESSION}])
+
+    def test_linux_timeout_reset_and_reuse_preserve_the_session_allowlist(self):
+        base, actual = self.probe("linux", hang=True)
+        self.assertEqual(actual, [{**base, **self.SESSION}] * 2)
 
 
 class RouteAndCredentialsTest(unittest.TestCase):
