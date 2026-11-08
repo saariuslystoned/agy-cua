@@ -528,6 +528,153 @@ class ControllerBoundaryTest(unittest.TestCase):
         self.assertEqual(reason_empty_str, "invalid_empty_static_text_contains")
 
 
+class VisualCaptureFreshnessTest(unittest.TestCase):
+    class Driver:
+        session_id = None
+        timeout_ms = 1000
+
+        def __init__(self):
+            self.capture = "image"
+            self.sequence = 0
+            self.clicks = []
+            self.activated = False
+            self.last_observe_args = None
+
+        def call_tool(self, name, args, **kwargs):
+            if name == "click":
+                self.clicks.append(dict(args))
+                self.activated = True
+                return {"content": [{"type": "text", "text": "fictional click"}]}
+            if name != "get_window_state":
+                raise AssertionError(name)
+            self.last_observe_args = dict(args)
+            self.sequence += 1
+            if self.capture == "error":
+                return {"isError": True, "content": [{"type": "text", "text": "fictional capture error"}]}
+            state = "Canvas Activated" if self.activated else "Canvas Idle"
+            result = {
+                "content": [{"type": "text", "text": f'AXStaticText = "{state}"'}],
+                "structuredContent": {
+                    "pid": args["pid"], "window_id": args["window_id"],
+                    "snapshot_id": f"s{self.sequence:08x}",
+                    "elements_complete": False, "truncated": False,
+                    "window_bounds": {"x": 0, "y": 0, "width": 320, "height": 200},
+                    "screenshot_width": 320, "screenshot_height": 200,
+                    "elements": [{"element_index": 0, "role": "AXWindow", "label": "Canvas"}],
+                },
+            }
+            if args.get("include_screenshot"):
+                if self.capture != "missing":
+                    result["content"].append({"type": "image", "mimeType": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="})
+                if self.capture in {"missing", "invalid_frame"}:
+                    result["structuredContent"].update(
+                        screenshot_frame_valid=False,
+                        screenshot_error={"code": "surface_identity_unproven", "reason": "fictional unavailable frame"},
+                    )
+            return result
+
+        def close(self):
+            pass
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.driver = self.Driver()
+        self.server = jev.JevMcpServer(
+            env={"AGY_CUA_TARGET_STATE_FILE": os.path.join(self.temp.name, "state.json")},
+            driver_client=self.driver,
+            keychain_reader=lambda _: self.fail("credential access"),
+            http_post=lambda *args, **kwargs: self.fail("provider access"),
+        )
+        self.addCleanup(self.server.close)
+
+    def observe(self, **overrides):
+        args = {"pid": 42, "window_id": 100, "include_screenshot": True, "discover_windows": False}
+        args.update(overrides)
+        schema = next(t["inputSchema"] for t in jev.TOOLS if t["name"] == "jev_observe")
+        self.assertFalse(set(args) - set(schema["properties"]))
+        self.assertIsInstance(args["include_screenshot"], bool)
+        return self.server.handle_message({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "jev_observe", "arguments": args},
+        })["result"]
+
+    def step(self, source, window=100):
+        return self.server.handle_step({
+            "goal": "Activate fictional control", "pid": 42, "window_id": window,
+            "mode": "deterministic", "source_snapshot_id": source,
+            "candidates": [{"id": "canvas.hit", "description": "Activate fictional control",
+                            "snapshot_id": source, "tool": "click", "x": 100, "y": 100}],
+            "expected_postcondition": {"static_text_contains": "Canvas Activated"},
+        })
+
+    def test_advertised_visual_observation_and_default_are_preserved(self):
+        schema = next(t["inputSchema"] for t in jev.TOOLS if t["name"] == "jev_observe")
+        self.assertEqual(schema["properties"]["include_screenshot"]["type"], "boolean")
+        result = self.observe()
+        self.assertFalse(result["isError"])
+        source = result["structuredContent"]["snapshot_id"]
+        self.assertEqual(self.step(source)["structuredContent"]["status"], "verified")
+        self.server.handle_observe({"pid": 42, "window_id": 100, "discover_windows": False})
+        self.assertFalse(self.driver.last_observe_args["include_screenshot"])
+
+    def test_failed_capture_revokes_old_visual_source_and_fresh_capture_recovers(self):
+        for failure in ("missing", "error", "invalid_frame"):
+            with self.subTest(failure=failure):
+                self.driver.capture = "image"
+                source = self.observe()["structuredContent"]["snapshot_id"]
+                self.driver.capture = failure
+                result = self.observe()
+                if failure == "error":
+                    self.assertTrue(result["isError"])
+                else:
+                    self.assertFalse(result["structuredContent"]["screenshot_frame_valid"])
+                    self.assertEqual(result["structuredContent"]["screenshot_error"]["code"], "surface_identity_unproven")
+                    self.assertFalse(any(c["type"] == "image" for c in result["content"]))
+                self.driver.capture = "image"
+                before = len(self.driver.clicks)
+                self.assertEqual(self.step(source)["structuredContent"]["status"], "stale_snapshot")
+                self.assertEqual(len(self.driver.clicks), before)
+                fresh = self.observe()["structuredContent"]["snapshot_id"]
+                self.assertEqual(self.step(fresh)["structuredContent"]["status"], "verified")
+                self.assertEqual(len(self.driver.clicks), before + 1)
+
+    def test_capture_failure_does_not_revoke_other_window_source(self):
+        source = self.observe()["structuredContent"]["snapshot_id"]
+        other = self.observe(window_id=200)["structuredContent"]["snapshot_id"]
+        self.driver.capture = "missing"
+        self.observe()
+        self.driver.capture = "image"
+        self.assertEqual(self.step(source, window=200)["structuredContent"]["status"], "out_of_scope_target")
+        self.assertEqual(self.driver.clicks, [])
+        self.assertEqual(self.step(other, window=200)["structuredContent"]["status"], "verified")
+
+    def test_stdio_advertises_and_accepts_screenshot_request(self):
+        driver = os.path.join(self.temp.name, "fictional-driver")
+        with open(driver, "w", encoding="utf-8") as handle:
+            handle.write(FAKE_DRIVER_SCRIPT)
+        os.chmod(driver, 0o700)
+        args = {"pid": 42, "window_id": 100, "include_screenshot": True, "discover_windows": False}
+        messages = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "jev_observe", "arguments": args}},
+        ]
+        result = subprocess.run(
+            [sys.executable, JEV_MCP],
+            input="".join(json.dumps(message) + "\n" for message in messages),
+            text=True, capture_output=True, timeout=10,
+            env={"PATH": os.defpath, "HOME": self.temp.name, "AGY_CUA_DRIVER": driver},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        replies = {reply["id"]: reply for reply in map(json.loads, result.stdout.splitlines())}
+        schema = next(t["inputSchema"] for t in replies[2]["result"]["tools"] if t["name"] == "jev_observe")
+        self.assertFalse(set(args) - set(schema["properties"]))
+        self.assertEqual(schema["properties"]["include_screenshot"]["type"], "boolean")
+        self.assertEqual(replies[3]["result"]["structuredContent"]["status"], "ok")
+        self.assertFalse(replies[3]["result"]["structuredContent"]["screenshot_frame_valid"])
+
+
 class StdioEndToEndTest(unittest.TestCase):
     def test_jev_step_verifies_effect_and_records_stage_timings(self):
         with tempfile.TemporaryDirectory() as tmp:
