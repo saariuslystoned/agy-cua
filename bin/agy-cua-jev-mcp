@@ -5246,6 +5246,10 @@ class DriverClient:
             env["CUA_DRIVER_HOME"] = self._env["CUA_DRIVER_HOME"]
         if self._env.get("AGY_CUA_DRIVER_DIRECT"):
             env["AGY_CUA_DRIVER_DIRECT"] = self._env["AGY_CUA_DRIVER_DIRECT"]
+        if sys.platform == "linux":
+            for name in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"):
+                if self._env.get(name):
+                    env[name] = self._env[name]
         mcp_cmd = [self.driver_bin, "mcp"]
         if self._env.get("AGY_CUA_DRIVER_DIRECT") == "1":
             mcp_cmd.append("--direct")
