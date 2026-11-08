@@ -5550,6 +5550,7 @@ TOOLS = [
                     "description": "Optional container element_index from drill_regions to drill into one subtree.",
                 },
                 "include_diff": {"type": "boolean"},
+                "include_screenshot": {"type": "boolean"},
                 "discover_windows": {"type": "boolean"},
             },
         },
@@ -8080,6 +8081,8 @@ class JevMcpServer:
         is_hierarchy_scoped = bool(skeleton_val or region_val is not None or root_element_index_val is not None)
 
         want_screenshot = bool(args.get("include_screenshot", False))
+        if want_screenshot:
+            self._visual_snapshots.pop((pid, window_id), None)
         obs_call_args: dict[str, Any] = {
             "pid": pid,
             "window_id": window_id,
@@ -8224,6 +8227,10 @@ class JevMcpServer:
             for item in (raw_obs.get("content") or [])
             if isinstance(item, Mapping) and item.get("type") == "image" and item.get("data")
         ]
+        capture_metadata = raw_obs.get("structuredContent")
+        capture_metadata = capture_metadata if isinstance(capture_metadata, Mapping) else {}
+        if want_screenshot and capture_metadata.get("screenshot_frame_valid") is False:
+            image_blocks = []
         if want_screenshot and image_blocks:
             self._visual_snapshots[(pid, window_id)] = obs["snapshot_id"]
             self._visual_snapshot_targets[obs["snapshot_id"]] = (pid, window_id)
@@ -8264,6 +8271,13 @@ class JevMcpServer:
             "discovered_windows": discovered_windows,
             "observe_ms": round((time.perf_counter() - obs_started) * 1000, 2),
         }
+        if want_screenshot and not image_blocks:
+            payload["screenshot_frame_valid"] = False
+            capture_error = capture_metadata.get("screenshot_error")
+            payload["screenshot_error"] = dict(capture_error) if isinstance(capture_error, Mapping) else {
+                "code": "screenshot_unavailable",
+                "reason": "The requested screenshot was not returned",
+            }
         res_out = _format_tool_result(payload, is_error=False)
         if want_screenshot and image_blocks:
             res_out.setdefault("content", []).extend(image_blocks)
