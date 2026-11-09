@@ -3,6 +3,8 @@
 import json
 import os
 from pathlib import Path
+import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -39,11 +41,27 @@ else:
 
 
 class DoctorTest(unittest.TestCase):
-    def run_doctor(self, platform, reply, driver_exit=0):
+    def run_doctor(self, platform, reply, driver_exit=0, external_jq=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             commands = root / "commands"
             commands.mkdir()
+            jq = shutil.which("jq")
+            self.assertIsNotNone(jq, "doctor tests require jq on the caller PATH")
+            calls = root / "calls.jsonl"
+            if external_jq:
+                external = root / "external-tools"
+                external.mkdir()
+                wrapper = external / "jq"
+                wrapper.write_text(
+                    "#!/bin/sh\n"
+                    "printf '%s\\n' '[\"external-jq\", []]' >> "
+                    + shlex.quote(str(calls)) + "\nexec "
+                    + shlex.quote(jq) + ' "$@"\n'
+                )
+                wrapper.chmod(0o755)
+                jq = shutil.which("jq", path=str(external))
+            (commands / "jq").symlink_to(Path(jq).resolve())
             home = root / "home"
             home.mkdir()
             config = root / "config.json"
@@ -52,7 +70,6 @@ class DoctorTest(unittest.TestCase):
                 "driver_exit": driver_exit,
                 "jev": str(DOCTOR.with_name("agy-cua-jev-mcp")),
             }))
-            calls = root / "calls.jsonl"
             for name in ("uname", "sw_vers", "agy", "driver", "python3"):
                 path = commands / name
                 path.write_text("#!" + sys.executable + "\n" + STUB)
@@ -70,9 +87,16 @@ class DoctorTest(unittest.TestCase):
             trace = [json.loads(line) for line in calls.read_text().splitlines()]
             self.assertIn(["python3", [str(DOCTOR.with_name("agy-cua-jev-mcp")),
                                       "--check"]], trace)
-            self.assertTrue(all(name in {"uname", "sw_vers", "agy", "driver", "python3"}
+            self.assertTrue(all(name in {"uname", "sw_vers", "agy", "driver", "python3", "external-jq"}
                                 for name, _ in trace))
+            if external_jq:
+                self.assertIn(["external-jq", []], trace)
             return result
+
+    def test_uses_jq_resolved_outside_system_path(self):
+        result = self.run_doctor("Linux", '{"x11":true,"atspi":true}', external_jq=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("X11=true", result.stdout)
 
     def test_linux_reports_backend_facts_without_mac_remedy_or_support_claim(self):
         for available in (True, False):

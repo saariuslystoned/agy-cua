@@ -44,9 +44,11 @@ agy-cua doctor
 
 ## Validation
 
-- All 124 unit/stdio/CLI tests passed in the isolated fixture.
+- All 125 unit/stdio/CLI tests passed in the isolated fixture.
 - ShellCheck on `bin/agy-cua` and `scripts/*.sh` passed; `git diff --check` passed.
 - The same six-case replay and the maintained CLI tests exercise the production script, with external responses substituted at executable boundaries.
 - All six baseline/candidate stderr streams are empty. No unexpected command was requested by the fixture.
 
 The local coordinator retains the complete immutable archive with the unchanged replay fixture, both full result sets, source identity, and hashes. No live desktop, provider, installation, credentials, permission grants, or deployment was tested.
+
+The doctor fixture resolves jq from the caller and exposes only that executable beside its stubs. A non-system-location control verifies this path, without a native Mac run.
