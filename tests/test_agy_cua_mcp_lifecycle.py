@@ -1,5 +1,6 @@
 """Actual launcher shutdown with only a registered fictional Linux child."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import platform
@@ -79,7 +80,9 @@ class LauncherLifecycleTest(unittest.TestCase):
                     if isinstance(action, signal.Signals):
                         proc.send_signal(action)
                     else:
-                        (root / "exit").write_text(str(action))
+                        sentinel = root / "exit.tmp"
+                        sentinel.write_text(str(action))
+                        sentinel.replace(root / "exit")
                     proc.wait(timeout=4)
                     self.assertFalse(proc.stdin.closed)
                     self.assertEqual(proc.returncode, action if type(action) is int else 0,
@@ -95,6 +98,32 @@ class LauncherLifecycleTest(unittest.TestCase):
                     proc.wait(timeout=3)
                     for stream in (proc.stdin, proc.stdout, proc.stderr):
                         stream.close()
+
+    def test_large_and_final_partial_lines_keep_exact_bytes(self):
+        lines = [
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping",
+                        "params": {"fictional": "α" * 2_000_000}}, ensure_ascii=False).encode() + b"\n",
+            b'{"jsonrpc":"2.0","id":2,"method":"ping"}\n',
+            b'{"jsonrpc":"2.0","id":3,"method":"ping"}',
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            driver = Path(tmp) / "fictional-driver"
+            driver.write_text("#!" + sys.executable + "\n"
+                              "import hashlib, json, sys\n"
+                              "lines = [[len(line), hashlib.sha256(line).hexdigest()] "
+                              "for line in sys.stdin.buffer]\n"
+                              "print(json.dumps({'jsonrpc': '2.0', 'method': 'fictional/observed', "
+                              "'params': {'lines': lines}}))\n")
+            driver.chmod(0o700)
+            proc = subprocess.run(
+                [sys.executable, str(SHIM)], input=b"".join(lines),
+                capture_output=True, timeout=20,
+                env={"PATH": os.defpath, "HOME": tmp, "AGY_CUA_DRIVER": str(driver)},
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        self.assertEqual(proc.stderr, b"")
+        self.assertEqual(json.loads(proc.stdout)["params"]["lines"],
+                         [[len(line), hashlib.sha256(line).hexdigest()] for line in lines])
 
 
 if __name__ == "__main__":

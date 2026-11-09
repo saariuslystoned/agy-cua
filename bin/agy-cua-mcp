@@ -55,17 +55,19 @@ def annotate(message, pending):
 
 def client_lines():
     """Read newline-framed bytes without locking Python's buffered stdin."""
-    pending = b""
+    pending = []
     while True:
         chunk = os.read(sys.stdin.fileno(), 65536)
         if not chunk:
-            if pending:
-                yield pending
+            tail = b"".join(pending)
+            if tail:
+                yield tail
             return
-        lines = (pending + chunk).split(b"\n")
-        pending = lines.pop()
-        for line in lines:
-            yield line + b"\n"
+        lines = chunk.split(b"\n")
+        pending.append(lines[0])
+        for line in lines[1:]:
+            yield b"".join(pending) + b"\n"
+            pending = [line]
 
 
 def main():
