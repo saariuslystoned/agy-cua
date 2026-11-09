@@ -23,8 +23,9 @@ fail() { printf '  FAIL  %s\n' "$*"; FAILED=1; }
 
 doctor() {
   FAILED=0
+  PLATFORM="$(uname -s)"
   echo "agy-cua doctor"
-  if [[ "$(uname -s)" == "Darwin" ]]; then ok "macOS $(sw_vers -productVersion)"
+  if [[ "$PLATFORM" == "Darwin" ]]; then ok "macOS $(sw_vers -productVersion)"
   else warn "only macOS is qualified so far; Cua Driver also supports Windows and Linux"; fi
 
   if [[ -x "$AGY" ]]; then ok "Antigravity CLI $("$AGY" --version 2>/dev/null | head -1)"
@@ -33,7 +34,16 @@ doctor() {
   if DRIVER="$(find_driver)"; then
     ok "cua-driver $("$DRIVER" --version 2>/dev/null | awk '{print $2}') at $DRIVER"
     PERMS="$("$DRIVER" permissions status --json 2>/dev/null)"
-    if [[ "$(jq -r '.accessibility' <<<"$PERMS" 2>/dev/null)" == "true" \
+    if [[ "$PLATFORM" == "Linux" ]]; then
+      if LINUX_STATUS="$(jq -er 'select(type == "object") |
+        def flag: if . == true then "true" elif . == false then "false" else "unknown" end;
+        "X11=\(.x11 | flag), Wayland=\(.wayland | flag), Wayland enabled=\(.wayland_enabled | flag), AT-SPI=\(.atspi | flag)"' <<<"$PERMS" 2>/dev/null)"; then
+        warn "Linux driver reports: $LINUX_STATUS"
+      else
+        warn "Linux driver status unavailable or invalid"
+      fi
+      fail "Linux remains unqualified; reported driver status does not establish background automation readiness"
+    elif [[ "$(jq -r '.accessibility' <<<"$PERMS" 2>/dev/null)" == "true" \
        && "$(jq -r '.screen_recording' <<<"$PERMS" 2>/dev/null)" == "true" ]]; then
       ok "Accessibility and Screen Recording granted to com.trycua.driver"
     else
