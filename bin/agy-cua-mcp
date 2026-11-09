@@ -25,7 +25,7 @@ DRIVER_CANDIDATES = [
 
 def driver_path():
     for candidate in DRIVER_CANDIDATES:
-        if candidate and os.access(candidate, os.X_OK):
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     sys.stderr.write("agy-cua: cua-driver not found; run `agy-cua doctor`\n")
     sys.exit(127)
