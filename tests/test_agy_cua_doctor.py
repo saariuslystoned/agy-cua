@@ -29,6 +29,7 @@ elif name == "driver" and args == ["--version"]:
     print("cua-driver fictional")
 elif name == "driver" and args == ["permissions", "status", "--json"]:
     print(config["reply"])
+    raise SystemExit(config["driver_exit"])
 elif name == "python3" and args == [config["jev"], "--check"]:
     print(json.dumps({"route": "fictional", "configured_model": "fixture",
                       "key_source": "fixture"}))
@@ -38,7 +39,7 @@ else:
 
 
 class DoctorTest(unittest.TestCase):
-    def run_doctor(self, platform, reply):
+    def run_doctor(self, platform, reply, driver_exit=0):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             commands = root / "commands"
@@ -48,6 +49,7 @@ class DoctorTest(unittest.TestCase):
             config = root / "config.json"
             config.write_text(json.dumps({
                 "platform": platform, "reply": reply,
+                "driver_exit": driver_exit,
                 "jev": str(DOCTOR.with_name("agy-cua-jev-mcp")),
             }))
             calls = root / "calls.jsonl"
@@ -97,7 +99,7 @@ class DoctorTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("Linux remains unqualified", result.stdout)
                 self.assertNotIn("permissions grant", result.stdout)
-                if reply in ('not-json', '[]'):
+                if reply in ('{"status":"unknown"}', 'not-json', '[]'):
                     self.assertIn("status unavailable or invalid", result.stdout)
                 else:
                     self.assertIn("X11=unknown", result.stdout)
@@ -115,6 +117,17 @@ class DoctorTest(unittest.TestCase):
                     self.assertIn("Accessibility and Screen Recording granted", result.stdout)
                 else:
                     self.assertIn("open -n -g -a CuaDriver --args serve", result.stdout)
+
+    def test_linux_failed_or_unknown_status_does_not_report_healthy_fields(self):
+        for reply, code in (({"x11": True, "atspi": True}, 1),
+                            ({"status": "unknown", "x11": True}, 0),
+                            ({"isError": True, "x11": True}, 0),
+                            ({"ok": False, "x11": True}, 0)):
+            with self.subTest(reply=reply, code=code):
+                result = self.run_doctor("Linux", json.dumps(reply), code)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("status unavailable or invalid", result.stdout)
+                self.assertNotIn("X11=true", result.stdout)
 
 
 if __name__ == "__main__":

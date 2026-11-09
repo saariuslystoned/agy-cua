@@ -34,8 +34,10 @@ doctor() {
   if DRIVER="$(find_driver)"; then
     ok "cua-driver $("$DRIVER" --version 2>/dev/null | awk '{print $2}') at $DRIVER"
     PERMS="$("$DRIVER" permissions status --json 2>/dev/null)"
+    PERMS_EXIT=$?
     if [[ "$PLATFORM" == "Linux" ]]; then
-      if LINUX_STATUS="$(jq -er 'select(type == "object") |
+      if [[ "$PERMS_EXIT" == "0" ]] && LINUX_STATUS="$(jq -er 'select(type == "object") |
+        select(.status == null and .isError != true and .ok != false) |
         def flag: if . == true then "true" elif . == false then "false" else "unknown" end;
         "X11=\(.x11 | flag), Wayland=\(.wayland | flag), Wayland enabled=\(.wayland_enabled | flag), AT-SPI=\(.atspi | flag)"' <<<"$PERMS" 2>/dev/null)"; then
         warn "Linux driver reports: $LINUX_STATUS"
