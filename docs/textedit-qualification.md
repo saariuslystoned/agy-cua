@@ -2,6 +2,8 @@
 
 The October 18 pilot used Antigravity CLI and the installed plugin against real
 TextEdit. It did not qualify the save workflow. See the [retained results](../proof/textedit-20261018.md).
+The [October 19 sibling-document probe](../proof/textedit-document-targeting-20261019.md) demonstrates the menu-context mismatch and an upstream candidate refusal guard; a correctly bound Format command remains disabled in the background. The workflow remains blocked.
+
 There is no qualified unattended executor in this change. The experimental runner
 was withdrawn after review found transport-deadline and intermediate-receipt gaps;
 its historical revisions remain in PR history and private run output.
