@@ -28,7 +28,7 @@ Live probes on `cua-driver 0.60.0`:
 
 - `bin/agy-cua doctor`: all 6 checks `ok` (`cua-driver 0.60.0`, TCC grants to `com.trycua.driver`, `jev-1.13.0` Keychain route ready, plugin installed).
 - `shellcheck bin/agy-cua scripts/*.sh`: exit `0`.
-- `python3 -m unittest discover -s tests -v`: **`Ran 111 tests in 19.987s` — `OK`**.
+- `python3 -m unittest discover -s tests -v`: **`Ran 112 tests in 25.361s` — `OK`**.
 
 ## 4. 11-Task Benchmark (`agy-cua-jev-v3`, `gemini-3.8-flash` `high`)
 

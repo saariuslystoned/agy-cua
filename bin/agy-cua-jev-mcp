@@ -8847,9 +8847,11 @@ class JevMcpServer:
             "agent_display",
             {"action": "create", "width": width, "height": height, "name": name},
         )
-        if res.get("isError"):
+        sc = res.get("structuredContent") if isinstance(res.get("structuredContent"), Mapping) else {}
+        if res.get("isError") or sc.get("status") == "refused" or isinstance(sc.get("refusal"), Mapping):
             err_txt = "".join(c.get("text", "") for c in (res.get("content") or []) if isinstance(c, Mapping)).strip()
-            raise RuntimeError(err_txt or "agent_display create returned isError=true")
+            refusal_msg = (sc.get("refusal") or {}).get("message") if isinstance(sc.get("refusal"), Mapping) else None
+            raise RuntimeError(err_txt or str(refusal_msg or "") or "agent_display create returned refusal/error")
         info = self._parse_agent_display_info(res)
         info["name"] = name
         self._owned_displays[info["display_id"]] = dict(info)
@@ -8893,12 +8895,15 @@ class JevMcpServer:
             "set_window_frame",
             {"pid": pid, "window_id": window_id, "x": tx, "y": ty, "width": tw, "height": th},
         )
-        if res.get("isError"):
+        sc = res.get("structuredContent") if isinstance(res.get("structuredContent"), Mapping) else {}
+        if res.get("isError") or sc.get("status") == "refused" or isinstance(sc.get("refusal"), Mapping):
             err_txt = "".join(c.get("text", "") for c in (res.get("content") or []) if isinstance(c, Mapping)).strip()
+            refusal_msg = (sc.get("refusal") or {}).get("message") if isinstance(sc.get("refusal"), Mapping) else None
             before_send, refusal_code = _classify_driver_dispatch_refusal(res)
+            msg = err_txt or str(refusal_msg or "") or f"set_window_frame refused ({refusal_code or 'refused'})"
             if before_send:
-                raise ValueError(err_txt or f"set_window_frame refused ({refusal_code or 'refused'})")
-            raise RuntimeError(err_txt or "set_window_frame returned isError=true")
+                raise ValueError(msg)
+            raise RuntimeError(msg)
         self._window_display_map[(pid, window_id)] = display_id
         self._visual_snapshots.pop((pid, window_id), None)
         self._last_observations.pop((pid, window_id), None)
@@ -8944,16 +8949,23 @@ class JevMcpServer:
                     _with_delivery({"schema": "agy_cua.jev_agent_display_v1", "status": "refused", "action": "create", "reason": "invalid_name", "session_id": self.session_id}, delivery="not_sent", retry="safe"),
                     is_error=True,
                 )
+            create_dispatched = False
             try:
                 driver = self._get_driver()
                 if sys.platform != "darwin" and not getattr(driver, "supports_agent_display", False):
                     raise ValueError("agent_display_unsupported: virtual displays are macOS-only")
+                create_dispatched = True
                 res = driver.call_tool(
                     "agent_display",
                     {"action": "create", "width": raw_w, "height": raw_h, "name": raw_name.strip()},
                 )
-                if res.get("isError"):
+                sc = res.get("structuredContent") if isinstance(res.get("structuredContent"), Mapping) else {}
+                if res.get("isError") or sc.get("status") == "refused" or isinstance(sc.get("refusal"), Mapping):
                     err_txt = "".join(c.get("text", "") for c in (res.get("content") or []) if isinstance(c, Mapping)).strip()
+                    before_send, _ = _classify_driver_dispatch_refusal(res)
+                    if before_send:
+                        create_dispatched = False
+                        raise ValueError(err_txt or "agent_display create refused")
                     raise RuntimeError(err_txt or "agent_display create returned isError=true")
                 info = self._parse_agent_display_info(res)
                 info["name"] = raw_name.strip()
@@ -8976,13 +8988,29 @@ class JevMcpServer:
             except _RequestCancelledError:
                 raise
             except ValueError as exc:
+                if create_dispatched:
+                    return _format_tool_result(
+                        _with_delivery({"schema": "agy_cua.jev_agent_display_v1", "status": "failed", "action": "create", "reason": str(exc), "uncertain_side_effect": True, "session_id": self.session_id}, delivery="uncertain", retry="unsafe"),
+                        is_error=True,
+                    )
                 return _format_tool_result(
-                    _with_delivery({"schema": "agy_cua.jev_agent_display_v1", "status": "refused", "action": "create", "reason": str(exc), "session_id": self.session_id}, delivery="not_sent", retry="safe"),
+                    _with_delivery({"schema": "agy_cua.jev_agent_display_v1", "status": "refused", "action": "create", "reason": str(exc), "uncertain_side_effect": False, "session_id": self.session_id}, delivery="not_sent", retry="safe"),
                     is_error=True,
                 )
             except Exception as exc:
                 return _format_tool_result(
-                    _with_delivery({"schema": "agy_cua.jev_agent_display_v1", "status": "failed", "action": "create", "reason": str(exc), "session_id": self.session_id}, delivery="not_sent", retry="safe"),
+                    _with_delivery(
+                        {
+                            "schema": "agy_cua.jev_agent_display_v1",
+                            "status": "failed",
+                            "action": "create",
+                            "reason": str(exc),
+                            "uncertain_side_effect": create_dispatched,
+                            "session_id": self.session_id,
+                        },
+                        delivery="uncertain" if create_dispatched else "not_sent",
+                        retry="unsafe" if create_dispatched else "safe",
+                    ),
                     is_error=True,
                 )
 
@@ -9234,6 +9262,7 @@ class JevMcpServer:
             self._record_trace(payload)
             return _format_tool_result(payload, is_error=True)
 
+        post_dispatch = False
         try:
             driver = self._get_driver()
             prep_timeout_s = max(driver.timeout_ms / 1000.0, 15.0)
@@ -9245,9 +9274,13 @@ class JevMcpServer:
                 driver_prep_args["browser"] = validated["browser"]
             if "url" in validated:
                 driver_prep_args["url"] = validated["url"]
+            post_dispatch = True
             res = driver.call_tool("browser_prepare", driver_prep_args, timeout_s=prep_timeout_s)
             sc = res.get("structuredContent") if isinstance(res.get("structuredContent"), Mapping) else {}
             if res.get("isError") or sc.get("status") == "refused" or isinstance(sc.get("refusal"), Mapping):
+                before_send, _ = _classify_driver_dispatch_refusal(res)
+                if before_send or sc.get("status") == "refused" or isinstance(sc.get("refusal"), Mapping):
+                    post_dispatch = False
                 err_txt = "".join(c.get("text", "") for c in (res.get("content") or []) if isinstance(c, Mapping)).strip()
                 refusal_msg = (sc.get("refusal") or {}).get("message") if isinstance(sc.get("refusal"), Mapping) else None
                 raise RuntimeError(err_txt or str(refusal_msg or "") or "browser_prepare returned refusal/error")
@@ -9362,10 +9395,11 @@ class JevMcpServer:
                     "schema": "agy_cua.jev_browser_prepare_v1",
                     "status": "failed",
                     "reason": str(exc),
+                    "uncertain_side_effect": post_dispatch,
                     "session_id": self.session_id,
                 },
-                delivery="not_sent",
-                retry="safe",
+                delivery="uncertain" if post_dispatch else "not_sent",
+                retry="unsafe" if post_dispatch else "safe",
             )
             self._record_trace(payload)
             return _format_tool_result(payload, is_error=True)

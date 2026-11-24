@@ -8047,9 +8047,11 @@ class CuaDriver061RevisionDeliveryCancelAndDisplayTest(unittest.TestCase):
                 proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "jev_status", "arguments": {}}}) + "\n")
                 proc.stdin.flush()
                 proc.stdin.close()
-                out_lines = [json.loads(line) for line in proc.stdout.read().splitlines() if line.strip()]
-                rc = proc.wait(timeout=10)
-                self.assertEqual(rc, 0, proc.stderr.read() if proc.stderr else "")
+                proc.stdin = None
+                stdout_data, stderr_data = proc.communicate(timeout=10)
+                out_lines = [json.loads(line) for line in stdout_data.splitlines() if line.strip()]
+                rc = proc.returncode
+                self.assertEqual(rc, 0, stderr_data)
                 ids = [m["id"] for m in out_lines]
                 self.assertNotIn(2, ids, out_lines)
                 self.assertIn(3, ids, out_lines)
@@ -8116,10 +8118,67 @@ class CuaDriver061RevisionDeliveryCancelAndDisplayTest(unittest.TestCase):
                 res = srv.handle_browser_prepare({"url": "http://127.0.0.1:8080/test"})
                 self.assertTrue(res["isError"], (mode, res))
                 self.assertEqual(res["structuredContent"]["status"], "failed", (mode, res))
-                self.assertEqual(res["structuredContent"]["delivery"], "not_sent")
-                self.assertEqual(res["structuredContent"]["retry"], "safe")
+                if mode == "prepare_refused":
+                    self.assertEqual(res["structuredContent"]["delivery"], "not_sent")
+                    self.assertEqual(res["structuredContent"]["retry"], "safe")
+                    self.assertFalse(res["structuredContent"].get("uncertain_side_effect"))
+                else:
+                    # Browser was already prepared; do not mark safe to blindly spawn duplicates.
+                    self.assertEqual(res["structuredContent"]["delivery"], "uncertain")
+                    self.assertEqual(res["structuredContent"]["retry"], "unsafe")
+                    self.assertTrue(res["structuredContent"].get("uncertain_side_effect"))
             finally:
                 srv.close()
+
+    def test_move_window_refusal_without_isError_never_reports_window_moved(self):
+        class MoveRefusalDriver:
+            def __init__(self):
+                self.timeout_ms = 5000
+                self.supports_agent_display = True
+                self.tool_schemas = {
+                    "agent_display": {"properties": {}},
+                    "set_window_frame": {"properties": {}},
+                    "browser_prepare": {"properties": {}},
+                }
+
+            def tool_has_property(self, tool_name, prop_name):
+                return prop_name in (self.tool_schemas.get(tool_name) or {}).get("properties", {})
+
+            def call_tool(self, name, arguments, timeout_s=None):
+                if name == "agent_display":
+                    act = arguments.get("action")
+                    if act == "create":
+                        return {
+                            "content": [{"type": "text", "text": "Created"}],
+                            "structuredContent": {"display_id": 77, "x": 1920.0, "y": 0.0, "width": 1280.0, "height": 800.0},
+                        }
+                    if act == "remove":
+                        return {"content": [{"type": "text", "text": "Removed"}], "structuredContent": {"display_id": 77}}
+                if name == "browser_prepare":
+                    return {
+                        "content": [{"type": "text", "text": "prepared"}],
+                        "structuredContent": {"prepared_pid": 444, "window_id": 88, "target_id": "iso-1", "tab_id": "tab-1"},
+                    }
+                if name == "set_window_frame":
+                    return {
+                        "content": [{"type": "text", "text": "window frame move refused"}],
+                        "structuredContent": {"status": "refused", "refusal": {"code": "window_not_found", "message": "not movable"}},
+                    }
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {}}
+
+            def close(self):
+                pass
+
+        srv = jev.JevMcpServer(env={"TYPESAFE_API_KEY": "test-key"}, driver_client=MoveRefusalDriver(), keychain_reader=lambda _: None)
+        try:
+            prep = srv.handle_browser_prepare({"url": "http://127.0.0.1:8080/login", "isolate_display": True})
+            self.assertTrue(prep["isError"], prep["structuredContent"])
+            self.assertEqual(prep["structuredContent"]["status"], "failed")
+            self.assertEqual(prep["structuredContent"]["delivery"], "uncertain")
+            self.assertEqual(prep["structuredContent"]["retry"], "unsafe")
+            self.assertNotIn("agent_display", prep["structuredContent"])
+        finally:
+            srv.close()
 
 
 if __name__ == "__main__":
