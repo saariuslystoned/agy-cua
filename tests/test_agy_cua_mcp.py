@@ -21,50 +21,46 @@ loader.exec_module(shim)
 FAKE_DRIVER = textwrap.dedent("""\
     #!/usr/bin/env python3
     import json, sys
+    args = sys.argv[1:]
+    if "--claude-code-computer-use-compat" in args or "--session-policy" in args:
+        sys.stderr.write("removed flag\\n")
+        sys.exit(64)
     for line in sys.stdin:
         msg = json.loads(line)
         if "id" not in msg:
             continue
         name = msg.get("params", {}).get("name")
         if name == "get_window_state":
-            result = {"content": [{"type": "text", "text": "window_id=1 pid=2 elements=1"}],
-                      "structuredContent": {"snapshot_id": "s0000002a", "elements": []}}
+            result = {
+                "content": [{"type": "text", "text": "window_id=1 pid=2 elements=1 snapshot_id=s0000002a\\n"}],
+                "structuredContent": {"snapshot_id": "s0000002a", "elements": []},
+            }
         else:
-            result = {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"n": 1}}
+            result = {
+                "content": [{"type": "text", "text": "ok"}],
+                "structuredContent": {"argv": args},
+            }
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}), flush=True)
 """)
 
 
-def window_state_response(snapshot_id="s0000002a"):
-    return {"jsonrpc": "2.0", "id": 7, "result": {
-        "content": [{"type": "text", "text": "window_id=1 pid=2 elements=1"}],
-        "structuredContent": {"snapshot_id": snapshot_id}}}
+class ArgvTest(unittest.TestCase):
+    def test_prepends_direct_once_when_env_set(self):
+        self.assertEqual(
+            shim.build_driver_argv("/usr/bin/cua-driver", ["--socket", "/tmp/x.sock"], {"AGY_CUA_DRIVER_DIRECT": "1"}),
+            ["/usr/bin/cua-driver", "mcp", "--direct", "--socket", "/tmp/x.sock"],
+        )
+        self.assertEqual(
+            shim.build_driver_argv("/usr/bin/cua-driver", ["--direct"], {"AGY_CUA_DRIVER_DIRECT": "1"}),
+            ["/usr/bin/cua-driver", "mcp", "--direct"],
+        )
+        self.assertEqual(
+            shim.build_driver_argv("/usr/bin/cua-driver", ["--socket", "/tmp/x.sock"], {}),
+            ["/usr/bin/cua-driver", "mcp", "--socket", "/tmp/x.sock"],
+        )
 
 
-class AnnotateTest(unittest.TestCase):
-    def test_prepends_snapshot_id_to_first_text_block(self):
-        pending = {7: True}
-        message = shim.annotate(window_state_response(), pending)
-        text = message["result"]["content"][0]["text"]
-        self.assertTrue(text.startswith("snapshot_id=s0000002a "))
-        self.assertIn("window_id=1 pid=2 elements=1", text)
-        self.assertEqual(pending, {})
-
-    def test_leaves_untracked_responses_alone(self):
-        message = shim.annotate(window_state_response(), {})
-        self.assertEqual(message["result"]["content"][0]["text"], "window_id=1 pid=2 elements=1")
-
-    def test_leaves_error_responses_alone(self):
-        error = {"jsonrpc": "2.0", "id": 7, "error": {"code": -32602, "message": "bad"}}
-        self.assertEqual(shim.annotate(dict(error), {7: True}), error)
-
-    def test_adds_text_block_when_result_has_none(self):
-        message = {"jsonrpc": "2.0", "id": 7, "result": {"content": [], "structuredContent": {"snapshot_id": "s1"}}}
-        message = shim.annotate(message, {7: True})
-        self.assertTrue(message["result"]["content"][0]["text"].startswith("snapshot_id=s1 "))
-
-
-class StdioTest(unittest.TestCase):
+class StdioPassThroughTest(unittest.TestCase):
     def test_directory_override_falls_back_to_executable_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = os.path.join(tmp, "not-a-driver")
@@ -72,7 +68,7 @@ class StdioTest(unittest.TestCase):
             local_bin = os.path.join(tmp, ".local", "bin")
             os.makedirs(local_bin)
             fake = os.path.join(local_bin, "cua-driver")
-            with open(fake, "w") as handle:
+            with open(fake, "w", encoding="utf-8") as handle:
                 handle.write("#!" + sys.executable + "\nimport json, sys\n"
                              "print(json.dumps(sys.argv[1:]))\n")
             os.chmod(fake, 0o755)
@@ -85,10 +81,10 @@ class StdioTest(unittest.TestCase):
         self.assertEqual(json.loads(proc.stdout), ["mcp", "--direct"])
         self.assertEqual(proc.stderr, "")
 
-    def test_annotates_window_state_and_passes_other_tools_through(self):
+    def test_passes_messages_through_unchanged_without_text_injection(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake = os.path.join(tmp, "fake-driver")
-            with open(fake, "w") as handle:
+            with open(fake, "w", encoding="utf-8") as handle:
                 handle.write(FAKE_DRIVER)
             os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
             requests = [
@@ -96,13 +92,40 @@ class StdioTest(unittest.TestCase):
                 {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "click", "arguments": {}}},
             ]
             proc = subprocess.run(
-                [sys.executable, SHIM], input="".join(json.dumps(r) + "\n" for r in requests),
-                capture_output=True, text=True, timeout=20,
+                [sys.executable, SHIM, "--socket", "/tmp/test.sock"],
+                input="".join(json.dumps(r) + "\n" for r in requests),
+                capture_output=True,
+                text=True,
+                timeout=20,
+                env={**os.environ, "AGY_CUA_DRIVER": fake, "AGY_CUA_DRIVER_DIRECT": "1"},
+            )
+        self.assertEqual(proc.returncode, 0)
+        responses = {m["id"]: m for m in map(json.loads, proc.stdout.splitlines())}
+        self.assertEqual(
+            responses[1]["result"]["content"][0]["text"],
+            "window_id=1 pid=2 elements=1 snapshot_id=s0000002a\n",
+        )
+        self.assertEqual(
+            responses[2]["result"]["structuredContent"]["argv"],
+            ["mcp", "--direct", "--socket", "/tmp/test.sock"],
+        )
+
+    def test_preserves_exit_code_64_on_removed_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = os.path.join(tmp, "fake-driver")
+            with open(fake, "w", encoding="utf-8") as handle:
+                handle.write(FAKE_DRIVER)
+            os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+            proc = subprocess.run(
+                [sys.executable, SHIM, "--claude-code-computer-use-compat"],
+                input="",
+                capture_output=True,
+                text=True,
+                timeout=20,
                 env={**os.environ, "AGY_CUA_DRIVER": fake},
             )
-        responses = {m["id"]: m for m in map(json.loads, proc.stdout.splitlines())}
-        self.assertTrue(responses[1]["result"]["content"][0]["text"].startswith("snapshot_id=s0000002a "))
-        self.assertEqual(responses[2]["result"]["content"][0]["text"], "ok")
+        self.assertEqual(proc.returncode, 64)
+        self.assertIn("removed flag", proc.stderr)
 
 
 if __name__ == "__main__":

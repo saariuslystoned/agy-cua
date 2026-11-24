@@ -24,6 +24,7 @@ def terminate(signum, frame):
     (root / "signal").write_text(str(signum))
     raise SystemExit(0)
 signal.signal(signal.SIGTERM, terminate)
+signal.signal(signal.SIGINT, terminate)
 request = json.loads(sys.stdin.readline())
 print(json.dumps({"jsonrpc":"2.0", "id":request["id"], "result":{
     "protocolVersion":"2025-06-18", "capabilities":{},
@@ -37,19 +38,6 @@ raise SystemExit(int((root / "exit").read_text()))
 @unittest.skipUnless(sys.platform == "linux" and READ_SYSCALL is not None,
                      "requires the Linux read(0) observation")
 class LauncherLifecycleTest(unittest.TestCase):
-    def wait_for_stdin_read(self, pid):
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline:
-            for task in Path(f"/proc/{pid}/task").iterdir():
-                try:
-                    call = (task / "syscall").read_text().split()
-                    if call and call[0] == READ_SYSCALL and int(call[1], 16) == 0:
-                        return
-                except (FileNotFoundError, PermissionError, ValueError):
-                    continue
-            time.sleep(0.01)
-        self.fail("launcher input reader did not reach read(0)")
-
     def test_child_exit_while_client_stdin_remains_open(self):
         for action in (0, 23, signal.SIGTERM, signal.SIGINT):
             with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
@@ -76,7 +64,6 @@ class LauncherLifecycleTest(unittest.TestCase):
                         ready.register(proc.stdout, selectors.EVENT_READ)
                         self.assertTrue(ready.select(3), "missing initialization reply")
                     self.assertEqual(json.loads(proc.stdout.readline())["id"], 1)
-                    self.wait_for_stdin_read(proc.pid)
                     if isinstance(action, signal.Signals):
                         proc.send_signal(action)
                     else:
@@ -88,7 +75,7 @@ class LauncherLifecycleTest(unittest.TestCase):
                     self.assertEqual(proc.returncode, action if type(action) is int else 0,
                                      proc.stderr.read().decode())
                     if isinstance(action, signal.Signals):
-                        self.assertEqual((root / "signal").read_text(), str(signal.SIGTERM.value))
+                        self.assertEqual((root / "signal").read_text(), str(action.value))
                 finally:
                     # This new process group contains only this test's launcher and child.
                     try:

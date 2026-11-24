@@ -2313,13 +2313,20 @@ def run_arm_agy_cua_jev(
 
         t_obs0 = time.perf_counter()
         if hillclimbed_v2 and task.task_id == "T8_dense_hierarchy_drill" and hasattr(jev_server, "handle_observe"):
-            init_obs_res = jev_server.handle_observe({
-                "pid": pid,
-                "window_id": window_id,
-                "include_screenshot": False,
-                "skeleton": True,
-            })
-            obs0 = dict(init_obs_res.get("structuredContent") or {})
+            obs0 = {}
+            for _obs_attempt in range(3):
+                init_obs_res = jev_server.handle_observe({
+                    "pid": pid,
+                    "window_id": window_id,
+                    "include_screenshot": False,
+                    "skeleton": True,
+                })
+                obs0 = dict(init_obs_res.get("structuredContent") or {})
+                if not init_obs_res.get("isError") and obs0.get("snapshot_id"):
+                    break
+                time.sleep(0.35)
+            if not obs0.get("snapshot_id"):
+                raise ArmActionError(str(obs0.get("reason") or "initial T8 observation missing snapshot_id"))
         else:
             drv0 = jev_server._get_driver()
             gws0_args: dict[str, Any] = {"pid": pid, "window_id": window_id, "include_screenshot": False, "tree_format": "both"}

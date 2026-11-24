@@ -7953,6 +7953,490 @@ class StdioEndToEndTest(unittest.TestCase):
             srv.close()
 
 
+class CuaDriver061RevisionDeliveryCancelAndDisplayTest(unittest.TestCase):
+    def _mock_http_choice(self, choice_id: str):
+        def _post(req, _timeout):
+            criteria = list(json.loads(req.data.decode("utf-8"))["questions"]["candidate"]["criteria"].keys())
+            probs = {
+                cid: (0.96 if cid == choice_id else round(0.04 / max(1, len(criteria) - 1), 6))
+                for cid in criteria
+            }
+            return (
+                200,
+                json.dumps(
+                    {
+                        "model": jev.PINNED_JEV_MODEL,
+                        "answers": {"candidate": {"type": "choice", "choice": choice_id, "probabilities": probs}},
+                        "usage": {"input_tokens": 12, "output_tokens": 3},
+                    }
+                ),
+            )
+
+        return _post
+
+    def test_ui_tree_revision_forwarding_stale_refusal_and_delivery_retry_semantics(self):
+        class RevDriver:
+            def __init__(self, *, supports_rev: bool | None = True, refusal_mode: str | None = None) -> None:
+                self.timeout_ms = 5000
+                self.session_id = None
+                self.calls = []
+                self.supports_root_element_token = False
+                self.supports_include_menubar = False
+                self.supports_ui_tree_revision = supports_rev
+                self.refusal_mode = refusal_mode
+                self.obs_n = 0
+
+            def close(self):
+                pass
+
+            def call_tool(self, name, arguments, timeout_s=None, deadline_monotonic=None):
+                self.calls.append((name, dict(arguments)))
+                if name == "get_window_state":
+                    self.obs_n += 1
+                    snap = f"s000000{self.obs_n:02x}"
+                    lbl = "0" if self.obs_n == 1 else "7"
+                    return {
+                        "content": [{"type": "text", "text": f"window_id=9 pid=77 elements=2 snapshot_id={snap} ui_tree_revision=4201\n"}],
+                        "structuredContent": {
+                            "pid": 77,
+                            "window_id": 9,
+                            "snapshot_id": snap,
+                            "ui_tree_revision": 4201,
+                            "elements_complete": True,
+                            "truncated": False,
+                            "elements": [
+                                {"element_index": 0, "role": "AXWindow", "label": "Calc"},
+                                {"element_index": 1, "role": "AXButton", "label": "7", "enabled": True, "actions": ["AXPress"]},
+                                {"element_index": 2, "role": "AXStaticText", "label": lbl, "value": lbl},
+                            ],
+                        },
+                    }
+                if name == "click":
+                    if self.refusal_mode == "stale_revision":
+                        return {
+                            "isError": True,
+                            "content": [{"type": "text", "text": "click refused: stale_revision"}],
+                            "structuredContent": {
+                                "effect": "refused",
+                                "refusal": {"code": "stale_revision", "reason": "changed", "expected": 4201, "current": 4205},
+                            },
+                        }
+                    if self.refusal_mode == "uncertain_error":
+                        return {
+                            "isError": True,
+                            "content": [{"type": "text", "text": "transport error after send"}],
+                        }
+                    return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"effect": "confirmed"}}
+                if name == "invoke_menu":
+                    return {"content": [{"type": "text", "text": "menu ok"}], "structuredContent": {"effect": "confirmed"}}
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {}}
+
+        # 1. Forwards ui_tree_revision on click and records pre/post revisions
+        drv_ok = RevDriver(supports_rev=True)
+        srv_ok = jev.JevMcpServer(
+            env={"TYPESAFE_API_KEY": "test-key"},
+            driver_client=drv_ok,
+            http_post=self._mock_http_choice("ax.1.7"),
+            keychain_reader=lambda _: None,
+        )
+        try:
+            res_ok = srv_ok.handle_step({
+                "pid": 77,
+                "window_id": 9,
+                "goal": "Click 7",
+                "expected_postcondition": {"static_text_equals": "7"},
+            })
+            sc_ok = res_ok["structuredContent"]
+            self.assertFalse(res_ok["isError"], sc_ok)
+            self.assertEqual(sc_ok["delivery"], "sent")
+            self.assertEqual(sc_ok["retry"], "not_needed")
+            self.assertEqual(sc_ok["pre_ui_tree_revision"], 4201)
+            self.assertEqual(sc_ok["post_ui_tree_revision"], 4201)
+            click_calls = [args for cname, args in drv_ok.calls if cname == "click"]
+            self.assertEqual(len(click_calls), 1)
+            self.assertEqual(click_calls[0]["ui_tree_revision"], 4201)
+
+            # Preflight expected_ui_tree_revision mismatch emits delivery=not_sent / retry=safe
+            res_pre_stale = srv_ok.handle_step({
+                "pid": 77,
+                "window_id": 9,
+                "goal": "Click 7",
+                "expected_ui_tree_revision": 9999,
+            })
+            sc_pre = res_pre_stale["structuredContent"]
+            self.assertTrue(res_pre_stale["isError"])
+            self.assertEqual(sc_pre["status"], "stale_revision")
+            self.assertEqual(sc_pre["delivery"], "not_sent")
+            self.assertEqual(sc_pre["retry"], "safe")
+            self.assertFalse(sc_pre["action_dispatched"])
+            self.assertFalse(sc_pre["uncertain_side_effect"])
+            self.assertIn("delivery=not_sent retry=safe", res_pre_stale["content"][0]["text"])
+
+            # invoke_menu does NOT accept ui_tree_revision in upstream #8611
+            res_menu = srv_ok.handle_step({
+                "pid": 77,
+                "window_id": 9,
+                "goal": "Invoke View",
+                "mode": "deterministic",
+                "candidates": [{"id": "m1", "description": "View > Basic", "tool": "invoke_menu", "path": ["View", "Basic"]}],
+            })
+            self.assertFalse(res_menu["isError"], res_menu["structuredContent"])
+            menu_calls = [args for cname, args in drv_ok.calls if cname == "invoke_menu"]
+            self.assertNotIn("ui_tree_revision", menu_calls[0])
+        finally:
+            srv_ok.close()
+
+        # 2. Structured pre-delivery driver refusal (stale_revision) does NOT halt and emits delivery=not_sent / retry=safe
+        drv_ref = RevDriver(supports_rev=True, refusal_mode="stale_revision")
+        srv_ref = jev.JevMcpServer(
+            env={"TYPESAFE_API_KEY": "test-key"},
+            driver_client=drv_ref,
+            http_post=self._mock_http_choice("ax.1.7"),
+            keychain_reader=lambda _: None,
+        )
+        try:
+            res_ref = srv_ref.handle_step({"pid": 77, "window_id": 9, "goal": "Click 7"})
+            sc_ref = res_ref["structuredContent"]
+            self.assertTrue(res_ref["isError"])
+            self.assertEqual(sc_ref["status"], "stale_revision")
+            self.assertEqual(sc_ref["delivery"], "not_sent")
+            self.assertEqual(sc_ref["retry"], "safe")
+            self.assertFalse(sc_ref["action_dispatched"])
+            self.assertFalse(sc_ref["uncertain_side_effect"])
+            self.assertFalse(srv_ref.accounting.halted)
+            self.assertEqual(srv_ref.accounting.uncertain_side_effects, 0)
+        finally:
+            srv_ref.close()
+
+        # 3. Unstructured post-dispatch failure halts and emits delivery=uncertain / retry=unsafe
+        drv_unc = RevDriver(supports_rev=True, refusal_mode="uncertain_error")
+        srv_unc = jev.JevMcpServer(
+            env={"TYPESAFE_API_KEY": "test-key"},
+            driver_client=drv_unc,
+            http_post=self._mock_http_choice("ax.1.7"),
+            keychain_reader=lambda _: None,
+        )
+        try:
+            res_unc = srv_unc.handle_step({"pid": 77, "window_id": 9, "goal": "Click 7"})
+            sc_unc = res_unc["structuredContent"]
+            self.assertTrue(res_unc["isError"])
+            self.assertEqual(sc_unc["status"], "dispatch_failed")
+            self.assertEqual(sc_unc["delivery"], "uncertain")
+            self.assertEqual(sc_unc["retry"], "unsafe")
+            self.assertTrue(sc_unc["uncertain_side_effect"])
+            self.assertTrue(srv_unc.accounting.halted)
+        finally:
+            srv_unc.close()
+
+    def test_guarded_agent_display_lifecycle_bounds_and_browser_isolation(self):
+        class DisplayDriver:
+            def __init__(self) -> None:
+                self.timeout_ms = 5000
+                self.session_id = None
+                self.calls = []
+                self.supports_agent_display = True
+                self.supports_set_window_frame = True
+                self.next_disp = 700
+
+            def call_tool(self, name, arguments, timeout_s=None, deadline_monotonic=None):
+                self.calls.append((name, dict(arguments)))
+                if name == "agent_display":
+                    act = arguments.get("action")
+                    if act == "create":
+                        self.next_disp += 1
+                        return {
+                            "content": [{"type": "text", "text": f"Created display {self.next_disp}"}],
+                            "structuredContent": {
+                                "display_id": self.next_disp,
+                                "x": 1920.0,
+                                "y": 0.0,
+                                "width": float(arguments.get("width", 1920)),
+                                "height": float(arguments.get("height", 1080)),
+                            },
+                        }
+                    if act == "list":
+                        return {
+                            "content": [{"type": "text", "text": "1 virtual display(s)."}],
+                            "structuredContent": {"displays": [{"display_id": 701, "x": 1920.0, "y": 0.0, "width": 1280.0, "height": 800.0}]},
+                        }
+                    if act == "remove":
+                        return {"content": [{"type": "text", "text": "Removed"}], "structuredContent": {"display_id": arguments["display_id"]}}
+                if name == "browser_prepare":
+                    return {
+                        "content": [{"type": "text", "text": "prepared"}],
+                        "structuredContent": {"prepared_pid": 444, "window_id": 88, "target_id": "iso-1", "tab_id": "tab-1", "url": "http://127.0.0.1:8080/login"},
+                    }
+                if name == "set_window_frame":
+                    return {"content": [{"type": "text", "text": "moved"}], "structuredContent": {"ok": True}}
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {}}
+
+            def close(self):
+                self.calls.append(("close", {}))
+
+        drv = DisplayDriver()
+        srv = jev.JevMcpServer(env={"TYPESAFE_API_KEY": "test-key"}, driver_client=drv, keychain_reader=lambda _: None)
+        try:
+            # Invalid size refused preflight
+            bad_size = srv.handle_agent_display({"action": "create", "width": 320, "height": 800})
+            self.assertTrue(bad_size["isError"])
+            self.assertEqual(bad_size["structuredContent"]["delivery"], "not_sent")
+            self.assertEqual(bad_size["structuredContent"]["retry"], "safe")
+
+            # Unowned display refused on remove and move_window
+            bad_rm = srv.handle_agent_display({"action": "remove", "display_id": 999})
+            self.assertTrue(bad_rm["isError"])
+            self.assertIn("unowned_or_unknown_agent_display", bad_rm["structuredContent"]["reason"])
+            self.assertEqual(bad_rm["structuredContent"]["retry"], "safe")
+
+            # Create owned display + refuse out-of-bounds move_window + valid move_window
+            created = srv.handle_agent_display({"action": "create", "width": 1280, "height": 800, "name": "WorkerScreen"})
+            self.assertFalse(created["isError"], created["structuredContent"])
+            disp_id = created["structuredContent"]["display_id"]
+            self.assertEqual(disp_id, 701)
+
+            oob = srv.handle_agent_display({"action": "move_window", "pid": 444, "window_id": 88, "display_id": disp_id, "x": 100, "y": 0, "width": 800, "height": 600})
+            self.assertTrue(oob["isError"])
+            self.assertIn("out_of_bounds_display_frame", oob["structuredContent"]["reason"])
+            self.assertEqual(oob["structuredContent"]["delivery"], "not_sent")
+            self.assertEqual(oob["structuredContent"]["retry"], "safe")
+
+            # browser_prepare with isolate_display=True reuses owned display and moves browser window off-screen
+            prep = srv.handle_browser_prepare({"url": "http://127.0.0.1:8080/login", "isolate_display": True})
+            self.assertFalse(prep["isError"], prep["structuredContent"])
+            self.assertEqual(prep["structuredContent"]["agent_display"]["display_id"], disp_id)
+            self.assertTrue(prep["structuredContent"]["agent_display"]["window_moved"])
+            swf_calls = [args for cname, args in drv.calls if cname == "set_window_frame"]
+            self.assertEqual(len(swf_calls), 1)
+            self.assertEqual(swf_calls[0]["x"], 1920.0)
+            self.assertEqual(swf_calls[0]["width"], 1280.0)
+            self.assertNotIn("bring_to_front", [cname for cname, _ in drv.calls])
+        finally:
+            srv.close()
+        rm_calls = [args for cname, args in drv.calls if cname == "agent_display" and args.get("action") == "remove"]
+        self.assertEqual(len(rm_calls), 1)
+        self.assertEqual(rm_calls[0]["display_id"], 701)
+
+    def test_notifications_cancelled_stdio_aborts_cleanly_and_keeps_session_healthy(self):
+        import time
+        with tempfile.TemporaryDirectory() as tmp:
+            driver_log = os.path.join(tmp, "driver.log")
+            fake_driver = os.path.join(tmp, "fake_slow_driver.py")
+            with open(fake_driver, "w", encoding="utf-8") as fh:
+                fh.write(
+                    textwrap.dedent(
+                        f"""\
+                        #!/usr/bin/env python3
+                        import json, sys, threading, time
+                        LOG = {driver_log!r}
+                        out_lock = threading.Lock()
+                        def log(msg):
+                            with open(LOG, "a", encoding="utf-8") as f:
+                                f.write(msg + "\\n")
+                        def send(obj):
+                            with out_lock:
+                                print(json.dumps(obj), flush=True)
+                        for line in sys.stdin:
+                            msg = json.loads(line)
+                            method = msg.get("method")
+                            req_id = msg.get("id")
+                            log(f"RECV:{{method}}:{{req_id}}")
+                            if method == "notifications/cancelled":
+                                log(f"CANCEL_FWD:{{msg.get('params', {{}}).get('requestId')}}")
+                                continue
+                            if "id" not in msg:
+                                continue
+                            if method == "initialize":
+                                send({{"jsonrpc": "2.0", "id": req_id, "result": {{"protocolVersion": "2025-06-18", "capabilities": {{"tools": {{}}}}, "serverInfo": {{"name": "cua-driver", "version": "0.61.0"}}}}}})
+                            elif method == "tools/list":
+                                send({{"jsonrpc": "2.0", "id": req_id, "result": {{"tools": [
+                                    {{"name": "get_window_state", "inputSchema": {{"type": "object", "properties": {{}}}}}},
+                                    {{"name": "click", "inputSchema": {{"type": "object", "properties": {{"ui_tree_revision": {{"type": "integer"}}}}}}}}
+                                ]}}}})
+                            elif method == "tools/call":
+                                tname = msg["params"]["name"]
+                                if tname == "get_window_state" and msg["params"]["arguments"].get("window_id") == 99:
+                                    log(f"SLOW_GWS:{{req_id}}")
+                                    def _delayed(rid=req_id):
+                                        time.sleep(5.0)
+                                        send({{"jsonrpc": "2.0", "id": rid, "result": {{"content": [{{"type": "text", "text": "ok"}}], "structuredContent": {{}}}}}})
+                                    threading.Thread(target=_delayed, daemon=True).start()
+                                    continue
+                                send({{"jsonrpc": "2.0", "id": req_id, "result": {{"content": [{{"type": "text", "text": "ok"}}], "structuredContent": {{}}}}}})
+                            else:
+                                send({{"jsonrpc": "2.0", "id": req_id, "result": {{}}}})
+                        """
+                    )
+                )
+            os.chmod(fake_driver, 0o755)
+            proc = subprocess.Popen(
+                [sys.executable, JEV_MCP],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env={**os.environ, "AGY_CUA_DRIVER": fake_driver, "TYPESAFE_API_KEY": "test-key", "AGY_CUA_JEV_LEGACY_CURSOR": "1"},
+            )
+            try:
+                assert proc.stdin is not None and proc.stdout is not None
+                proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n")
+                proc.stdin.flush()
+                init_resp = json.loads(proc.stdout.readline())
+                self.assertEqual(init_resp["id"], 1)
+
+                # Unknown cancellation notification is ignored cleanly
+                proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 999}}) + "\n")
+                proc.stdin.flush()
+
+                # Start slow jev_observe on window 99, wait for driver dispatch, then cancel it
+                proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "jev_observe", "arguments": {"pid": 55, "window_id": 99}}}) + "\n")
+                proc.stdin.flush()
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    if os.path.exists(driver_log):
+                        with open(driver_log, encoding="utf-8") as lf:
+                            if "SLOW_GWS:" in lf.read():
+                                break
+                    time.sleep(0.02)
+                proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 2, "reason": "user_cancelled"}}) + "\n")
+                # Immediate ping + status prove server stays responsive and suppresses id=2 response
+                proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "ping", "params": {}}) + "\n")
+                proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "jev_status", "arguments": {}}}) + "\n")
+                proc.stdin.flush()
+                proc.stdin.close()
+                proc.stdin = None
+                stdout_data, stderr_data = proc.communicate(timeout=10)
+                out_lines = [json.loads(line) for line in stdout_data.splitlines() if line.strip()]
+                rc = proc.returncode
+                self.assertEqual(rc, 0, stderr_data)
+                ids = [m["id"] for m in out_lines]
+                self.assertNotIn(2, ids, out_lines)
+                self.assertIn(3, ids, out_lines)
+                self.assertIn(4, ids, out_lines)
+                with open(driver_log, encoding="utf-8") as lf:
+                    dlog = lf.read()
+                self.assertIn("CANCEL_FWD:", dlog)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=2)
+
+    def test_browser_prepare_refusal_without_isError_fails_closed(self):
+        class RefusingPrepareDriver:
+            def __init__(self, mode: str):
+                self.mode = mode
+                self.timeout_ms = 5000
+                self.tool_schemas = {
+                    "browser_prepare": {"properties": {}},
+                    "get_browser_state": {"properties": {}},
+                    "browser_navigate": {"properties": {}},
+                }
+
+            def list_tools(self):
+                return self.tool_schemas
+
+            def tool_has_property(self, tool_name, prop_name):
+                return prop_name in (self.tool_schemas.get(tool_name) or {}).get("properties", {})
+
+            def call_tool(self, name, arguments, timeout_s=None):
+                if name == "browser_prepare" and self.mode == "prepare_refused":
+                    return {
+                        "content": [{"type": "text", "text": "browser_route_unavailable: could not inspect browser listeners"}],
+                        "structuredContent": {"status": "refused", "refusal": {"code": "browser_route_unavailable", "message": "lsof missing"}},
+                    }
+                if name == "browser_prepare":
+                    return {
+                        "content": [{"type": "text", "text": "prepared"}],
+                        "structuredContent": {"prepared_pid": 9100, "window_id": 4401},
+                    }
+                if name == "get_browser_state" and self.mode == "gbs_refused":
+                    return {
+                        "content": [{"type": "text", "text": "browser not attached"}],
+                        "structuredContent": {"status": "refused", "refusal": {"code": "not_ready", "message": "browser not attached"}},
+                    }
+                if name == "get_browser_state":
+                    return {
+                        "content": [{"type": "text", "text": "state"}],
+                        "structuredContent": {"status": "ok", "target_id": "bt-live", "tabs": [{"tab_id": "tab-live"}]},
+                    }
+                if name == "browser_navigate" and self.mode == "nav_refused":
+                    return {
+                        "content": [{"type": "text", "text": "navigation refused"}],
+                        "structuredContent": {"status": "refused", "refusal": {"code": "nav_blocked", "message": "navigation refused"}},
+                    }
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"status": "ok"}}
+
+            def close(self):
+                pass
+
+        for mode in ("prepare_refused", "gbs_refused", "nav_refused"):
+            srv = jev.JevMcpServer(env={"TYPESAFE_API_KEY": "test-key"}, driver_client=RefusingPrepareDriver(mode), keychain_reader=lambda _: None)
+            try:
+                res = srv.handle_browser_prepare({"url": "http://127.0.0.1:8080/test"})
+                self.assertTrue(res["isError"], (mode, res))
+                self.assertEqual(res["structuredContent"]["status"], "failed", (mode, res))
+                if mode == "prepare_refused":
+                    self.assertEqual(res["structuredContent"]["delivery"], "not_sent")
+                    self.assertEqual(res["structuredContent"]["retry"], "safe")
+                    self.assertFalse(res["structuredContent"].get("uncertain_side_effect"))
+                else:
+                    # Browser was already prepared; do not mark safe to blindly spawn duplicates.
+                    self.assertEqual(res["structuredContent"]["delivery"], "uncertain")
+                    self.assertEqual(res["structuredContent"]["retry"], "unsafe")
+                    self.assertTrue(res["structuredContent"].get("uncertain_side_effect"))
+            finally:
+                srv.close()
+
+    def test_move_window_refusal_without_isError_never_reports_window_moved(self):
+        class MoveRefusalDriver:
+            def __init__(self):
+                self.timeout_ms = 5000
+                self.supports_agent_display = True
+                self.tool_schemas = {
+                    "agent_display": {"properties": {}},
+                    "set_window_frame": {"properties": {}},
+                    "browser_prepare": {"properties": {}},
+                }
+
+            def tool_has_property(self, tool_name, prop_name):
+                return prop_name in (self.tool_schemas.get(tool_name) or {}).get("properties", {})
+
+            def call_tool(self, name, arguments, timeout_s=None):
+                if name == "agent_display":
+                    act = arguments.get("action")
+                    if act == "create":
+                        return {
+                            "content": [{"type": "text", "text": "Created"}],
+                            "structuredContent": {"display_id": 77, "x": 1920.0, "y": 0.0, "width": 1280.0, "height": 800.0},
+                        }
+                    if act == "remove":
+                        return {"content": [{"type": "text", "text": "Removed"}], "structuredContent": {"display_id": 77}}
+                if name == "browser_prepare":
+                    return {
+                        "content": [{"type": "text", "text": "prepared"}],
+                        "structuredContent": {"prepared_pid": 444, "window_id": 88, "target_id": "iso-1", "tab_id": "tab-1"},
+                    }
+                if name == "set_window_frame":
+                    return {
+                        "content": [{"type": "text", "text": "window frame move refused"}],
+                        "structuredContent": {"status": "refused", "refusal": {"code": "window_not_found", "message": "not movable"}},
+                    }
+                return {"content": [{"type": "text", "text": "ok"}], "structuredContent": {}}
+
+            def close(self):
+                pass
+
+        srv = jev.JevMcpServer(env={"TYPESAFE_API_KEY": "test-key"}, driver_client=MoveRefusalDriver(), keychain_reader=lambda _: None)
+        try:
+            prep = srv.handle_browser_prepare({"url": "http://127.0.0.1:8080/login", "isolate_display": True})
+            self.assertTrue(prep["isError"], prep["structuredContent"])
+            self.assertEqual(prep["structuredContent"]["status"], "failed")
+            self.assertEqual(prep["structuredContent"]["delivery"], "uncertain")
+            self.assertEqual(prep["structuredContent"]["retry"], "unsafe")
+            self.assertNotIn("agent_display", prep["structuredContent"])
+        finally:
+            srv.close()
+
+
 if __name__ == "__main__":
     unittest.main()
 

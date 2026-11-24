@@ -46,17 +46,17 @@ Antigravity (app or agy) --stdio MCP--> bin/agy-cua-mcp -----> cua-driver mcp --
   to one process without stealing focus, and returns exact refusal codes when
   it can't. The signed `CuaDriver.app` holds the macOS Accessibility and Screen
   Recording grants.
-- **`bin/agy-cua-mcp`** is a small stdio pass-through shim. Antigravity shows the model only
-  the text part of a tool result, and cua-driver keeps the element snapshot id
-  in the structured part, so without help the model can only click by guessing
-  pixels ([trycua/cua#4346](https://github.com/trycua/cua/issues/4346)). The
-  shim copies `snapshot_id` into the text, which enables exact element clicks.
-  Everything else passes through unchanged. It goes away once #4346 ships.
-- **`bin/agy-cua-jev-mcp`** is a zero-dependency Python 3 stdlib MCP server (`agy-cua-jev` `v0.3.0`)
+- **`bin/agy-cua-mcp`** is a minimal `exec` pass-through shim to `cua-driver mcp`
+  (setting `--direct` only when `AGY_CUA_DRIVER_DIRECT=1`). Upstream
+  `cua-driver` (`>=0.60.0`) now includes text-visible `snapshot_id` and
+  `element_token` headers natively (#4346), so the legacy JSON-line rewriting
+  shim is retired.
+- **`bin/agy-cua-jev-mcp`** is a zero-dependency Python 3 stdlib MCP server (`agy-cua-jev` `v0.4.0`)
   for bounded candidate selection with pinned **Jev (`jev-1.13.0`)** (`jev_status`,
-  `jev_select_action`, `jev_observe`, `jev_step`, `jev_batch`, `jev_browser_prepare`, `jev_browser_step`). It keeps Jev text-only, supports progressive container disclosure (`skeleton: true` -> `drill_regions` -> `region` / `root_element_index` subtree drilling), scales auto-candidate selection up to `240` candidates with container-path/state descriptions and automatic `<0.70`-confidence top-5 Jev shortlist reranking (`AGY_CUA_JEV_V1_COMPAT=1` restores `v1` caps), enforces zero automatic
+  `jev_select_action`, `jev_observe`, `jev_step`, `jev_batch`, `jev_browser_prepare`,
+  `jev_browser_step`, `jev_agent_display`). It keeps Jev text-only, supports progressive container disclosure (`skeleton: true` -> `drill_regions` -> `region` / `root_element_index` subtree drilling), scales auto-candidate selection up to `240` candidates with container-path/state descriptions and automatic `<0.70`-confidence top-5 Jev shortlist reranking (`AGY_CUA_JEV_V1_COMPAT=1` restores `v1` caps), enforces zero automatic
   provider retries (`max_attempts=1`), validates `(pid, window_id, snapshot_id)` (or `(target_id, tab_id, ref)` on isolated loopback browsers) and
-  `delivery_mode="background"` before dispatching to `cua-driver`, wakes occluded macOS App Nap targets, redacts and refuses secure fields (`secure_element_refused`), blocks consequential commit actions (`Send`, `Delete`, `Empty Trash`), and verifies the
+  `delivery_mode="background"` before dispatching to `cua-driver`, forwards `ui_tree_revision` when exposed (#8611), emits explicit `delivery`/`retry` markers (`delivery="not_sent"`, `retry="safe"` on preflight/pre-delivery refusals vs `uncertain_side_effect=true` on uncertain post-dispatch errors), handles MCP `notifications/cancelled` cleanly, supports guarded session-owned `CGVirtualDisplay` isolation (`jev_agent_display` / `isolate_display=true` #8146), wakes occluded macOS App Nap targets, redacts and refuses secure fields (`secure_element_refused`), blocks consequential commit actions (`Send`, `Delete`, `Empty Trash`), and verifies the
   post-action window state with bounded postcondition settle polling (`wait_timeout_ms`, default `1200` ms) and separate `observe_ms`, `provider_ms`, `dispatch_ms`,
   and `verify_ms` timings.
 - **`skills/cua-computer-use`** teaches Gemini 4 Argon and Gemini 3.8 Flash the loop: launch in the

@@ -31,7 +31,7 @@ class Session:
     def __init__(self):
         self.proc = subprocess.Popen(
             [driver_path(), "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
-            env={"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"]},
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": os.environ["HOME"]},
         )
         self.next_id = 0
         self.request("initialize", {
