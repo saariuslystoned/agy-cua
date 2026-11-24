@@ -61,6 +61,26 @@ class ArgvTest(unittest.TestCase):
 
 
 class StdioPassThroughTest(unittest.TestCase):
+    def test_directory_override_falls_back_to_executable_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = os.path.join(tmp, "not-a-driver")
+            os.mkdir(directory)
+            local_bin = os.path.join(tmp, ".local", "bin")
+            os.makedirs(local_bin)
+            fake = os.path.join(local_bin, "cua-driver")
+            with open(fake, "w", encoding="utf-8") as handle:
+                handle.write("#!" + sys.executable + "\nimport json, sys\n"
+                             "print(json.dumps(sys.argv[1:]))\n")
+            os.chmod(fake, 0o755)
+            proc = subprocess.run(
+                [sys.executable, SHIM, "--direct"], input="",
+                capture_output=True, text=True, timeout=5,
+                env={"PATH": os.defpath, "HOME": tmp, "AGY_CUA_DRIVER": directory},
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout), ["mcp", "--direct"])
+        self.assertEqual(proc.stderr, "")
+
     def test_passes_messages_through_unchanged_without_text_injection(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake = os.path.join(tmp, "fake-driver")
