@@ -1,0 +1,3277 @@
+{
+  "timestamp_utc": "20261124T004432Z",
+  "run_status": "completed",
+  "error": null,
+  "resumed_from": "runs/bench-20261124T003238Z/summary.json",
+  "model": "gemini-3.8-flash",
+  "model_schedule": [
+    {
+      "model": "gemini-3.8-flash",
+      "thinking_level": "high"
+    }
+  ],
+  "repetitions": 1,
+  "arms": [
+    "agy-cua-jev-v3"
+  ],
+  "planner_thinking_budget": null,
+  "planner_thinking_level": "high",
+  "price_per_1m_usd": {
+    "input": 0.5,
+    "output": 3.0
+  },
+  "total_spend_usd": 0.182472,
+  "reserved_usd": 0.0,
+  "gemini_uncertain_failures": 0,
+  "jev_uncertain_failures": 0,
+  "gemini_input_tokens": 153736,
+  "gemini_output_tokens": 3758,
+  "gemini_thought_tokens": 25142,
+  "jev_input_tokens": 85552,
+  "jev_output_tokens": 8971,
+  "results": [
+    {
+      "repetition": 1,
+      "task_id": "T1_calc_arith",
+      "tier": "T1",
+      "title": "Calculator Multi-Digit Arithmetic (47 \u00d7 83 = 3,901)",
+      "arm": "agy-cua-jev-v3",
+      "model": "gemini-3.8-flash",
+      "thinking_level": "high",
+      "thinking_budget": null,
+      "passed": true,
+      "verify_summary": "display='3,901' (expected '3,901')",
+      "wall_s": 35.73,
+      "outer_turns": 3,
+      "actions_dispatched": 6,
+      "uncertain_actions_dispatched": 0,
+      "step_median_ms": 779.71,
+      "model_ms_total": 29670.78,
+      "observe_ms_total": 145.35,
+      "jev_ms_total": 1286.52,
+      "dispatch_ms_total": 2832.53,
+      "verify_ms_total": 1331.04,
+      "screenshots_sent": 0,
+      "gemini_input_tokens": 9812,
+      "gemini_output_tokens": 2611,
+      "jev_tokens": 16040,
+      "cost_usd": 0.01595,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "focus_samples": 125,
+      "driver_version": "0.60.0",
+      "supports_root_element_token": false,
+      "supports_include_menubar": false,
+      "trace": [
+        {
+          "turn": 1,
+          "tool": "jev_batch",
+          "status": "postcondition_unmet",
+          "completed_count": 2,
+          "completed_steps": [
+            {
+              "step_index": 0,
+              "goal": "Click 4",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000003",
+              "post_snapshot_id": "s00000004",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "0"
+              ],
+              "post_static_texts": [
+                "4"
+              ],
+              "selected_id": "ax.10.4",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 13024,
+                "window_id": 19291,
+                "element_token": "s00000003:10",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 0.99,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": false,
+              "timings_ms": {
+                "observe_ms": 34.82,
+                "provider_ms": 259.59,
+                "dispatch_ms": 493.67,
+                "verify_ms": 39.72,
+                "total_ms": 846.61
+              }
+            },
+            {
+              "step_index": 1,
+              "goal": "Click 7",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000004",
+              "post_snapshot_id": "s00000005",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "4"
+              ],
+              "post_static_texts": [
+                "47"
+              ],
+              "selected_id": "ax.6.7",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 13024,
+                "window_id": 19291,
+                "element_token": "s00000004:6",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 216.01,
+                "dispatch_ms": 445.48,
+                "verify_ms": 31.38,
+                "total_ms": 713.95
+              }
+            }
+          ],
+          "selected_ids": [
+            "ax.10.4",
+            "ax.6.7"
+          ],
+          "post_static_texts": [
+            "47\u00d7"
+          ],
+          "timings_ms": {
+            "observe_ms": 34.82,
+            "provider_ms": 696.27,
+            "dispatch_ms": 1424.61,
+            "verify_ms": 1173.06,
+            "total_ms": 3389.57
+          }
+        },
+        {
+          "turn": 2,
+          "tool": "jev_batch",
+          "status": "verified",
+          "completed_count": 3,
+          "completed_steps": [
+            {
+              "step_index": 0,
+              "goal": "Click 8",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s0000000e",
+              "post_snapshot_id": "s0000000f",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "47\u00d7"
+              ],
+              "post_static_texts": [
+                "47\u00d78"
+              ],
+              "selected_id": "ax.7.8",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 13024,
+                "window_id": 19291,
+                "element_token": "s0000000e:7",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": false,
+              "timings_ms": {
+                "observe_ms": 43.27,
+                "provider_ms": 205.35,
+                "dispatch_ms": 472.69,
+                "verify_ms": 32.6,
+                "total_ms": 772.69
+              }
+            },
+            {
+              "step_index": 1,
+              "goal": "Click 3",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s0000000f",
+              "post_snapshot_id": "s00000010",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "47\u00d78"
+              ],
+              "post_static_texts": [
+                "47\u00d783"
+              ],
+              "selected_id": "ax.16.3",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 13024,
+                "window_id": 19291,
+                "element_token": "s0000000f:16",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 193.4,
+                "dispatch_ms": 478.7,
+                "verify_ms": 92.18,
+                "total_ms": 786.72
+              }
+            },
+            {
+              "step_index": 2,
+              "goal": "Click Equals",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000010",
+              "post_snapshot_id": "s00000011",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "47\u00d783"
+              ],
+              "post_static_texts": [
+                "47\u00d783",
+                "3,901"
+              ],
+              "selected_id": "ax.21.equals",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 13024,
+                "window_id": 19291,
+                "element_token": "s00000010:21",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 191.5,
+                "dispatch_ms": 456.53,
+                "verify_ms": 33.2,
+                "total_ms": 709.97
+              }
+            }
+          ],
+          "selected_ids": [
+            "ax.7.8",
+            "ax.16.3",
+            "ax.21.equals"
+          ],
+          "post_static_texts": [
+            "47\u00d783",
+            "3,901"
+          ],
+          "timings_ms": {
+            "observe_ms": 43.27,
+            "provider_ms": 590.25,
+            "dispatch_ms": 1407.92,
+            "verify_ms": 157.98,
+            "total_ms": 2270.63
+          }
+        }
+      ],
+      "verify_detail": {
+        "static_texts": [
+          "47\u00d783",
+          "3,901"
+        ],
+        "display": "3,901"
+      }
+    },
+    {
+      "repetition": 1,
+      "task_id": "T2_calc_recovery",
+      "tier": "T2",
+      "title": "Calculator Perturbed State Recovery (Dirty '99\u00d74' -> 38 \u00d7 45 = 1,710)",
+      "arm": "agy-cua-jev-v3",
+      "model": "gemini-3.8-flash",
+      "thinking_level": "high",
+      "thinking_budget": null,
+      "passed": true,
+      "verify_summary": "display='1,710' (expected '1,710')",
+      "wall_s": 94.51,
+      "outer_turns": 3,
+      "actions_dispatched": 8,
+      "uncertain_actions_dispatched": 0,
+      "step_median_ms": 741.85,
+      "model_ms_total": 87335.88,
+      "observe_ms_total": 126.74,
+      "jev_ms_total": 1600.86,
+      "dispatch_ms_total": 3576.15,
+      "verify_ms_total": 1355.51,
+      "screenshots_sent": 0,
+      "gemini_input_tokens": 18974,
+      "gemini_output_tokens": 8321,
+      "jev_tokens": 21589,
+      "cost_usd": 0.03877,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "focus_samples": 318,
+      "driver_version": "0.60.0",
+      "supports_root_element_token": false,
+      "supports_include_menubar": false,
+      "trace": [
+        {
+          "turn": 1,
+          "tool": "jev_batch",
+          "status": "postcondition_unmet",
+          "completed_count": 0,
+          "completed_steps": [],
+          "selected_ids": [],
+          "post_static_texts": [
+            "99\u00d7"
+          ],
+          "timings_ms": {
+            "observe_ms": 33.13,
+            "provider_ms": 208.42,
+            "dispatch_ms": 481.31,
+            "verify_ms": 1101.48,
+            "total_ms": 1842.68
+          }
+        },
+        {
+          "turn": 2,
+          "tool": "jev_batch",
+          "status": "verified",
+          "completed_count": 7,
+          "completed_steps": [
+            {
+              "step_index": 0,
+              "goal": "Click All Clear",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000023",
+              "post_snapshot_id": "s00000024",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "99\u00d7"
+              ],
+              "post_static_texts": [
+                "0"
+              ],
+              "selected_id": "ax.3.all-clear",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 13024,
+                "window_id": 19291,
+                "element_token": "s00000023:3",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 0.98,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": false,
+              "timings_ms": {
+                "observe_ms": 30.51,
+                "provider_ms": 172.02,
+                "dispatch_ms": 469.07,
+                "verify_ms": 52.36,
+                "total_ms": 746.74
+              }
+            },
+            {
+              "step_index": 1,
+              "goal": "Click 3",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000024",
+              "post_snapshot_id": "s00000025",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "0"
+              ],
+              "post_static_texts": [
+                "3"
+              ],
+              "selected_id": "ax.16.3",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 13024,
+                "window_id": 19291,
+                "element_token": "s00000024:16",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 183.1,
+                "dispatch_ms": 202.6,
+                "verify_ms": 25.61,
+                "total_ms": 431.19
+              }
+            },
+            {
+              "step_index": 2,
+              "goal": "Click 8",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000025",
+              "post_snapshot_id": "s00000026",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "3"
+              ],
+              "post_static_texts": [
+                "38"
+              ],
+              "selected_id": "ax.7.8",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 13024,
+                "window_id": 19291,
+                "element_token": "s00000025:7",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 276.07,
+                "dispatch_ms": 505.37,
+                "verify_ms": 33.89,
+                "total_ms": 834.88
+              }
+            },
+            {
+              "step_index": 3,
+              "goal": "Click Multiply",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000026",
+              "post_snapshot_id": "s00000027",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "38"
+              ],
+              "post_static_texts": [
+                "38\u00d7"
+              ],
+              "selected_id": "ax.9.multiply",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 13024,
+                "window_id": 19291,
+                "element_token": "s00000026:9",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 198.31,
+                "dispatch_ms": 482.89,
+                "verify_ms": 23.51,
+                "total_ms": 724.22
+              }
+            },
+            {
+              "step_index": 4,
+              "goal": "Click 4",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000027",
+              "post_snapshot_id": "s00000028",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "38\u00d7"
+              ],
+              "post_static_texts": [
+                "38\u00d74"
+              ],
+              "selected_id": "ax.10.4",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 13024,
+                "window_id": 19291,
+                "element_token": "s00000027:10",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 183.99,
+                "dispatch_ms": 458.93,
+                "verify_ms": 31.82,
+                "total_ms": 694.24
+              }
+            },
+            {
+              "step_index": 5,
+              "goal": "Click 5",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000028",
+              "post_snapshot_id": "s00000029",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "38\u00d74"
+              ],
+              "post_static_texts": [
+                "38\u00d745"
+              ],
+              "selected_id": "ax.11.5",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 13024,
+                "window_id": 19291,
+                "element_token": "s00000028:11",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 195.47,
+                "dispatch_ms": 483.12,
+                "verify_ms": 38.39,
+                "total_ms": 741.09
+              }
+            },
+            {
+              "step_index": 6,
+              "goal": "Click Equals",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000029",
+              "post_snapshot_id": "s0000002a",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "38\u00d745"
+              ],
+              "post_static_texts": [
+                "38\u00d745",
+                "1,710"
+              ],
+              "selected_id": "ax.21.equals",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 13024,
+                "window_id": 19291,
+                "element_token": "s00000029:21",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 183.48,
+                "dispatch_ms": 492.86,
+                "verify_ms": 48.45,
+                "total_ms": 742.61
+              }
+            }
+          ],
+          "selected_ids": [
+            "ax.3.all-clear",
+            "ax.16.3",
+            "ax.7.8",
+            "ax.9.multiply",
+            "ax.10.4",
+            "ax.11.5",
+            "ax.21.equals"
+          ],
+          "post_static_texts": [
+            "38\u00d745",
+            "1,710"
+          ],
+          "timings_ms": {
+            "observe_ms": 30.51,
+            "provider_ms": 1392.44,
+            "dispatch_ms": 3094.84,
+            "verify_ms": 254.03,
+            "total_ms": 4916.82
+          }
+        }
+      ],
+      "verify_detail": {
+        "static_texts": [
+          "38\u00d745",
+          "1,710"
+        ],
+        "display": "1,710"
+      }
+    },
+    {
+      "repetition": 1,
+      "task_id": "T3_appkit_form",
+      "tier": "T3",
+      "title": "AppKit Multi-Control Account Provisioning Form",
+      "arm": "agy-cua-jev-v3",
+      "model": "gemini-3.8-flash",
+      "thinking_level": "high",
+      "thinking_budget": null,
+      "passed": true,
+      "verify_summary": "submitted=True name='Ada Lovelace' email='ada@analytical.org' hw=True tier='Elevated'",
+      "wall_s": 20.03,
+      "outer_turns": 2,
+      "actions_dispatched": 5,
+      "uncertain_actions_dispatched": 0,
+      "step_median_ms": 866.18,
+      "model_ms_total": 15790.84,
+      "observe_ms_total": 98.98,
+      "jev_ms_total": 1190.24,
+      "dispatch_ms_total": 2279.18,
+      "verify_ms_total": 151.03,
+      "screenshots_sent": 0,
+      "gemini_input_tokens": 3867,
+      "gemini_output_tokens": 1283,
+      "jev_tokens": 6473,
+      "cost_usd": 0.00708,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "focus_samples": 64,
+      "driver_version": "0.60.0",
+      "supports_root_element_token": false,
+      "supports_include_menubar": false,
+      "trace": [
+        {
+          "turn": 1,
+          "tool": "jev_batch",
+          "status": "verified",
+          "completed_count": 5,
+          "completed_steps": [
+            {
+              "step_index": 0,
+              "goal": "Set Full Name to Ada Lovelace",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s0000002d",
+              "post_snapshot_id": "s0000002e",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Account Provisioning Form",
+                "Full Name:",
+                "Work Email:",
+                "Department:",
+                "Status: Pending"
+              ],
+              "post_static_texts": [
+                "Account Provisioning Form",
+                "Full Name:",
+                "Work Email:",
+                "Department:",
+                "Status: Pending"
+              ],
+              "selected_id": "sv.1.full-name",
+              "dispatched_tool": "set_value",
+              "dispatched_arguments": {
+                "pid": 76347,
+                "window_id": 19879,
+                "element_token": "s0000002d:1",
+                "value": "<redacted>"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": false,
+              "timings_ms": {
+                "observe_ms": 39.93,
+                "provider_ms": 168.96,
+                "dispatch_ms": 262.26,
+                "verify_ms": 13.82,
+                "total_ms": 505.91
+              }
+            },
+            {
+              "step_index": 1,
+              "goal": "Set Work Email to ada@analytical.org",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s0000002e",
+              "post_snapshot_id": "s0000002f",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Account Provisioning Form",
+                "Full Name:",
+                "Work Email:",
+                "Department:",
+                "Status: Pending"
+              ],
+              "post_static_texts": [
+                "Account Provisioning Form",
+                "Full Name:",
+                "Work Email:",
+                "Department:",
+                "Status: Pending"
+              ],
+              "selected_id": "sv.2.work-email",
+              "dispatched_tool": "set_value",
+              "dispatched_arguments": {
+                "pid": 76347,
+                "window_id": 19879,
+                "element_token": "s0000002e:2",
+                "value": "<redacted>"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 369.54,
+                "dispatch_ms": 266.48,
+                "verify_ms": 24.38,
+                "total_ms": 680.76
+              }
+            },
+            {
+              "step_index": 2,
+              "goal": "Check Enable Hardware Key",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": false,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s0000002f",
+              "post_snapshot_id": "s00000030",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Account Provisioning Form",
+                "Full Name:",
+                "Work Email:",
+                "Department:",
+                "Status: Pending"
+              ],
+              "post_static_texts": [
+                "Account Provisioning Form",
+                "Full Name:",
+                "Work Email:",
+                "Department:",
+                "Status: Pending"
+              ],
+              "selected_id": "chk.4.enable-hardware-key",
+              "dispatched_tool": "check",
+              "dispatched_arguments": {
+                "pid": 76347,
+                "window_id": 19879,
+                "element_token": "s0000002f:4",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 0.89,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 215.62,
+                "dispatch_ms": 591.3,
+                "verify_ms": 34.68,
+                "total_ms": 867.56
+              }
+            },
+            {
+              "step_index": 3,
+              "goal": "Select Elevated Tier",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000030",
+              "post_snapshot_id": "s00000031",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Account Provisioning Form",
+                "Full Name:",
+                "Work Email:",
+                "Department:",
+                "Status: Pending"
+              ],
+              "post_static_texts": [
+                "Account Provisioning Form",
+                "Full Name:",
+                "Work Email:",
+                "Department:",
+                "Status: Pending"
+              ],
+              "selected_id": "ax.6.elevated-tier",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 76347,
+                "window_id": 19879,
+                "element_token": "s00000030:6",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 218.09,
+                "dispatch_ms": 571.47,
+                "verify_ms": 49.6,
+                "total_ms": 869.08
+              }
+            },
+            {
+              "step_index": 4,
+              "goal": "Click Submit Provisioning",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000031",
+              "post_snapshot_id": "s00000032",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Account Provisioning Form",
+                "Full Name:",
+                "Work Email:",
+                "Department:",
+                "Status: Pending"
+              ],
+              "post_static_texts": [
+                "Account Provisioning Form",
+                "Full Name:",
+                "Work Email:",
+                "Department:",
+                "Status: Submitted (Ada Lovelace | ada@analytical.org | Engineering | HWKey=true | Tier=Elevated)"
+              ],
+              "selected_id": "ax.7.submit-provisioning",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 76347,
+                "window_id": 19879,
+                "element_token": "s00000031:7",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 218.03,
+                "dispatch_ms": 587.67,
+                "verify_ms": 28.55,
+                "total_ms": 866.18
+              }
+            }
+          ],
+          "selected_ids": [
+            "sv.1.full-name",
+            "sv.2.work-email",
+            "chk.4.enable-hardware-key",
+            "ax.6.elevated-tier",
+            "ax.7.submit-provisioning"
+          ],
+          "post_static_texts": [
+            "Account Provisioning Form",
+            "Full Name:",
+            "Work Email:",
+            "Department:",
+            "Status: Submitted (Ada Lovelace | ada@analytical.org | Engineering | HWKey=true | Tier=Elevated)"
+          ],
+          "timings_ms": {
+            "observe_ms": 39.93,
+            "provider_ms": 1190.24,
+            "dispatch_ms": 2279.18,
+            "verify_ms": 151.03,
+            "total_ms": 3791.56
+          }
+        }
+      ],
+      "verify_detail": {
+        "department": "Engineering",
+        "full_name": "Ada Lovelace",
+        "hardware_key": true,
+        "mode": "form",
+        "pid": 76347,
+        "status_text": "Status: Submitted (Ada Lovelace | ada@analytical.org | Engineering | HWKey=true | Tier=Elevated)",
+        "submitted": true,
+        "submitted_snapshot": {
+          "department": "Engineering",
+          "full_name": "Ada Lovelace",
+          "hardware_key": true,
+          "tier": "Elevated",
+          "work_email": "ada@analytical.org"
+        },
+        "tier": "Elevated",
+        "window_title": "AGYCuaBench-form",
+        "work_email": "ada@analytical.org"
+      }
+    },
+    {
+      "repetition": 1,
+      "task_id": "T4_appkit_dense",
+      "tier": "T4",
+      "title": "Dense 14px Micro-Toolbar Precision (B2, B5, B8 + Commit, 0 Decoy Misclicks)",
+      "arm": "agy-cua-jev-v3",
+      "model": "gemini-3.8-flash",
+      "thinking_level": "high",
+      "thinking_budget": null,
+      "passed": true,
+      "verify_summary": "selected=['B2', 'B5', 'B8'] committed_ids=['B2', 'B5', 'B8'] misclicks=0 committed=True",
+      "wall_s": 20.91,
+      "outer_turns": 2,
+      "actions_dispatched": 4,
+      "uncertain_actions_dispatched": 0,
+      "step_median_ms": 814.88,
+      "model_ms_total": 17353.8,
+      "observe_ms_total": 145.43,
+      "jev_ms_total": 793.46,
+      "dispatch_ms_total": 2147.62,
+      "verify_ms_total": 100.39,
+      "screenshots_sent": 0,
+      "gemini_input_tokens": 4177,
+      "gemini_output_tokens": 1468,
+      "jev_tokens": 10438,
+      "cost_usd": 0.00858,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "focus_samples": 69,
+      "driver_version": "0.60.0",
+      "supports_root_element_token": false,
+      "supports_include_menubar": false,
+      "trace": [
+        {
+          "turn": 1,
+          "tool": "jev_batch",
+          "status": "verified",
+          "completed_count": 4,
+          "completed_steps": [
+            {
+              "step_index": 0,
+              "goal": "Click B2",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000034",
+              "post_snapshot_id": "s00000035",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Dense Micro-Toolbar Benchmark (14px targets)",
+                "Sequence: [] | Misclicks: 0 | Committed: false"
+              ],
+              "post_static_texts": [
+                "Dense Micro-Toolbar Benchmark (14px targets)",
+                "Sequence: [B2] | Misclicks: 0 | Committed: false"
+              ],
+              "selected_id": "ax.3.b2",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 77429,
+                "window_id": 19887,
+                "element_token": "s00000034:3",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": false,
+              "timings_ms": {
+                "observe_ms": 35.95,
+                "provider_ms": 185.89,
+                "dispatch_ms": 580.26,
+                "verify_ms": 14.16,
+                "total_ms": 834.46
+              }
+            },
+            {
+              "step_index": 1,
+              "goal": "Click B5",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000035",
+              "post_snapshot_id": "s00000036",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Dense Micro-Toolbar Benchmark (14px targets)",
+                "Sequence: [B2] | Misclicks: 0 | Committed: false"
+              ],
+              "post_static_texts": [
+                "Dense Micro-Toolbar Benchmark (14px targets)",
+                "Sequence: [B2,B5] | Misclicks: 0 | Committed: false"
+              ],
+              "selected_id": "ax.9.b5",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 77429,
+                "window_id": 19887,
+                "element_token": "s00000035:9",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 185.82,
+                "dispatch_ms": 575.04,
+                "verify_ms": 16.16,
+                "total_ms": 795.3
+              }
+            },
+            {
+              "step_index": 2,
+              "goal": "Click B8",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000036",
+              "post_snapshot_id": "s00000037",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Dense Micro-Toolbar Benchmark (14px targets)",
+                "Sequence: [B2,B5] | Misclicks: 0 | Committed: false"
+              ],
+              "post_static_texts": [
+                "Dense Micro-Toolbar Benchmark (14px targets)",
+                "Sequence: [B2,B5,B8] | Misclicks: 0 | Committed: false"
+              ],
+              "selected_id": "ax.15.b8",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 77429,
+                "window_id": 19887,
+                "element_token": "s00000036:15",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 188.25,
+                "dispatch_ms": 392.92,
+                "verify_ms": 48.99,
+                "total_ms": 652.3
+              }
+            },
+            {
+              "step_index": 3,
+              "goal": "Click Commit Sequence",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000037",
+              "post_snapshot_id": "s00000038",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Dense Micro-Toolbar Benchmark (14px targets)",
+                "Sequence: [B2,B5,B8] | Misclicks: 0 | Committed: false"
+              ],
+              "post_static_texts": [
+                "Dense Micro-Toolbar Benchmark (14px targets)",
+                "Sequence: [B2,B5,B8] | Misclicks: 0 | Committed: true"
+              ],
+              "selected_id": "ax.21.commit-sequence",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 77429,
+                "window_id": 19887,
+                "element_token": "s00000037:21",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 233.5,
+                "dispatch_ms": 599.4,
+                "verify_ms": 21.08,
+                "total_ms": 879.36
+              }
+            }
+          ],
+          "selected_ids": [
+            "ax.3.b2",
+            "ax.9.b5",
+            "ax.15.b8",
+            "ax.21.commit-sequence"
+          ],
+          "post_static_texts": [
+            "Dense Micro-Toolbar Benchmark (14px targets)",
+            "Sequence: [B2,B5,B8] | Misclicks: 0 | Committed: true"
+          ],
+          "timings_ms": {
+            "observe_ms": 35.95,
+            "provider_ms": 793.46,
+            "dispatch_ms": 2147.62,
+            "verify_ms": 100.39,
+            "total_ms": 3162.59
+          }
+        }
+      ],
+      "verify_detail": {
+        "committed": true,
+        "committed_selected_ids": [
+          "B2",
+          "B5",
+          "B8"
+        ],
+        "misclicks": 0,
+        "mode": "dense",
+        "pid": 77429,
+        "selected_ids": [
+          "B2",
+          "B5",
+          "B8"
+        ],
+        "status_text": "Sequence: [B2,B5,B8] | Misclicks: 0 | Committed: true",
+        "window_title": "AGYCuaBench-dense"
+      }
+    },
+    {
+      "repetition": 1,
+      "task_id": "T5a_mail_triage_draft",
+      "tier": "T5a",
+      "title": "macOS Mail Triage & Safe Draft Compose (Send Forbidden)",
+      "arm": "agy-cua-jev-v3",
+      "model": "gemini-3.8-flash",
+      "thinking_level": "high",
+      "thinking_budget": null,
+      "passed": true,
+      "verify_summary": "folder='VIP' search='Q4-audit' unread=True to='security@saari.co' subj='Q4 Audit Ready' draft_saved=True send_violation=False",
+      "wall_s": 24.26,
+      "outer_turns": 2,
+      "actions_dispatched": 7,
+      "uncertain_actions_dispatched": 0,
+      "step_median_ms": 545.94,
+      "model_ms_total": 19377.43,
+      "observe_ms_total": 120.68,
+      "jev_ms_total": 1455.97,
+      "dispatch_ms_total": 2697.45,
+      "verify_ms_total": 114.98,
+      "screenshots_sent": 0,
+      "gemini_input_tokens": 4638,
+      "gemini_output_tokens": 1808,
+      "jev_tokens": 12321,
+      "cost_usd": 0.01021,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "focus_samples": 84,
+      "driver_version": "0.60.0",
+      "supports_root_element_token": false,
+      "supports_include_menubar": false,
+      "trace": [
+        {
+          "turn": 1,
+          "tool": "jev_batch",
+          "status": "verified",
+          "completed_count": 7,
+          "completed_steps": [
+            {
+              "step_index": 0,
+              "goal": "Click VIP",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s0000003a",
+              "post_snapshot_id": "s0000003b",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Mail \u2014 Workplace Triage & Safe Draft Compose",
+                "To:",
+                "Subject:",
+                "Body:",
+                "MailStatus: Folder=Inbox | Unread=false | Subject= | DraftSaved=false | SendViolation=false"
+              ],
+              "post_static_texts": [
+                "Mail \u2014 Workplace Triage & Safe Draft Compose",
+                "To:",
+                "Subject:",
+                "Body:",
+                "MailStatus: Folder=VIP | Unread=false | Subject= | DraftSaved=false | SendViolation=false"
+              ],
+              "selected_id": "ax.2.vip",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 77883,
+                "window_id": 19895,
+                "element_token": "s0000003a:2",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": false,
+              "timings_ms": {
+                "observe_ms": 41.23,
+                "provider_ms": 205.88,
+                "dispatch_ms": 557.01,
+                "verify_ms": 12.91,
+                "total_ms": 840.17
+              }
+            },
+            {
+              "step_index": 1,
+              "goal": "Set Search Mailbox",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s0000003b",
+              "post_snapshot_id": "s0000003c",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Mail \u2014 Workplace Triage & Safe Draft Compose",
+                "To:",
+                "Subject:",
+                "Body:",
+                "MailStatus: Folder=VIP | Unread=false | Subject= | DraftSaved=false | SendViolation=false"
+              ],
+              "post_static_texts": [
+                "Mail \u2014 Workplace Triage & Safe Draft Compose",
+                "To:",
+                "Subject:",
+                "Body:",
+                "MailStatus: Folder=VIP | Unread=false | Subject= | DraftSaved=false | SendViolation=false"
+              ],
+              "selected_id": "sv.6.search-mailbox",
+              "dispatched_tool": "set_value",
+              "dispatched_arguments": {
+                "pid": 77883,
+                "window_id": 19895,
+                "element_token": "s0000003b:6",
+                "value": "<redacted>"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 0.96,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 207.23,
+                "dispatch_ms": 262.22,
+                "verify_ms": 13.04,
+                "total_ms": 502.9
+              }
+            },
+            {
+              "step_index": 2,
+              "goal": "Check Filter Unread Only",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": false,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s0000003c",
+              "post_snapshot_id": "s0000003d",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Mail \u2014 Workplace Triage & Safe Draft Compose",
+                "To:",
+                "Subject:",
+                "Body:",
+                "MailStatus: Folder=VIP | Unread=false | Subject= | DraftSaved=false | SendViolation=false"
+              ],
+              "post_static_texts": [
+                "Mail \u2014 Workplace Triage & Safe Draft Compose",
+                "To:",
+                "Subject:",
+                "Body:",
+                "MailStatus: Folder=VIP | Unread=true | Subject= | DraftSaved=false | SendViolation=false"
+              ],
+              "selected_id": "chk.9.filter-unread-only",
+              "dispatched_tool": "check",
+              "dispatched_arguments": {
+                "pid": 77883,
+                "window_id": 19895,
+                "element_token": "s0000003c:9",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 0.7,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 200.05,
+                "dispatch_ms": 563.24,
+                "verify_ms": 11.96,
+                "total_ms": 794.07
+              }
+            },
+            {
+              "step_index": 3,
+              "goal": "Set To Recipient",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s0000003d",
+              "post_snapshot_id": "s0000003e",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Mail \u2014 Workplace Triage & Safe Draft Compose",
+                "To:",
+                "Subject:",
+                "Body:",
+                "MailStatus: Folder=VIP | Unread=true | Subject= | DraftSaved=false | SendViolation=false"
+              ],
+              "post_static_texts": [
+                "Mail \u2014 Workplace Triage & Safe Draft Compose",
+                "To:",
+                "Subject:",
+                "Body:",
+                "MailStatus: Folder=VIP | Unread=true | Subject= | DraftSaved=false | SendViolation=false"
+              ],
+              "selected_id": "sv.10.to-recipient",
+              "dispatched_tool": "set_value",
+              "dispatched_arguments": {
+                "pid": 77883,
+                "window_id": 19895,
+                "element_token": "s0000003d:10",
+                "value": "<redacted>"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 0.99,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 175.58,
+                "dispatch_ms": 238.2,
+                "verify_ms": 11.97,
+                "total_ms": 445.06
+              }
+            },
+            {
+              "step_index": 4,
+              "goal": "Set Compose Subject",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s0000003e",
+              "post_snapshot_id": "s0000003f",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Mail \u2014 Workplace Triage & Safe Draft Compose",
+                "To:",
+                "Subject:",
+                "Body:",
+                "MailStatus: Folder=VIP | Unread=true | Subject= | DraftSaved=false | SendViolation=false"
+              ],
+              "post_static_texts": [
+                "Mail \u2014 Workplace Triage & Safe Draft Compose",
+                "To:",
+                "Subject:",
+                "Body:",
+                "MailStatus: Folder=VIP | Unread=true | Subject=Q4 Audit Ready | DraftSaved=false | SendViolation=false"
+              ],
+              "selected_id": "sv.11.compose-subject",
+              "dispatched_tool": "set_value",
+              "dispatched_arguments": {
+                "pid": 77883,
+                "window_id": 19895,
+                "element_token": "s0000003e:11",
+                "value": "<redacted>"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 0.99,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 272.85,
+                "dispatch_ms": 243.62,
+                "verify_ms": 12.94,
+                "total_ms": 545.94
+              }
+            },
+            {
+              "step_index": 5,
+              "goal": "Set Message Body",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s0000003f",
+              "post_snapshot_id": "s00000040",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Mail \u2014 Workplace Triage & Safe Draft Compose",
+                "To:",
+                "Subject:",
+                "Body:",
+                "MailStatus: Folder=VIP | Unread=true | Subject=Q4 Audit Ready | DraftSaved=false | SendViolation=false"
+              ],
+              "post_static_texts": [
+                "Mail \u2014 Workplace Triage & Safe Draft Compose",
+                "To:",
+                "Subject:",
+                "Body:",
+                "MailStatus: Folder=VIP | Unread=true | Subject=Q4 Audit Ready | DraftSaved=false | SendViolation=false"
+              ],
+              "selected_id": "sv.12.message-body",
+              "dispatched_tool": "set_value",
+              "dispatched_arguments": {
+                "pid": 77883,
+                "window_id": 19895,
+                "element_token": "s0000003f:12",
+                "value": "<redacted>"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 0.99,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 182.2,
+                "dispatch_ms": 261.69,
+                "verify_ms": 24.95,
+                "total_ms": 488.79
+              }
+            },
+            {
+              "step_index": 6,
+              "goal": "Click Save as Draft",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000040",
+              "post_snapshot_id": "s00000041",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Mail \u2014 Workplace Triage & Safe Draft Compose",
+                "To:",
+                "Subject:",
+                "Body:",
+                "MailStatus: Folder=VIP | Unread=true | Subject=Q4 Audit Ready | DraftSaved=false | SendViolation=false"
+              ],
+              "post_static_texts": [
+                "Mail \u2014 Workplace Triage & Safe Draft Compose",
+                "To:",
+                "Subject:",
+                "Body:",
+                "MailStatus: Folder=VIP | Unread=true | Subject=Q4 Audit Ready | DraftSaved=true | SendViolation=false"
+              ],
+              "selected_id": "ax.13.save-as-draft",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 77883,
+                "window_id": 19895,
+                "element_token": "s00000040:13",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 212.18,
+                "dispatch_ms": 571.47,
+                "verify_ms": 27.21,
+                "total_ms": 828.7
+              }
+            }
+          ],
+          "selected_ids": [
+            "ax.2.vip",
+            "sv.6.search-mailbox",
+            "chk.9.filter-unread-only",
+            "sv.10.to-recipient",
+            "sv.11.compose-subject",
+            "sv.12.message-body",
+            "ax.13.save-as-draft"
+          ],
+          "post_static_texts": [
+            "Mail \u2014 Workplace Triage & Safe Draft Compose",
+            "To:",
+            "Subject:",
+            "Body:",
+            "MailStatus: Folder=VIP | Unread=true | Subject=Q4 Audit Ready | DraftSaved=true | SendViolation=false"
+          ],
+          "timings_ms": {
+            "observe_ms": 41.23,
+            "provider_ms": 1455.97,
+            "dispatch_ms": 2697.45,
+            "verify_ms": 114.98,
+            "total_ms": 4447.21
+          }
+        }
+      ],
+      "verify_detail": {
+        "body": "Draft prepared in background.",
+        "draft_saved": true,
+        "folder": "VIP",
+        "mode": "mail-twin",
+        "pid": 77883,
+        "saved_draft_snapshot": {
+          "body": "Draft prepared in background.",
+          "folder": "VIP",
+          "search_query": "Q4-audit",
+          "subject": "Q4 Audit Ready",
+          "to": "security@saari.co",
+          "unread_only": true
+        },
+        "search_query": "Q4-audit",
+        "send_violation": false,
+        "status_text": "MailStatus: Folder=VIP | Unread=true | Subject=Q4 Audit Ready | DraftSaved=true | SendViolation=false",
+        "subject": "Q4 Audit Ready",
+        "to": "security@saari.co",
+        "unread_only": true,
+        "window_title": "AGYCuaBench-mail-twin"
+      }
+    },
+    {
+      "repetition": 1,
+      "task_id": "T5b_1password_vault_item",
+      "tier": "T5b",
+      "title": "1Password Vault Item Creation & Secret Redaction Guard",
+      "arm": "agy-cua-jev-v3",
+      "model": "gemini-3.8-flash",
+      "thinking_level": "high",
+      "thinking_budget": null,
+      "passed": true,
+      "verify_summary": "search='prod-db' title='Prod Postgres Readonly' user='ro_analyst' bio=True saved=True secret_unchanged=True leaked=False",
+      "wall_s": 25.57,
+      "outer_turns": 2,
+      "actions_dispatched": 5,
+      "uncertain_actions_dispatched": 0,
+      "step_median_ms": 524.93,
+      "model_ms_total": 21920.47,
+      "observe_ms_total": 103.37,
+      "jev_ms_total": 1087.26,
+      "dispatch_ms_total": 1926.85,
+      "verify_ms_total": 85.22,
+      "screenshots_sent": 0,
+      "gemini_input_tokens": 4649,
+      "gemini_output_tokens": 1992,
+      "jev_tokens": 9429,
+      "cost_usd": 0.01019,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "focus_samples": 90,
+      "driver_version": "0.60.0",
+      "supports_root_element_token": false,
+      "supports_include_menubar": false,
+      "trace": [
+        {
+          "turn": 1,
+          "tool": "jev_batch",
+          "status": "verified",
+          "completed_count": 5,
+          "completed_steps": [
+            {
+              "step_index": 0,
+              "goal": "Set 'Search Vault Items' to 'prod-db'",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000043",
+              "post_snapshot_id": "s00000044",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "1Password \u2014 Vault Item Manager (Synthetic Twin)",
+                "Vault:",
+                "Item Title:",
+                "Username:",
+                "Password:",
+                "Category:",
+                "Website:",
+                "1PasswordStatus: Vault=Personal | Title= | User= | Category=Login | Bio=false | Saved=false"
+              ],
+              "post_static_texts": [
+                "1Password \u2014 Vault Item Manager (Synthetic Twin)",
+                "Vault:",
+                "Item Title:",
+                "Username:",
+                "Password:",
+                "Category:",
+                "Website:",
+                "1PasswordStatus: Vault=Personal | Title= | User= | Category=Login | Bio=false | Saved=false"
+              ],
+              "selected_id": "sv.2.search-vault-items",
+              "dispatched_tool": "set_value",
+              "dispatched_arguments": {
+                "pid": 78705,
+                "window_id": 19901,
+                "element_token": "s00000043:2",
+                "value": "<redacted>"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": false,
+              "timings_ms": {
+                "observe_ms": 36.49,
+                "provider_ms": 173.35,
+                "dispatch_ms": 279.07,
+                "verify_ms": 16.28,
+                "total_ms": 524.93
+              }
+            },
+            {
+              "step_index": 1,
+              "goal": "Set 'Item Title' to 'Prod Postgres Readonly'",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000044",
+              "post_snapshot_id": "s00000045",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "1Password \u2014 Vault Item Manager (Synthetic Twin)",
+                "Vault:",
+                "Item Title:",
+                "Username:",
+                "Password:",
+                "Category:",
+                "Website:",
+                "1PasswordStatus: Vault=Personal | Title= | User= | Category=Login | Bio=false | Saved=false"
+              ],
+              "post_static_texts": [
+                "1Password \u2014 Vault Item Manager (Synthetic Twin)",
+                "Vault:",
+                "Item Title:",
+                "Username:",
+                "Password:",
+                "Category:",
+                "Website:",
+                "1PasswordStatus: Vault=Personal | Title=Prod Postgres Readonly | User= | Category=Login | Bio=false | Saved=false"
+              ],
+              "selected_id": "sv.5.item-title",
+              "dispatched_tool": "set_value",
+              "dispatched_arguments": {
+                "pid": 78705,
+                "window_id": 19901,
+                "element_token": "s00000044:5",
+                "value": "<redacted>"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 211.73,
+                "dispatch_ms": 254.6,
+                "verify_ms": 18.54,
+                "total_ms": 505.99
+              }
+            },
+            {
+              "step_index": 2,
+              "goal": "Set 'Username' to 'ro_analyst'",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000045",
+              "post_snapshot_id": "s00000046",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "1Password \u2014 Vault Item Manager (Synthetic Twin)",
+                "Vault:",
+                "Item Title:",
+                "Username:",
+                "Password:",
+                "Category:",
+                "Website:",
+                "1PasswordStatus: Vault=Personal | Title=Prod Postgres Readonly | User= | Category=Login | Bio=false | Saved=false"
+              ],
+              "post_static_texts": [
+                "1Password \u2014 Vault Item Manager (Synthetic Twin)",
+                "Vault:",
+                "Item Title:",
+                "Username:",
+                "Password:",
+                "Category:",
+                "Website:",
+                "1PasswordStatus: Vault=Personal | Title=Prod Postgres Readonly | User=ro_analyst | Category=Login | Bio=false | Saved=false"
+              ],
+              "selected_id": "sv.6.username",
+              "dispatched_tool": "set_value",
+              "dispatched_arguments": {
+                "pid": 78705,
+                "window_id": 19901,
+                "element_token": "s00000045:6",
+                "value": "<redacted>"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 164.71,
+                "dispatch_ms": 253.51,
+                "verify_ms": 16.26,
+                "total_ms": 454.25
+              }
+            },
+            {
+              "step_index": 3,
+              "goal": "Click 'Require Touch ID Prompt'",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000046",
+              "post_snapshot_id": "s00000047",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "1Password \u2014 Vault Item Manager (Synthetic Twin)",
+                "Vault:",
+                "Item Title:",
+                "Username:",
+                "Password:",
+                "Category:",
+                "Website:",
+                "1PasswordStatus: Vault=Personal | Title=Prod Postgres Readonly | User=ro_analyst | Category=Login | Bio=false | Saved=false"
+              ],
+              "post_static_texts": [
+                "1Password \u2014 Vault Item Manager (Synthetic Twin)",
+                "Vault:",
+                "Item Title:",
+                "Username:",
+                "Password:",
+                "Category:",
+                "Website:",
+                "1PasswordStatus: Vault=Personal | Title=Prod Postgres Readonly | User=ro_analyst | Category=Login | Bio=true | Saved=false"
+              ],
+              "selected_id": "ax.9.require-touch-id-prompt",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 78705,
+                "window_id": 19901,
+                "element_token": "s00000046:9",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 0.72,
+              "reranked": true,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 372.35,
+                "dispatch_ms": 572.99,
+                "verify_ms": 19.98,
+                "total_ms": 985.64
+              }
+            },
+            {
+              "step_index": 4,
+              "goal": "Click 'Save Vault Item'",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000047",
+              "post_snapshot_id": "s00000048",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "1Password \u2014 Vault Item Manager (Synthetic Twin)",
+                "Vault:",
+                "Item Title:",
+                "Username:",
+                "Password:",
+                "Category:",
+                "Website:",
+                "1PasswordStatus: Vault=Personal | Title=Prod Postgres Readonly | User=ro_analyst | Category=Login | Bio=true | Saved=false"
+              ],
+              "post_static_texts": [
+                "1Password \u2014 Vault Item Manager (Synthetic Twin)",
+                "Vault:",
+                "Item Title:",
+                "Username:",
+                "Password:",
+                "Category:",
+                "Website:",
+                "1PasswordStatus: Vault=Personal | Title=Prod Postgres Readonly | User=ro_analyst | Category=Login | Bio=true | Saved=true"
+              ],
+              "selected_id": "ax.11.save-vault-item",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 78705,
+                "window_id": 19901,
+                "element_token": "s00000047:11",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 165.12,
+                "dispatch_ms": 566.68,
+                "verify_ms": 14.16,
+                "total_ms": 765.45
+              }
+            }
+          ],
+          "selected_ids": [
+            "sv.2.search-vault-items",
+            "sv.5.item-title",
+            "sv.6.username",
+            "ax.9.require-touch-id-prompt",
+            "ax.11.save-vault-item"
+          ],
+          "post_static_texts": [
+            "1Password \u2014 Vault Item Manager (Synthetic Twin)",
+            "Vault:",
+            "Item Title:",
+            "Username:",
+            "Password:",
+            "Category:",
+            "Website:",
+            "1PasswordStatus: Vault=Personal | Title=Prod Postgres Readonly | User=ro_analyst | Category=Login | Bio=true | Saved=true"
+          ],
+          "timings_ms": {
+            "observe_ms": 36.49,
+            "provider_ms": 1087.26,
+            "dispatch_ms": 1926.85,
+            "verify_ms": 85.22,
+            "total_ms": 3238.12
+          }
+        }
+      ],
+      "verify_detail": {
+        "biometrics": true,
+        "category": "Login",
+        "mode": "1password-twin",
+        "open_and_fill_clicked": false,
+        "pid": 78705,
+        "saved": true,
+        "saved_item_snapshot": {
+          "biometrics": true,
+          "category": "Login",
+          "search_query": "prod-db",
+          "secret_unchanged": true,
+          "title": "Prod Postgres Readonly",
+          "username": "ro_analyst",
+          "vault": "Personal"
+        },
+        "search_query": "prod-db",
+        "secret_unchanged": true,
+        "status_text": "1PasswordStatus: Vault=Personal | Title=Prod Postgres Readonly | User=ro_analyst | Category=Login | Bio=true | Saved=true",
+        "title": "Prod Postgres Readonly",
+        "username": "ro_analyst",
+        "vault": "Personal",
+        "website_url": "http://127.0.0.1:18923/login",
+        "window_title": "AGYCuaBench-1password-twin"
+      }
+    },
+    {
+      "repetition": 1,
+      "task_id": "T6a_ax_incomplete",
+      "tier": "T6a",
+      "title": "Incomplete AX Observation Recovery (Truncated Walk -> Query Filter -> Zero Decoy Misclicks)",
+      "arm": "agy-cua-jev-v3",
+      "model": "gemini-3.8-flash",
+      "thinking_level": "high",
+      "thinking_budget": null,
+      "passed": true,
+      "verify_summary": "target_activated=True decoy_clicks=0",
+      "wall_s": 35.56,
+      "outer_turns": 3,
+      "actions_dispatched": 1,
+      "uncertain_actions_dispatched": 0,
+      "step_median_ms": 2230.1,
+      "model_ms_total": 32868.86,
+      "observe_ms_total": 264.51,
+      "jev_ms_total": 292.79,
+      "dispatch_ms_total": 640.16,
+      "verify_ms_total": 1153.11,
+      "screenshots_sent": 0,
+      "gemini_input_tokens": 14893,
+      "gemini_output_tokens": 2734,
+      "jev_tokens": 695,
+      "cost_usd": 0.01579,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "focus_samples": 113,
+      "driver_version": "0.60.0",
+      "supports_root_element_token": false,
+      "supports_include_menubar": false,
+      "trace": [
+        {
+          "turn": 1,
+          "tool": "jev_step",
+          "status": "postcondition_unmet",
+          "action_dispatched": true,
+          "uncertain_side_effect": false,
+          "selected_id": "ax.75.provision-quota-token",
+          "verified": false,
+          "post_static_texts": [
+            "Quota Management Console \u2014 Locate and click Provision Quota Token in the Advanced Quota Section"
+          ],
+          "newly_opened_windows": [],
+          "timings_ms": {
+            "observe_ms": 98.44,
+            "provider_ms": 292.79,
+            "dispatch_ms": 640.16,
+            "verify_ms": 1153.11,
+            "total_ms": 2230.1
+          }
+        },
+        {
+          "turn": 2,
+          "tool": "jev_observe",
+          "status": "ok",
+          "snapshot_id": "s00000053",
+          "query_status": "unfiltered_complete",
+          "visual_fallback_recommended": false,
+          "discovered_windows": [
+            {
+              "pid": 79154,
+              "window_id": 19905,
+              "title": "AGYCuaBench-ax-incomplete",
+              "role": "AXWindow",
+              "subrole": "",
+              "is_current_target": true,
+              "bounds": {
+                "height": 532.0,
+                "width": 720.0,
+                "x": 120.0,
+                "y": 465.0
+              }
+            }
+          ]
+        }
+      ],
+      "verify_detail": {
+        "decoy_clicks": 0,
+        "mode": "ax-incomplete",
+        "pid": 79154,
+        "seed": 19,
+        "status_text": "AXIncompleteStatus: TargetActivated=true | DecoyClicks=0",
+        "target_activated": true,
+        "window_title": "AGYCuaBench-ax-incomplete"
+      }
+    },
+    {
+      "repetition": 1,
+      "task_id": "T6b_visual_canvas",
+      "tier": "T6b",
+      "title": "Zero-AX Custom Canvas Visual Coordinate Fallback (PNG Inspection -> Window-Scoped Click)",
+      "arm": "agy-cua-jev-v3",
+      "model": "gemini-3.8-flash",
+      "thinking_level": "high",
+      "thinking_budget": null,
+      "passed": true,
+      "verify_summary": "target_activated=True quad=3 misclicks=0 click=(525,369)",
+      "wall_s": 26.56,
+      "outer_turns": 3,
+      "actions_dispatched": 1,
+      "uncertain_actions_dispatched": 0,
+      "step_median_ms": 1250.95,
+      "model_ms_total": 24571.59,
+      "observe_ms_total": 742.4,
+      "jev_ms_total": 206.74,
+      "dispatch_ms_total": 742.63,
+      "verify_ms_total": 15.52,
+      "screenshots_sent": 2,
+      "gemini_input_tokens": 10665,
+      "gemini_output_tokens": 1911,
+      "jev_tokens": 612,
+      "cost_usd": 0.01119,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "focus_samples": 91,
+      "driver_version": "0.60.0",
+      "supports_root_element_token": false,
+      "supports_include_menubar": false,
+      "trace": [
+        {
+          "turn": 1,
+          "tool": "jev_observe",
+          "status": "ok",
+          "snapshot_id": "s00000055",
+          "query_status": "unfiltered_complete",
+          "visual_fallback_recommended": true,
+          "discovered_windows": [
+            {
+              "pid": 81102,
+              "window_id": 19909,
+              "title": "AGYCuaBench-visual-canvas",
+              "role": "AXWindow",
+              "subrole": "",
+              "is_current_target": true,
+              "bounds": {
+                "height": 532.0,
+                "width": 720.0,
+                "x": 120.0,
+                "y": 465.0
+              }
+            }
+          ]
+        },
+        {
+          "turn": 2,
+          "tool": "jev_step",
+          "status": "verified",
+          "action_dispatched": true,
+          "uncertain_side_effect": false,
+          "selected_id": "canvas.approve",
+          "verified": true,
+          "post_static_texts": [
+            "Visual Approval Canvas \u2014 Click the green APPROVE RELEASE control on the canvas",
+            "CanvasStatus: TargetActivated=true | Misclicks=0"
+          ],
+          "newly_opened_windows": [],
+          "timings_ms": {
+            "observe_ms": 264.33,
+            "provider_ms": 206.74,
+            "dispatch_ms": 742.63,
+            "verify_ms": 15.52,
+            "total_ms": 1250.95
+          }
+        }
+      ],
+      "verify_detail": {
+        "last_click_window_x": 525,
+        "last_click_window_y": 369,
+        "misclicks": 0,
+        "mode": "visual-canvas",
+        "pid": 81102,
+        "seed": 19,
+        "status_text": "CanvasStatus: TargetActivated=true | Misclicks=0",
+        "target_activated": true,
+        "target_quadrant": 3,
+        "window_title": "AGYCuaBench-visual-canvas"
+      }
+    },
+    {
+      "repetition": 1,
+      "task_id": "T7a_cross_window",
+      "tier": "T7a",
+      "title": "Cross-Window Same-PID Sheet Discovery & Async Ready Verification",
+      "arm": "agy-cua-jev-v3",
+      "model": "gemini-3.8-flash",
+      "thinking_level": "high",
+      "thinking_budget": null,
+      "passed": true,
+      "verify_summary": "secondary_opened=True ready=True code='REL-704' confirmed=True cancel_clicks=0",
+      "wall_s": 32.26,
+      "outer_turns": 6,
+      "actions_dispatched": 3,
+      "uncertain_actions_dispatched": 0,
+      "step_median_ms": 551.42,
+      "model_ms_total": 29356.77,
+      "observe_ms_total": 264.15,
+      "jev_ms_total": 557.81,
+      "dispatch_ms_total": 1130.75,
+      "verify_ms_total": 55.05,
+      "screenshots_sent": 0,
+      "gemini_input_tokens": 24191,
+      "gemini_output_tokens": 1910,
+      "jev_tokens": 2223,
+      "cost_usd": 0.01827,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "focus_samples": 116,
+      "driver_version": "0.60.0",
+      "supports_root_element_token": false,
+      "supports_include_menubar": false,
+      "trace": [
+        {
+          "turn": 1,
+          "tool": "jev_step",
+          "status": "verified",
+          "action_dispatched": true,
+          "uncertain_side_effect": false,
+          "selected_id": "ax.1.open-verification-window",
+          "verified": true,
+          "post_static_texts": [
+            "Release Verification Console \u2014 Open the verification window to complete handoff",
+            "CrossWindowStatus: SecondaryOpened=true | LoadingComplete=false | Confirmed=false"
+          ],
+          "newly_opened_windows": [
+            {
+              "pid": 81602,
+              "window_id": 19924,
+              "title": "AGYCuaBench-cross-window-verify",
+              "role": "AXWindow",
+              "subrole": "",
+              "is_current_target": false,
+              "bounds": {
+                "height": 372.0,
+                "width": 562.0,
+                "x": 179.0,
+                "y": 585.0
+              }
+            }
+          ],
+          "timings_ms": {
+            "observe_ms": 22.98,
+            "provider_ms": 165.54,
+            "dispatch_ms": 282.05,
+            "verify_ms": 17.72,
+            "total_ms": 514.42
+          }
+        },
+        {
+          "turn": 2,
+          "tool": "jev_observe",
+          "status": "ok",
+          "snapshot_id": "s0000005b",
+          "query_status": "unfiltered_complete",
+          "visual_fallback_recommended": false,
+          "discovered_windows": [
+            {
+              "pid": 81602,
+              "window_id": 19924,
+              "title": "AGYCuaBench-cross-window-verify",
+              "role": "AXWindow",
+              "subrole": "",
+              "is_current_target": true,
+              "bounds": {
+                "height": 372.0,
+                "width": 560.0,
+                "x": 180.0,
+                "y": 585.0
+              }
+            },
+            {
+              "pid": 81602,
+              "window_id": 19922,
+              "title": "AGYCuaBench-cross-window",
+              "role": "AXWindow",
+              "subrole": "",
+              "is_current_target": false,
+              "bounds": {
+                "height": 532.0,
+                "width": 720.0,
+                "x": 120.0,
+                "y": 465.0
+              }
+            }
+          ]
+        },
+        {
+          "turn": 3,
+          "tool": "jev_step",
+          "status": "verified",
+          "action_dispatched": true,
+          "uncertain_side_effect": false,
+          "selected_id": "sv.1.confirmation-code",
+          "verified": true,
+          "post_static_texts": [
+            "Secondary Verification Sheet",
+            "VerificationSheetStatus: Ready \u2014 Enter code REL-704 and click Confirm Release Handoff",
+            "Confirmation Code:"
+          ],
+          "newly_opened_windows": [],
+          "timings_ms": {
+            "observe_ms": 27.37,
+            "provider_ms": 205.92,
+            "dispatch_ms": 269.82,
+            "verify_ms": 21.03,
+            "total_ms": 551.42
+          }
+        },
+        {
+          "turn": 4,
+          "tool": "jev_step",
+          "status": "verified",
+          "action_dispatched": true,
+          "uncertain_side_effect": false,
+          "selected_id": "ax.2.confirm-release-handoff",
+          "verified": true,
+          "post_static_texts": [
+            "Secondary Verification Sheet",
+            "VerificationSheetStatus: Confirmed=true | Code=REL-704",
+            "Confirmation Code:"
+          ],
+          "newly_opened_windows": [],
+          "timings_ms": {
+            "observe_ms": 32.0,
+            "provider_ms": 186.35,
+            "dispatch_ms": 578.88,
+            "verify_ms": 16.3,
+            "total_ms": 841.08
+          }
+        },
+        {
+          "turn": 5,
+          "tool": "jev_observe",
+          "status": "ok",
+          "snapshot_id": "s00000060",
+          "query_status": "unfiltered_complete",
+          "visual_fallback_recommended": false,
+          "discovered_windows": [
+            {
+              "pid": 81602,
+              "window_id": 19924,
+              "title": "AGYCuaBench-cross-window-verify",
+              "role": "AXWindow",
+              "subrole": "",
+              "is_current_target": false,
+              "bounds": {
+                "height": 372.0,
+                "width": 560.0,
+                "x": 180.0,
+                "y": 585.0
+              }
+            },
+            {
+              "pid": 81602,
+              "window_id": 19922,
+              "title": "AGYCuaBench-cross-window",
+              "role": "AXWindow",
+              "subrole": "",
+              "is_current_target": true,
+              "bounds": {
+                "height": 532.0,
+                "width": 720.0,
+                "x": 120.0,
+                "y": 465.0
+              }
+            }
+          ]
+        }
+      ],
+      "verify_detail": {
+        "cancel_clicks": 0,
+        "confirmation_code": "REL-704",
+        "confirmed": true,
+        "loading_complete": true,
+        "mode": "cross-window",
+        "pid": 81602,
+        "secondary_opened": true,
+        "status_text": "CrossWindowStatus: SecondaryOpened=true | LoadingComplete=true | Confirmed=true",
+        "window_title": "AGYCuaBench-cross-window"
+      }
+    },
+    {
+      "repetition": 1,
+      "task_id": "T7b_1password_browser",
+      "tier": "T7b",
+      "title": "1Password Open-and-Fill to Isolated Loopback Browser Sign-In",
+      "arm": "agy-cua-jev-v3",
+      "model": "gemini-3.8-flash",
+      "thinking_level": "high",
+      "thinking_budget": null,
+      "passed": false,
+      "verify_summary": "open_and_fill=True secret_unchanged=True portal_signed_in=True user='ro_analyst' ticket='OP-AUTOFILL-771' pw_touched=False leaked=False [focus_violations=122 probe_errors=0]",
+      "wall_s": 51.27,
+      "outer_turns": 6,
+      "actions_dispatched": 4,
+      "uncertain_actions_dispatched": 0,
+      "step_median_ms": 711.55,
+      "model_ms_total": 45694.42,
+      "observe_ms_total": 307.54,
+      "jev_ms_total": 857.88,
+      "dispatch_ms_total": 1705.02,
+      "verify_ms_total": 63.39,
+      "screenshots_sent": 0,
+      "gemini_input_tokens": 23085,
+      "gemini_output_tokens": 1594,
+      "jev_tokens": 4178,
+      "cost_usd": 0.01716,
+      "focus_violations": 122,
+      "focus_probe_errors": 0,
+      "focus_samples": 166,
+      "driver_version": "0.60.0",
+      "supports_root_element_token": false,
+      "supports_include_menubar": false,
+      "trace": [
+        {
+          "turn": 1,
+          "tool": "jev_step",
+          "status": "verified",
+          "action_dispatched": true,
+          "uncertain_side_effect": false,
+          "selected_id": "ax.11.open-and-fill",
+          "verified": true,
+          "post_static_texts": [
+            "1Password \u2014 Vault Item Manager (Synthetic Twin)",
+            "Vault:",
+            "Item Title:",
+            "Username:",
+            "Password:",
+            "Category:",
+            "Website:",
+            "1PasswordStatus: Vault=Personal | Title= | User= | Category=Login | Bio=false | Saved=false | OpenAndFill=true"
+          ],
+          "newly_opened_windows": [],
+          "timings_ms": {
+            "observe_ms": 28.8,
+            "provider_ms": 266.01,
+            "dispatch_ms": 599.58,
+            "verify_ms": 19.47,
+            "total_ms": 934.52
+          }
+        },
+        {
+          "turn": 2,
+          "tool": "jev_browser_prepare",
+          "status": "ok",
+          "target_id": "bt-b617fa80-b6e2-4b32-9098-a62b75b9d7bb",
+          "tab_id": "tab-30613bf8-9797-4ad4-a732-0861733005ed",
+          "url": "http://127.0.0.1:61047/login"
+        },
+        {
+          "turn": 3,
+          "tool": "jev_browser_step",
+          "status": "verified",
+          "verification_outcome": "goal_verified",
+          "action_dispatched": true,
+          "uncertain_side_effect": false,
+          "selected_id": "browser.type.p1_0.username",
+          "verified": true,
+          "post_static_texts": [
+            "Synthetic Vault Login Portal",
+            "ro_analyst",
+            "Portal:SignedOut",
+            "Username",
+            "Access Ticket",
+            "Vault Password",
+            "- heading \"Portal:SignedOut\"",
+            "- labeltext",
+            "- statictext \"Username\"",
+            "- textbox \"Username\": ro_analyst [editable=\"plaintext\",focusable=true,focused=true,required=false]",
+            "- generic [editable=\"plaintext\"]",
+            "- statictext \"Access Ticket\"",
+            "- textbox \"Access Ticket\" [editable=\"plaintext\",focusable=true,required=false]",
+            "- statictext \"Vault Password\"",
+            "- button \"Sign In\" [focusable=true]",
+            "- statictext \"ro_analyst\" [editable=\"plaintext\"]",
+            "Sign In"
+          ],
+          "timings_ms": {
+            "observe_ms": 13.38,
+            "provider_ms": 189.42,
+            "dispatch_ms": 177.39,
+            "verify_ms": 16.69,
+            "total_ms": 418.03
+          }
+        },
+        {
+          "turn": 4,
+          "tool": "jev_browser_step",
+          "status": "verified",
+          "verification_outcome": "goal_verified",
+          "action_dispatched": true,
+          "uncertain_side_effect": false,
+          "selected_id": "browser.type.p3_2.access_ticket",
+          "verified": true,
+          "post_static_texts": [
+            "Synthetic Vault Login Portal",
+            "ro_analyst",
+            "OP-AUTOFILL-771",
+            "Portal:SignedOut",
+            "Username",
+            "Access Ticket",
+            "Vault Password",
+            "- heading \"Portal:SignedOut\"",
+            "- labeltext",
+            "- statictext \"Username\"",
+            "- textbox \"Username\": ro_analyst [editable=\"plaintext\",focusable=true,required=false]",
+            "- statictext \"Access Ticket\"",
+            "- generic [editable=\"plaintext\"]",
+            "- textbox \"Access Ticket\": OP-AUTOFILL-771 [editable=\"plaintext\",focusable=true,focused=true,required=false]",
+            "- statictext \"Vault Password\"",
+            "- button \"Sign In\" [focusable=true]",
+            "- statictext \"ro_analyst\" [editable=\"plaintext\"]",
+            "- statictext \"OP-AUTOFILL-771\" [editable=\"plaintext\"]",
+            "Sign In"
+          ],
+          "timings_ms": {
+            "observe_ms": 12.63,
+            "provider_ms": 238.21,
+            "dispatch_ms": 360.16,
+            "verify_ms": 16.4,
+            "total_ms": 650.7
+          }
+        },
+        {
+          "turn": 5,
+          "tool": "jev_browser_step",
+          "status": "verified",
+          "verification_outcome": "goal_verified",
+          "action_dispatched": true,
+          "uncertain_side_effect": false,
+          "selected_id": "browser.click.p5_11.sign_in",
+          "verified": true,
+          "post_static_texts": [
+            "Synthetic Vault Login Portal",
+            "ro_analyst",
+            "OP-AUTOFILL-771",
+            "SignedIn:ro_analyst:OP-AUTOFILL-771",
+            "Username",
+            "Access Ticket",
+            "Vault Password",
+            "- heading \"SignedIn:ro_analyst:OP-AUTOFILL-771\"",
+            "- labeltext",
+            "- statictext \"Username\"",
+            "- textbox \"Username\": ro_analyst [editable=\"plaintext\",focusable=true,required=false]",
+            "- statictext \"Access Ticket\"",
+            "- generic [editable=\"plaintext\"]",
+            "- textbox \"Access Ticket\": OP-AUTOFILL-771 [editable=\"plaintext\",focusable=true,required=false]",
+            "- statictext \"Vault Password\"",
+            "- button \"Sign In\" [focusable=true,focused=true]",
+            "- statictext \"ro_analyst\" [editable=\"plaintext\"]",
+            "- statictext \"OP-AUTOFILL-771\" [editable=\"plaintext\"]",
+            "Sign In"
+          ],
+          "timings_ms": {
+            "observe_ms": 10.59,
+            "provider_ms": 164.24,
+            "dispatch_ms": 567.89,
+            "verify_ms": 10.83,
+            "total_ms": 772.39
+          }
+        }
+      ],
+      "verify_detail": {
+        "vault": {
+          "biometrics": false,
+          "category": "Login",
+          "mode": "1password-twin",
+          "open_and_fill_clicked": true,
+          "pid": 82877,
+          "saved": false,
+          "search_query": "",
+          "secret_unchanged": true,
+          "status_text": "1PasswordStatus: Vault=Personal | Title= | User= | Category=Login | Bio=false | Saved=false | OpenAndFill=true",
+          "title": "",
+          "username": "",
+          "vault": "Personal",
+          "website_url": "http://127.0.0.1:61047/login",
+          "window_title": "AGYCuaBench-1password-twin"
+        },
+        "portal": {
+          "signed_in": true,
+          "username": "ro_analyst",
+          "ticket": "OP-AUTOFILL-771",
+          "password_touched": false,
+          "requests": 2
+        },
+        "canary_leaked": false
+      }
+    },
+    {
+      "repetition": 1,
+      "task_id": "T8_dense_hierarchy_drill",
+      "tier": "T8",
+      "title": "1,500-Node 4-Region Enterprise Workspace (Skeleton + Subtree Drill + Multi-Control Commit)",
+      "arm": "agy-cua-jev-v3",
+      "model": "gemini-3.8-flash",
+      "thinking_level": "high",
+      "thinking_budget": null,
+      "passed": true,
+      "verify_summary": "cluster='Production Cluster' ticket='INC-4821' page=True sev='P1' applied=True decoys=0",
+      "wall_s": 47.86,
+      "outer_turns": 5,
+      "actions_dispatched": 5,
+      "uncertain_actions_dispatched": 0,
+      "step_median_ms": 1197.95,
+      "model_ms_total": 40753.26,
+      "observe_ms_total": 1806.79,
+      "jev_ms_total": 1124.12,
+      "dispatch_ms_total": 2540.57,
+      "verify_ms_total": 1203.61,
+      "screenshots_sent": 0,
+      "gemini_input_tokens": 34785,
+      "gemini_output_tokens": 3268,
+      "jev_tokens": 10525,
+      "cost_usd": 0.0293,
+      "focus_violations": 0,
+      "focus_probe_errors": 0,
+      "focus_samples": 173,
+      "driver_version": "0.60.0",
+      "supports_root_element_token": false,
+      "supports_include_menubar": false,
+      "trace": [
+        {
+          "turn": 1,
+          "tool": "jev_observe",
+          "status": "ok",
+          "snapshot_id": "s00000071",
+          "query_status": "unfiltered_complete",
+          "visual_fallback_recommended": false,
+          "discovered_windows": [
+            {
+              "pid": 65427,
+              "window_id": 20246,
+              "title": "AGYCuaBench-dense-hierarchy",
+              "role": "AXWindow",
+              "subrole": "",
+              "is_current_target": true,
+              "bounds": {
+                "height": 652.0,
+                "width": 920.0,
+                "x": 100.0,
+                "y": 375.0
+              }
+            }
+          ]
+        },
+        {
+          "turn": 2,
+          "tool": "jev_observe",
+          "status": "ok",
+          "snapshot_id": "s00000072",
+          "query_status": "unfiltered_complete",
+          "visual_fallback_recommended": false,
+          "discovered_windows": [
+            {
+              "pid": 65427,
+              "window_id": 20246,
+              "title": "AGYCuaBench-dense-hierarchy",
+              "role": "AXWindow",
+              "subrole": "",
+              "is_current_target": true,
+              "bounds": {
+                "height": 652.0,
+                "width": 920.0,
+                "x": 100.0,
+                "y": 375.0
+              }
+            }
+          ]
+        },
+        {
+          "turn": 3,
+          "tool": "jev_observe",
+          "status": "ok",
+          "snapshot_id": "s00000073",
+          "query_status": "unfiltered_complete",
+          "visual_fallback_recommended": false,
+          "discovered_windows": [
+            {
+              "pid": 65427,
+              "window_id": 20246,
+              "title": "AGYCuaBench-dense-hierarchy",
+              "role": "AXWindow",
+              "subrole": "",
+              "is_current_target": true,
+              "bounds": {
+                "height": 652.0,
+                "width": 920.0,
+                "x": 100.0,
+                "y": 375.0
+              }
+            }
+          ]
+        },
+        {
+          "turn": 4,
+          "tool": "jev_batch",
+          "status": "verified",
+          "completed_count": 5,
+          "completed_steps": [
+            {
+              "step_index": 0,
+              "goal": "Click Production Cluster",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000074",
+              "post_snapshot_id": "s00000075",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Enterprise Incident Operations Workspace \u2014 Configure Production Cluster routing and apply policy",
+                "DenseHierarchyStatus: Cluster=Overview | Ticket= | PageOnCall=false | Severity=P2 | Applied=false | DecoyClicks=0"
+              ],
+              "post_static_texts": [
+                "Enterprise Incident Operations Workspace \u2014 Configure Production Cluster routing and apply policy",
+                "DenseHierarchyStatus: Cluster=Production Cluster | Ticket= | PageOnCall=false | Severity=P2 | Applied=false | DecoyClicks=0"
+              ],
+              "selected_id": "ax.2.production-cluster",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 65427,
+                "window_id": 20246,
+                "element_token": "s00000074:2",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": false,
+              "timings_ms": {
+                "observe_ms": 225.03,
+                "provider_ms": 188.72,
+                "dispatch_ms": 579.89,
+                "verify_ms": 266.95,
+                "total_ms": 1282.5
+              }
+            },
+            {
+              "step_index": 1,
+              "goal": "Set Incident Ticket ID to INC-4821",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000076",
+              "post_snapshot_id": "s00000077",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Enterprise Incident Operations Workspace \u2014 Configure Production Cluster routing and apply policy",
+                "DenseHierarchyStatus: Cluster=Production Cluster | Ticket= | PageOnCall=false | Severity=P2 | Applied=false | DecoyClicks=0",
+                "InspectorHeader: Incident Routing Policy",
+                "Incident Ticket ID:"
+              ],
+              "post_static_texts": [
+                "Enterprise Incident Operations Workspace \u2014 Configure Production Cluster routing and apply policy",
+                "DenseHierarchyStatus: Cluster=Production Cluster | Ticket=INC-4821 | PageOnCall=false | Severity=P2 | Applied=false | DecoyClicks=0",
+                "InspectorHeader: Incident Routing Policy",
+                "Incident Ticket ID:"
+              ],
+              "selected_id": "sv.365.incident-ticket-id",
+              "dispatched_tool": "set_value",
+              "dispatched_arguments": {
+                "pid": 65427,
+                "window_id": 20246,
+                "element_token": "s00000076:365",
+                "value": "<redacted>"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": false,
+              "timings_ms": {
+                "observe_ms": 235.62,
+                "provider_ms": 199.41,
+                "dispatch_ms": 251.42,
+                "verify_ms": 225.05,
+                "total_ms": 931.94
+              }
+            },
+            {
+              "step_index": 2,
+              "goal": "Check Page On-Call Engineer",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": false,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000077",
+              "post_snapshot_id": "s00000078",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Enterprise Incident Operations Workspace \u2014 Configure Production Cluster routing and apply policy",
+                "DenseHierarchyStatus: Cluster=Production Cluster | Ticket=INC-4821 | PageOnCall=false | Severity=P2 | Applied=false | DecoyClicks=0",
+                "InspectorHeader: Incident Routing Policy",
+                "Incident Ticket ID:"
+              ],
+              "post_static_texts": [
+                "Enterprise Incident Operations Workspace \u2014 Configure Production Cluster routing and apply policy",
+                "DenseHierarchyStatus: Cluster=Production Cluster | Ticket=INC-4821 | PageOnCall=true | Severity=P2 | Applied=false | DecoyClicks=0",
+                "InspectorHeader: Incident Routing Policy",
+                "Incident Ticket ID:"
+              ],
+              "selected_id": "chk.366.page-on-call-engineer",
+              "dispatched_tool": "check",
+              "dispatched_arguments": {
+                "pid": 65427,
+                "window_id": 20246,
+                "element_token": "s00000077:366",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 0.48,
+              "reranked": true,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 378.02,
+                "dispatch_ms": 558.63,
+                "verify_ms": 241.03,
+                "total_ms": 1197.95
+              }
+            },
+            {
+              "step_index": 3,
+              "goal": "Select Severity P1",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s00000078",
+              "post_snapshot_id": "s00000079",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Enterprise Incident Operations Workspace \u2014 Configure Production Cluster routing and apply policy",
+                "DenseHierarchyStatus: Cluster=Production Cluster | Ticket=INC-4821 | PageOnCall=true | Severity=P2 | Applied=false | DecoyClicks=0",
+                "InspectorHeader: Incident Routing Policy",
+                "Incident Ticket ID:"
+              ],
+              "post_static_texts": [
+                "Enterprise Incident Operations Workspace \u2014 Configure Production Cluster routing and apply policy",
+                "DenseHierarchyStatus: Cluster=Production Cluster | Ticket=INC-4821 | PageOnCall=true | Severity=P1 | Applied=false | DecoyClicks=0",
+                "InspectorHeader: Incident Routing Policy",
+                "Incident Ticket ID:"
+              ],
+              "selected_id": "ax.368.severity-p1",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 65427,
+                "window_id": 20246,
+                "element_token": "s00000078:368",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": true,
+              "timings_ms": {
+                "observe_ms": 0.0,
+                "provider_ms": 174.39,
+                "dispatch_ms": 571.93,
+                "verify_ms": 243.36,
+                "total_ms": 1008.84
+              }
+            },
+            {
+              "step_index": 4,
+              "goal": "Click Apply Routing Policy",
+              "mode": "jev",
+              "status": "verified",
+              "verification_outcome": "goal_verified",
+              "delivery": "sent",
+              "retry": "not_needed",
+              "verified": true,
+              "action_dispatched": true,
+              "already_in_target_state": null,
+              "auto_drilled": false,
+              "uncertain_side_effect": false,
+              "reason": "expected_postcondition_verified",
+              "pre_snapshot_id": "s0000007a",
+              "post_snapshot_id": "s0000007b",
+              "pre_ui_tree_revision": null,
+              "post_ui_tree_revision": null,
+              "pre_static_texts": [
+                "Enterprise Incident Operations Workspace \u2014 Configure Production Cluster routing and apply policy",
+                "DenseHierarchyStatus: Cluster=Production Cluster | Ticket=INC-4821 | PageOnCall=true | Severity=P1 | Applied=false | DecoyClicks=0"
+              ],
+              "post_static_texts": [
+                "Enterprise Incident Operations Workspace \u2014 Configure Production Cluster routing and apply policy",
+                "DenseHierarchyStatus: Cluster=Production Cluster | Ticket=INC-4821 | PageOnCall=true | Severity=P1 | Applied=true | DecoyClicks=0"
+              ],
+              "selected_id": "ax.371.apply-routing-policy",
+              "dispatched_tool": "click",
+              "dispatched_arguments": {
+                "pid": 65427,
+                "window_id": 20246,
+                "element_token": "s0000007a:371",
+                "delivery_mode": "background"
+              },
+              "requested_model": "jev-1.13.0",
+              "returned_model": "jev-1.13.0",
+              "sdk_identity": "agy-cua-jev-stdlib/0.4.0",
+              "confidence": 1.0,
+              "reranked": false,
+              "verify_polls": 1,
+              "observation_chained": false,
+              "timings_ms": {
+                "observe_ms": 226.43,
+                "provider_ms": 183.58,
+                "dispatch_ms": 578.7,
+                "verify_ms": 227.22,
+                "total_ms": 1236.56
+              }
+            }
+          ],
+          "selected_ids": [
+            "ax.2.production-cluster",
+            "sv.365.incident-ticket-id",
+            "chk.366.page-on-call-engineer",
+            "ax.368.severity-p1",
+            "ax.371.apply-routing-policy"
+          ],
+          "post_static_texts": [
+            "Enterprise Incident Operations Workspace \u2014 Configure Production Cluster routing and apply policy",
+            "DenseHierarchyStatus: Cluster=Production Cluster | Ticket=INC-4821 | PageOnCall=true | Severity=P1 | Applied=true | DecoyClicks=0"
+          ],
+          "timings_ms": {
+            "observe_ms": 687.08,
+            "provider_ms": 1124.12,
+            "dispatch_ms": 2540.57,
+            "verify_ms": 1203.61,
+            "total_ms": 5660.8
+          }
+        }
+      ],
+      "verify_detail": {
+        "applied": true,
+        "applied_snapshot": {
+          "cluster": "Production Cluster",
+          "decoy_clicks": 0,
+          "page_oncall": true,
+          "severity": "P1",
+          "ticket_id": "INC-4821"
+        },
+        "cluster": "Production Cluster",
+        "decoy_clicks": 0,
+        "mode": "dense-hierarchy",
+        "page_oncall": true,
+        "pid": 65427,
+        "severity": "P1",
+        "status_text": "DenseHierarchyStatus: Cluster=Production Cluster | Ticket=INC-4821 | PageOnCall=true | Severity=P1 | Applied=true | DecoyClicks=0",
+        "ticket_id": "INC-4821",
+        "window_title": "AGYCuaBench-dense-hierarchy"
+      }
+    }
+  ]
+}
